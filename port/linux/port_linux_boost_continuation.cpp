@@ -1,0 +1,134 @@
+#include <boost/context/continuation.hpp>
+#include <boost/context/preallocated.hpp>
+#include <boost/context/stack_context.hpp>
+#include <boost/context/protected_fixedsize_stack.hpp>  // allocator for callcc
+#include <atomic>
+#include <csignal>
+#include <sys/time.h>
+#include <cstdint>
+#include <cstring>
+
+extern "C" {
+#include <port.h>
+}
+
+// ---- kernel hooks (weak stubs; kernel provides real ones) ----
+extern "C" void rtk_on_tick() __attribute__((weak));
+extern "C" void rtk_on_tick() {}
+extern "C" void rtk_request_reschedule() __attribute__((weak));
+extern "C" void rtk_request_reschedule() {}
+
+static std::atomic<uint32_t> g_tick{0};
+uint32_t port_tick_now() { return g_tick.load(std::memory_order_relaxed); }
+
+void port_isr_enter() {}
+void port_isr_exit(int) {}
+void port_preempt_disable() {}
+void port_preempt_enable() {}
+void port_irq_disable() {}
+void port_irq_enable() {}
+size_t port_stack_align() { return 16; }
+
+struct port_context
+{
+   boost::context::continuation cont;  // Thread continuation (parked when not running)
+   boost::context::continuation sched; // Scheduler continuation to yield back to
+   void*        stack_top;
+   size_t       stack_size;
+   port_entry_t entry;
+   void*        arg;
+   bool         started;
+};
+
+// "Current" context for this OS thread (our sim is single core, single OS thread)
+static thread_local port_context* tls_current = nullptr;
+
+size_t port_context_size(void) { return sizeof(port_context); }
+
+void port_context_init(port_context_t* context, void* stack_base, size_t stack_size, port_entry_t entry, void* arg)
+{
+   context->stack_top  = static_cast<uint8_t*>(stack_base) + stack_size;
+   context->stack_size = stack_size;
+   context->entry      = entry;
+   context->arg        = arg;
+   context->started    = false;
+
+   // Allocate a stack internally via Boost allocator (ignores stack_base for now).
+   // This is fine for Linux simulation; we'll switch to preallocated later.
+   boost::context::protected_fixedsize_stack salloc{context->stack_size};
+   context->cont = boost::context::callcc([context](boost::context::continuation&& sched_in) mutable -> boost::context::continuation
+      {
+         // First entry: park immediately by giving control back to scheduler.
+         context->sched = std::move(sched_in);
+
+         // When resumed by scheduler, run thread entry.
+         for (;;) {
+               tls_current = context;                 // we're the running thread
+               context->entry(context->arg);              // if it returns, thread is "done"
+               // Hand control back to scheduler so it can clean up/decide next.
+               tls_current = nullptr;
+               context->sched = context->sched.resume();  // yield back to scheduler
+         }
+      }
+   );
+}
+
+void port_switch(port_context_t** /*from (unused)*/, port_context_t* to)
+{
+   tls_current = to;
+   // Resume target. When the thread yields, control returns here.
+   to->cont = to->cont.resume();
+   // After returning, no thread is "current" (we're back in scheduler).
+   tls_current = nullptr;
+}
+
+void port_start_first(port_context_t* first)
+{
+   tls_current = first;
+   first->started = true;
+   // Enter first thread. In a real kernel, scheduler loop keeps running after returns.
+   first->cont = first->cont.resume();
+   tls_current = nullptr;
+   __builtin_unreachable();
+}
+
+void port_yield()
+{
+   // In continuation model, the thread must explicitly resume the scheduler.
+   if (tls_current) {
+      tls_current->sched = tls_current->sched.resume();
+   } else {
+      // If somehow called outside a thread, just request a reschedule.
+      rtk_request_reschedule();
+   }
+}
+
+// Tick source: SIGALRM -> bump tick & call kernel hook. No switching here.
+static void tick_handler(int)
+{
+   g_tick.fetch_add(1, std::memory_order_relaxed);
+   rtk_on_tick();
+}
+
+void port_init(uint32_t tick_hz)
+{
+   if (!tick_hz) tick_hz = 1000;
+
+   static uint8_t altstack[8 * 1024];
+   stack_t ss{};
+   ss.ss_sp = altstack; ss.ss_size = sizeof altstack; ss.ss_flags = 0;
+   sigaltstack(&ss, nullptr);
+
+   struct sigaction sa{};
+   sa.sa_handler = tick_handler;
+   sigemptyset(&sa.sa_mask);
+   sa.sa_flags = SA_ONSTACK | SA_RESTART;
+   sigaction(SIGALRM, &sa, nullptr);
+
+   itimerval it{};
+   const int usec = 1'000'000 / (int)tick_hz;
+   it.it_interval.tv_sec  = usec / 1'000'000;
+   it.it_interval.tv_usec = usec % 1'000'000;
+   it.it_value            = it.it_interval;
+   setitimer(ITIMER_REAL, &it, nullptr);
+}
