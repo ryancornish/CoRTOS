@@ -1,5 +1,3 @@
 add_executable(two_thread_demo two_thread_demo.cpp)
 target_link_libraries(two_thread_demo PRIVATE cornishrtk_port_impl)
 target_include_directories(two_thread_demo PRIVATE ${CMAKE_SOURCE_DIR}/include)
-
-target_compile_features(two_thread_demo PUBLIC cxx_std_23)

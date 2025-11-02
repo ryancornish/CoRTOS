@@ -1,5 +1,5 @@
+#include <iostream>
 #include <port.h>
-#include <print>
 #include <cstdlib>
 #include <atomic>
 
@@ -36,11 +36,10 @@ static void thread_fn(void* arg)
    const char* name = static_cast<const char*>(arg);
    while (true)
    {
-      // pretend to work a bit
-      for (volatile int i = 0; i < 300000; ++i) {}
-      std::println("I am ")
-      std::puts(name);
-      port_yield(); // ask scheduler to switch
+      // Pretend to work a bit
+      for (int i = 0; i < 300000; ++i) { (void)0; }
+      std::cout << "I am " << name << std::endl;
+      port_yield(); // Ask scheduler to switch
    }
 }
 
@@ -69,7 +68,7 @@ int main()
    {
       if (need_reschedule.exchange(false)) pick_and_switch();
       // a tiny pause avoids pegging the host CPU in this sim
-      for (volatile int i = 0; i < 10000; ++i) {}
+      for (int i = 0; i < 10000; ++i) { (void)0; }
    }
 
    free_port_context(t1c);

@@ -114,21 +114,24 @@ void port_init(uint32_t tick_hz)
 {
    if (!tick_hz) tick_hz = 1000;
 
-   static uint8_t altstack[8 * 1024];
-   stack_t ss{};
-   ss.ss_sp = altstack; ss.ss_size = sizeof altstack; ss.ss_flags = 0;
-   sigaltstack(&ss, nullptr);
+   static std::array<uint8_t, 8 * 1024> altstack;
+   stack_t signal_stack_object = {
+      .ss_sp = altstack.data(),
+      .ss_flags = 0,
+      .ss_size = altstack.size(),
+   };
+   sigaltstack(&signal_stack_object, nullptr);
 
-   struct sigaction sa{};
-   sa.sa_handler = tick_handler;
-   sigemptyset(&sa.sa_mask);
-   sa.sa_flags = SA_ONSTACK | SA_RESTART;
-   sigaction(SIGALRM, &sa, nullptr);
+   struct sigaction sig_action_object{};
+   sig_action_object.sa_handler = tick_handler;
+   sigemptyset(&sig_action_object.sa_mask);
+   sig_action_object.sa_flags = SA_ONSTACK | SA_RESTART;
+   sigaction(SIGALRM, &sig_action_object, nullptr);
 
-   itimerval it{};
-   const int usec = 1'000'000 / (int)tick_hz;
-   it.it_interval.tv_sec  = usec / 1'000'000;
-   it.it_interval.tv_usec = usec % 1'000'000;
-   it.it_value            = it.it_interval;
-   setitimer(ITIMER_REAL, &it, nullptr);
+   itimerval itimer{};
+   int const  usec = 1'000'000 / tick_hz;
+   itimer.it_interval.tv_sec  = usec / 1'000'000;
+   itimer.it_interval.tv_usec = usec % 1'000'000;
+   itimer.it_value            = itimer.it_interval;
+   setitimer(ITIMER_REAL, &itimer, nullptr);
 }
