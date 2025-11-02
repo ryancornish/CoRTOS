@@ -20,7 +20,8 @@ void port_context_init(port_context_t* ctx,
                        void* stack_base, size_t stack_size,
                        port_entry_t entry, void* arg);
 
-void port_start_first(port_context_t* first) /* never returns */;
+// Can't apply '__attribute__((noreturn))' because Boost.Context port actually does return from this
+void port_start_first(port_context_t* first);
 
 void port_yield(void);                        /* thread asks to reschedule */
 void port_switch(port_context_t** from, port_context_t* to);

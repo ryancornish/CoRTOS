@@ -89,7 +89,8 @@ void port_start_first(port_context_t* first)
    // Enter first thread. In a real kernel, scheduler loop keeps running after returns.
    first->cont = first->cont.resume();
    tls_current = nullptr;
-   __builtin_unreachable();
+   // Normal MCU's do not return from port_start_first... but Boost does
+   //__builtin_unreachable();
 }
 
 void port_yield()
@@ -110,6 +111,9 @@ static void tick_handler(int)
    rtk_on_tick();
 }
 
+// Sets up a SIGALRM timer firing every 'tick_hz' ms.
+// Installs signal handler 'tick_handler()' to increment global tick counter and call rtk_on_tick().
+// Essentially simulating a 'system tick interrupt' on linux.
 void port_init(uint32_t tick_hz)
 {
    if (!tick_hz) tick_hz = 1000;
