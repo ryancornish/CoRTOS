@@ -60,14 +60,16 @@ void port_context_init(port_context_t* context, void* stack_base, size_t stack_s
       {
          // First entry: park immediately by giving control back to scheduler.
          context->sched = std::move(sched_in);
+         context->sched = context->sched.resume();
 
          // When resumed by scheduler, run thread entry.
-         for (;;) {
-               tls_current = context;                 // we're the running thread
-               context->entry(context->arg);              // if it returns, thread is "done"
-               // Hand control back to scheduler so it can clean up/decide next.
-               tls_current = nullptr;
-               context->sched = context->sched.resume();  // yield back to scheduler
+         while (true)
+         {
+            tls_current = context;                 // we're the running thread
+            context->entry(context->arg);              // if it returns, thread is "done"
+            // Hand control back to scheduler so it can clean up/decide next.
+            tls_current = nullptr;
+            context->sched = context->sched.resume();  // yield back to scheduler
          }
       }
    );

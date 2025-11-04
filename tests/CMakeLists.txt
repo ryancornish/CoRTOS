@@ -1,3 +1,7 @@
 add_executable(two_thread_demo two_thread_demo.cpp)
 target_link_libraries(two_thread_demo PRIVATE cornishrtk_port_impl)
 target_include_directories(two_thread_demo PRIVATE ${CMAKE_SOURCE_DIR}/include)
+
+add_executable(rtk_two_thread_demo rtk_two_thread_demo.cpp)
+target_link_libraries(rtk_two_thread_demo PRIVATE cornishrtk_kernel cornishrtk_port_impl)
+target_include_directories(rtk_two_thread_demo PRIVATE ${CMAKE_SOURCE_DIR}/include)
