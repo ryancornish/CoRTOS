@@ -20,8 +20,6 @@ namespace rtk
 {
    static void DEBUG_DUMP_READY_QUEUE(const char* where);
 
-   // Could try make a std::atomic<tick> work? Will have to investigate
-   using AtomicTick = std::atomic<uint32_t>;
    static constexpr uint32_t IDLE_PRIORITY = MAX_PRIORITIES - 1;
 
    struct TaskControlBlock
@@ -42,6 +40,21 @@ namespace rtk
       void*  arg{nullptr};
    };
 
+   struct AtomicDeadline
+   {
+      std::atomic_uint32_t deadline{UINT32_MAX};
+
+      constexpr void store(Tick tick, std::memory_order mo = std::memory_order_relaxed) noexcept
+      {
+         deadline.store(tick.value(), mo);
+      }
+      constexpr Tick load(std::memory_order mo = std::memory_order_relaxed) noexcept
+      {
+         return Tick(deadline.load(mo));
+      }
+      constexpr void disarm() noexcept { deadline.store(UINT32_MAX, std::memory_order_relaxed); }
+   };
+
    struct InternalSchedulerState
    {
       std::atomic<bool> preempt_disabled{false};
@@ -52,8 +65,8 @@ namespace rtk
       std::array<std::deque<TaskControlBlock*>, MAX_PRIORITIES> ready{}; // TODO: replace deque with something that does not use heap
       std::bitset<MAX_PRIORITIES> ready_bitmap;
       std::deque<TaskControlBlock*> sleep_queue{}; // TODO: replace with wheel/heap later
-      AtomicTick next_wake_tick{UINT32_MAX}; // When next sleeper must be woken
-      AtomicTick next_slice_tick{UINT32_MAX}; // When the next RR rotation is due
+      AtomicDeadline next_wake_tick; // When next sleeper must be woken
+      AtomicDeadline next_slice_tick; // When the next RR rotation is due
 
       void reset() // Should I just do a self assignment from default ctor instead?
       {
@@ -61,8 +74,8 @@ namespace rtk
          need_reschedule.store(false);
          current_task = nullptr;
          idle_thread = nullptr;
-         next_wake_tick.store(UINT32_MAX);
-         next_slice_tick.store(UINT32_MAX);
+         next_wake_tick.disarm();
+         next_slice_tick.disarm();
       }
    };
    static /*constinit*/ InternalSchedulerState iss;
@@ -111,21 +124,21 @@ namespace rtk
       auto const now = Scheduler::tick_now();
 
       // Wake sleepers
-      uint32_t next_due = UINT32_MAX;
+      Tick next_due(UINT32_MAX);
       for (auto it = iss.sleep_queue.begin(); it != iss.sleep_queue.end(); ) {
          TaskControlBlock* tcb = *it;
          if (now.has_reached(tcb->wake_tick)) {
             it = iss.sleep_queue.erase(it);
             set_ready(tcb);
          } else {
-            next_due = std::min(next_due, tcb->wake_tick.value());
+            next_due = std::min(next_due, tcb->wake_tick);
             ++it;
          }
       }
-      iss.next_wake_tick.store(next_due, std::memory_order_relaxed);
+      iss.next_wake_tick.store(next_due);
 
       // Round robin rotation
-      if (now.has_reached(iss.next_slice_tick.load(std::memory_order_relaxed)) &&
+      if (now.has_reached(iss.next_slice_tick.load()) &&
           iss.current_task &&
           iss.current_task->state == TaskControlBlock::State::Running &&
          !iss.ready[iss.current_task->priority].empty()) // Don't requeue for singular threads at a priority level
@@ -136,7 +149,7 @@ namespace rtk
       // Choose next runnable
       auto* next_task = pick_highest_ready();
       if (!next_task) {
-         iss.next_slice_tick.store(UINT32_MAX, std::memory_order_relaxed);
+         iss.next_slice_tick.disarm();
          return; // Shhhh everyone is sleeping!
       }
 
@@ -149,10 +162,10 @@ namespace rtk
 
       remove_ready_head(next_task->priority);
       if (next_task->priority == IDLE_PRIORITY) {
-         iss.next_slice_tick.store(UINT32_MAX, std::memory_order_relaxed);
+         iss.next_slice_tick.disarm();
       } else {
          // Serve a fresh slice
-         iss.next_slice_tick.store(now.value() + TIME_SLICE, std::memory_order_relaxed);
+         iss.next_slice_tick.store(now + TIME_SLICE);
       }
       context_switch_to(next_task);
    }
@@ -177,7 +190,7 @@ namespace rtk
       DEBUG_DUMP_READY_QUEUE("start() head picked/removed");
       iss.current_task = first;
       iss.current_task->state = TaskControlBlock::State::Running;
-      iss.next_slice_tick.store(Scheduler::tick_now().value() + TIME_SLICE, std::memory_order_relaxed);
+      iss.next_slice_tick.store(Scheduler::tick_now() + TIME_SLICE);
 
       port_start_first(iss.current_task->context);
 
@@ -214,9 +227,9 @@ namespace rtk
       iss.current_task->wake_tick = tick_now() + (ticks);
       iss.sleep_queue.push_back(iss.current_task);
 
-      if (iss.current_task->wake_tick.is_before(iss.next_wake_tick.load(std::memory_order_relaxed)))
+      if (iss.current_task->wake_tick.is_before(iss.next_wake_tick.load()))
       {
-         iss.next_wake_tick.store(iss.current_task->wake_tick.value(), std::memory_order_relaxed);
+         iss.next_wake_tick.store(iss.current_task->wake_tick);
       }
 
       rtk_request_reschedule();
@@ -276,8 +289,8 @@ namespace rtk
    {
       auto const now = Scheduler::tick_now();
       // Request reschedule if a wakeup is due
-      if (now.has_reached(iss.next_wake_tick.load(std::memory_order_relaxed)) ||
-          now.has_reached(iss.next_slice_tick.load(std::memory_order_relaxed)))
+      if (now.has_reached(iss.next_wake_tick.load()) ||
+          now.has_reached(iss.next_slice_tick.load()))
       {
          rtk_request_reschedule();
       }
