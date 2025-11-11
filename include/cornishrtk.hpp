@@ -98,7 +98,7 @@ namespace rtk
       }
 
       // ---- Arithmetic ----
-      // Future deadline: wraps naturally
+      // Future deadline wraps naturally
       friend constexpr Tick operator+(Tick tick, Delta delta) noexcept
       {
          return Tick(tick.t + delta);
