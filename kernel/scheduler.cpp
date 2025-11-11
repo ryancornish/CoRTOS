@@ -14,8 +14,18 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
-#include <time.h>
+#include <ctime>
 #include <limits>
+
+// I hate macros but oh well
+#define DEBUG_PRINT_ENABLE 1
+#if DEBUG_PRINT_ENABLE
+# define DEBUG_PRINT(fmt, ...) \
+     std::printf("[tick=%08u] " fmt "\n", port_tick_now(), ##__VA_ARGS__)
+#else
+# define DEBUG_PRINT(...) ((void)0)
+#endif
+
 
 namespace rtk
 {
@@ -279,6 +289,7 @@ namespace rtk
 
    static void set_task_ready(TaskControlBlock* tcb)
    {
+      DEBUG_PRINT("enqueue tcb=%p prio=%u", (void*)tcb, tcb->priority);
       tcb->state = TaskControlBlock::State::Ready;
       iss.ready_matrix.enqueue_task(tcb);
       // If the new task is higher priority than the running one, we need to reschedule.
@@ -295,17 +306,20 @@ namespace rtk
       if (previous_task) previous_task->state = TaskControlBlock::State::Ready;
       iss.current_task->state = TaskControlBlock::State::Running;
 
-      port_set_thread_pointer(next);
+      DEBUG_PRINT("context_switch_to(): prev=%p -> next=%p", (void*)iss.current_task, (void*)next);
 
+      port_set_thread_pointer(next);
       port_context_t* previous_context = previous_task ? previous_task->context() : nullptr;
       port_switch(&previous_context, iss.current_task->context());
+
+      DEBUG_PRINT("context_switch_to(): returned to scheduler");
    }
 
    static void schedule()
    {
       if (iss.preempt_disabled.load(std::memory_order_acquire)) return;
       if (!iss.need_reschedule.exchange(false)) return;
-      DEBUG_DUMP_READY_QUEUE("schedule() need_reschedule -> true");
+      DEBUG_DUMP_READY_QUEUE("schedule() snapshot");
 
       auto const now = Scheduler::tick_now();
 
@@ -314,6 +328,7 @@ namespace rtk
          auto* top_tcb = iss.sleepers.top();
          if (!top_tcb || now.is_before(top_tcb->wake_tick)) break; // Not due yet
          (void)iss.sleepers.pop_min();
+         DEBUG_PRINT("wake       tcb=%p at tick=%u", (void*)top_tcb, now.value());
          set_task_ready(top_tcb);
       }
 
@@ -330,6 +345,7 @@ namespace rtk
           iss.current_task->state == TaskControlBlock::State::Running &&
           iss.ready_matrix.has_peer(iss.current_task->priority)) // Don't requeue for singular threads at a priority level
       {
+         DEBUG_PRINT("timeslice  rotate tcb=%p", (void*)iss.current_task);
          set_task_ready(iss.current_task);
       }
 
@@ -337,6 +353,7 @@ namespace rtk
       auto* next_task = iss.ready_matrix.pop_highest_task();
       if (!next_task) {
          iss.next_slice_tick.disarm();
+         DEBUG_PRINT("idle");
          return; // Shhhh everyone is sleeping!
       }
 
@@ -353,6 +370,7 @@ namespace rtk
          // Serve a fresh slice
          iss.next_slice_tick.store(now + TIME_SLICE);
       }
+      DEBUG_PRINT("pick       tcb=%p prio=%u", (void*)next_task, next_task->priority);
       context_switch_to(next_task);
    }
 
@@ -392,6 +410,7 @@ namespace rtk
 
    void Scheduler::yield()
    {
+      DEBUG_PRINT("yield by   tcb=%p", (void*)iss.current_task);
       if (iss.current_task && iss.current_task->state == TaskControlBlock::State::Running) {
          set_task_ready(iss.current_task); // put current at tail
       }
@@ -406,6 +425,7 @@ namespace rtk
 
    void Scheduler::sleep_for(uint32_t ticks)
    {
+      DEBUG_PRINT("sleep      tcb=%p until=%u (+%u)", (void*)iss.current_task, iss.current_task->wake_tick.value(), ticks);
       if (ticks == 0) { yield(); return; }
       // Put current to sleep
       assert(iss.current_task && "no current thread");
@@ -498,6 +518,7 @@ namespace rtk
 
    extern "C" void rtk_on_tick(void)
    {
+      DEBUG_PRINT("rtk_on_tick()");
       auto const now = Scheduler::tick_now();
       // Request reschedule if a wakeup is due
       if (now.has_reached(iss.next_wake_tick.load()) ||
@@ -509,23 +530,22 @@ namespace rtk
 
    extern "C" void rtk_request_reschedule(void)
    {
+      DEBUG_PRINT("rtk_request_reschedule() -> iss.need_reschedule=true");
       iss.need_reschedule.store(true, std::memory_order_relaxed);
       // Under simulation we should return to the scheduler loop in user context
       // On bare metal, we should pend a software interrupt and return from this ISR
    }
 
 
-   static void DEBUG_DUMP_READY_QUEUE(const char* where)
+   static void DEBUG_DUMP_READY_QUEUE(const char*)
    {
-   #if defined(RTK_SIMULATION)
-      std::printf("[%u %s] bitmap: %s", port_tick_now(), where, iss.ready_matrix.bitmap_view().to_string().c_str());
+      std::printf("[tick=%08u] bitmap: %s", port_tick_now(), iss.ready_matrix.bitmap_view().to_string().c_str());
       for (unsigned p = 0; p < MAX_PRIORITIES; ++p) {
          if (!iss.ready_matrix.empty_at(p)) {
             std::printf(" p%u(%zu)", p, iss.ready_matrix.size_at(p));
          }
       }
       std::printf(" current_task=%p\n", (void*)iss.current_task);
-   #endif
    }
 
 } // namespace rtk

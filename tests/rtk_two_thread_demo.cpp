@@ -12,15 +12,13 @@ static void worker(void* arg)
    while (true)
    {
       std::cout << static_cast<char const*>(arg) << "\n";
-      // Sleep ~250 ms at 100 hz tick
-      rtk::Scheduler::sleep_for(250);
+      rtk::Scheduler::sleep_for(20); // Tune for testing
    }
 }
 
 int main()
 {
-   // 1 kHz system tick for the sim; on MCU you’ll wire to the real timer
-   rtk::Scheduler::init(1000);
+   rtk::Scheduler::init(10); // Tune for testing
 
    // Equal priority → round-robin; lower number means higher priority in our model
    rtk::Thread t1(worker, (void*)"T1 tick", t1_stack.data(), t1_stack.size(), /*prio*/ 2);
