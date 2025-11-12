@@ -83,7 +83,7 @@ static thread_local void* thread_pointer = nullptr;
 void port_set_thread_pointer(void* tp) { thread_pointer = tp; }
 void* port_get_thread_pointer(void)    { return thread_pointer; }
 
-void port_switch(port_context_t** /*from (unused)*/, port_context_t* to)
+void port_switch(port_context_t* /*from (unused)*/, port_context_t* to)
 {
    tls_current = to;
    // Resume target. When the thread yields, control returns here.

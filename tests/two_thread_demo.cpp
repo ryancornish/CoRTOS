@@ -33,7 +33,7 @@ static void pick_and_switch()
    port_context_t* next = flip ? task1_context : task2_context;
    flip = !flip;
    if (next != current_context) {
-      port_switch(&current_context, next);
+      port_switch(current_context, next);
       current_context = next;
    }
 }

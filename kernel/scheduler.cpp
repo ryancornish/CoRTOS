@@ -312,14 +312,13 @@ namespace rtk
       if (next == iss.current_task) return;
       TaskControlBlock* previous_task = iss.current_task;
       iss.current_task = next;
-      if (previous_task) previous_task->state = TaskControlBlock::State::Ready;
+      if (previous_task) previous_task->state = TaskControlBlock::State::Ready; // Task might have already been set ready but ensure it is
       iss.current_task->state = TaskControlBlock::State::Running;
 
       DEBUG_PRINT("context_switch_to(): previous=%p -> next=%p", (void*)previous_task, (void*)next);
 
       port_set_thread_pointer(next);
-      port_context_t* previous_context = previous_task ? previous_task->context() : nullptr;
-      port_switch(&previous_context, iss.current_task->context());
+      port_switch(previous_task ? previous_task->context() : nullptr, iss.current_task->context());
 
       DEBUG_PRINT("context_switch_to(): returned to scheduler");
    }
@@ -337,7 +336,7 @@ namespace rtk
          auto* top_tcb = iss.sleepers.top();
          if (!top_tcb || now.is_before(top_tcb->wake_tick)) break; // Noone asleep or not due yet
          (void)iss.sleepers.pop_min();
-         DEBUG_PRINT("wake       tcb=%p -> wake_tick=%u", (void*)top_tcb, top_tcb->wake_tick);
+         DEBUG_PRINT("wake       tcb=%p -> wake_tick=%u", (void*)top_tcb, top_tcb->wake_tick.value());
          set_task_ready(top_tcb);
       }
 
@@ -502,7 +501,7 @@ namespace rtk
          .arg = arg,
       };
 
-      port_context_init(tcb->context(), stack_base, stack_size, thread_trampoline, tcb);
+      port_context_init(tcb->context(), stack_layout.stack_base, stack_layout.stack_size, thread_trampoline, tcb);
 
       set_task_ready(tcb);
       DEBUG_DUMP_READY_QUEUE("Thread() created");
