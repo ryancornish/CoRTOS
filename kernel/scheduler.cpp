@@ -132,6 +132,7 @@ namespace rtk
 
       void enqueue_task(TaskControlBlock* tcb) noexcept
       {
+         assert(tcb->next == nullptr && tcb->prev == nullptr && "duplicate enqueue");
          matrix[tcb->priority].push_back(tcb);
          bitmap |= (1u << tcb->priority);
       }
@@ -436,6 +437,7 @@ namespace rtk
       if (ticks == 0) { yield(); return; }
       // Put current to sleep
       assert(iss.current_task && "no current thread");
+      assert(iss.current_task->sleep_index == UINT16_MAX && "thread is already sleeping");
       iss.current_task->state = TaskControlBlock::State::Sleeping;
       iss.current_task->wake_tick = tick_now() + (ticks);
       DEBUG_PRINT("sleep      tcb=%p until=%u (+%u)", (void*)iss.current_task, iss.current_task->wake_tick.value(), ticks);
@@ -481,10 +483,10 @@ namespace rtk
          tls_base = reinterpret_cast<void*>(tls_top);
 
          auto stack_top = reinterpret_cast<std::uintptr_t>(tls_base);
-         stack_base = reinterpret_cast<void*>(stack_top);
+         stack_base = reinterpret_cast<void*>(base);
          stack_size = stack_top - base;
 
-         assert(stack_size > 64 && "Buffer too small after carving TCB/TLS");
+         assert(stack_size > 64 && "Buffer too small after carving TCB/TLS"); // TODO: size the warning
       }
    };
 

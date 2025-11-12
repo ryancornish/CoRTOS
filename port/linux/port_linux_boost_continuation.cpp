@@ -41,18 +41,20 @@ static_assert(RTK_STACK_ALIGN == 16);
 // "Current" context for this OS thread (our sim is single core, single OS thread)
 static thread_local port_context* tls_current = nullptr;
 
-void port_context_init(port_context_t* context, void* stack_base, size_t stack_size, port_entry_t entry, void* arg)
+struct preallocated_stack_noop_stub
 {
-   ::new (context) port_context{
-      .cont = {},
-      .sched = {},
-      .stack_top  = static_cast<uint8_t*>(stack_base) + stack_size,
-      .stack_size = stack_size,
-      .entry      = entry,
-      .arg        = arg,
-      .started    = false,
-   };
+   using traits_type = boost::context::stack_traits;
+   boost::context::stack_context allocate(std::size_t) { std::abort(); }
+   // no-op: memory owned by caller (scheduler)
+   void deallocate(boost::context::stack_context&) noexcept {}
+};
 
+// Instead of initing on port_context_init, lazily init on start and switch
+// Until I find a better way, this works for now
+static void boost_context_lazy_init(port_context_t* context)
+{
+   if (context->started) return;
+   context->started = true;
 
    // Build a Boost stack_context pointing to the caller-provided memory.
    // Boost expects .sp to be the *top* of the stack for downward-growing stacks.
@@ -62,31 +64,51 @@ void port_context_init(port_context_t* context, void* stack_base, size_t stack_s
    };
 
    // Preallocated descriptor and allocator
-   auto prealloc = boost::context::preallocated(context->stack_top, context->stack_size, stack_context);
-   auto salloc = boost::context::protected_fixedsize_stack(context->stack_size);
+   boost::context::preallocated prealloc(context->stack_top, context->stack_size, stack_context);
+   preallocated_stack_noop_stub salloc;
    context->cont = boost::context::callcc(std::allocator_arg, prealloc, salloc,
       [context](boost::context::continuation&& sched_in) mutable -> boost::context::continuation
       {
-         // First entry: park immediately by giving control back to scheduler.
+          // Park here on first entry
+          // sched_in is the scheduler continuation
          context->sched = std::move(sched_in);
-         context->sched = context->sched.resume();
 
-         // When resumed by scheduler, run thread entry.
          while (true)
          {
             tls_current = context;                 // we're the running thread
             context->entry(context->arg);          // if it returns, thread is "done"
             // Hand control back to scheduler so it can clean up/decide next.
             tls_current = nullptr;
-            context->sched = context->sched.resume();  // yield back to scheduler
+            (void)context->sched.resume();  // yield back to scheduler
          }
       }
    );
 }
 
+void port_context_init(port_context_t* context, void* stack_base, size_t stack_size, port_entry_t entry, void* arg)
+{
+   ::new (context) port_context{
+      .cont  = {},
+      .sched = {},
+      .stack_top  = static_cast<uint8_t*>(stack_base) + stack_size,
+      .stack_size = stack_size,
+      .entry      = entry,
+      .arg        = arg,
+      .started    = false,
+   };
+}
+
+// Honestly this stuff is a bit magic. I'll need to come back and read the boost context docs at some point
 void port_context_destroy(port_context_t* ctx)
 {
-  ctx->~port_context();
+   // If still valid, request it to unwind to completion
+   if (ctx->cont) {
+      ctx->cont = std::move(ctx->cont).resume_with([](boost::context::continuation&&)
+      {
+         return boost::context::continuation{}; // Return an empty continuation to signal completion
+      });
+   }
+   ctx->~port_context();
 }
 
 static thread_local void* thread_pointer = nullptr;
@@ -97,6 +119,7 @@ void* port_get_thread_pointer(void)    { return thread_pointer; }
 void port_switch(port_context_t* /*from*/, port_context_t* to)
 {
    tls_current = to;
+   boost_context_lazy_init(to); // TODO Is there a better way?
    // Resume target. When the thread yields, control returns here.
    to->cont = to->cont.resume();
    // After returning, no thread is "current" (we're back in scheduler).
@@ -106,6 +129,7 @@ void port_switch(port_context_t* /*from*/, port_context_t* to)
 void port_start_first(port_context_t* first)
 {
    tls_current = first;
+   boost_context_lazy_init(first); // TODO Is there a better way?
    first->started = true;
    // Enter first thread. In a real kernel, scheduler loop keeps running after returns.
    first->cont = first->cont.resume();
@@ -118,7 +142,10 @@ void port_yield()
 {
    // In continuation model, the thread must explicitly resume the scheduler.
    if (tls_current) {
-      tls_current->sched = tls_current->sched.resume();
+      // Clear the current thread marker before bouncing back to the scheduler
+      auto* current = tls_current;
+      tls_current = nullptr;
+      (void)std::move(current->sched).resume();
    } else {
       // If somehow called outside a thread, just request a reschedule.
       rtk_request_reschedule();
