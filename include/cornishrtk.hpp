@@ -47,11 +47,22 @@ namespace rtk
 
    public:
       using Id = std::uint32_t;
-      using EntryFunction = void(*)(void*);
 
-      struct Priority { std::uint8_t val; constexpr explicit Priority(std::uint8_t v) : val(v) {} };
+      struct Entry
+      {
+         using Fn = void(*)(void*);
+         Fn fn;
+         void* arg;
+         explicit Entry(Fn fn, void* arg = nullptr) : fn(fn), arg(arg) {}
+      };
 
-      Thread(EntryFunction fn, void* arg, std::span<std::byte> stack, Priority priority);
+      struct Priority
+      {
+         std::uint8_t val;
+         constexpr explicit Priority(std::uint8_t v) : val(v) {}
+      };
+
+      Thread(Entry entry, std::span<std::byte> stack, Priority priority);
       ~Thread();
 
       [[nodiscard]] Id get_id() const noexcept;
