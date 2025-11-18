@@ -147,6 +147,7 @@ void port_yield()
 void port_idle()
 {
    // Sleep 1 ms (to simulate power saving) then yield cooperatively
+   std::printf("Port idle\n");
    struct timespec req{.tv_nsec = 1'000'000};
    nanosleep(&req, nullptr);
    port_yield();

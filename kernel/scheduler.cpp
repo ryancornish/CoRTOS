@@ -39,6 +39,7 @@ namespace rtk
 
    struct TaskControlBlock
    {
+      uint32_t id{0};
       enum class State : uint8_t { Ready, Running, Sleeping, Blocked} state{State::Ready};
       uint8_t priority{0};
       Tick    wake_tick{0};
@@ -301,8 +302,9 @@ namespace rtk
 
    struct InternalSchedulerState
    {
-      std::atomic<bool> preempt_disabled{true};
-      std::atomic<bool> need_reschedule{false};
+      std::atomic_uint32_t next_thread_id{2}; // 0 is invalid, 1 is reserved for idle, 2..N are user threads
+      std::atomic_bool     preempt_disabled{true};
+      std::atomic_bool     need_reschedule{false};
       TaskControlBlock* current_task{nullptr};
       TaskControlBlock* idle_tcb{nullptr};
 
@@ -310,24 +312,12 @@ namespace rtk
       SleepMinHeap sleepers;
       AtomicDeadline next_wake_tick; // When next sleeper must be woken
       AtomicDeadline next_slice_tick; // When the next RR rotation is due
-
-
-
-      void reset() // Should I just do a self assignment from default ctor instead?
-      {
-         preempt_disabled.store(true);
-         need_reschedule.store(false);
-         current_task = nullptr;
-         idle_tcb = nullptr;
-         next_wake_tick.disarm();
-         next_slice_tick.disarm();
-      }
    };
    static constinit InternalSchedulerState iss;
 
    static void set_task_ready(TaskControlBlock* tcb)
    {
-      DEBUG_PRINT("enqueue tcb=%p prio=%u", (void*)tcb, tcb->priority);
+      DEBUG_PRINT("enqueue id=%u prio=%u", tcb->id, tcb->priority);
       tcb->state = TaskControlBlock::State::Ready;
       iss.ready_matrix.enqueue_task(tcb);
       // If the new task is higher priority than the running one, we need to reschedule.
@@ -344,7 +334,7 @@ namespace rtk
       if (previous_task) previous_task->state = TaskControlBlock::State::Ready; // Task might have already been set ready but ensure it is
       iss.current_task->state = TaskControlBlock::State::Running;
 
-      DEBUG_PRINT("context_switch_to(): previous=%p -> next=%p", (void*)previous_task, (void*)next);
+      DEBUG_PRINT("context_switch_to(): previous=%u -> next=%u", previous_task->id, next->id);
 
       port_set_thread_pointer(next);
       port_switch(previous_task ? previous_task->context() : nullptr, iss.current_task->context());
@@ -365,7 +355,7 @@ namespace rtk
          auto* top_tcb = iss.sleepers.top();
          if (!top_tcb || now.is_before(top_tcb->wake_tick)) break; // Noone asleep or not due yet
          (void)iss.sleepers.pop_min();
-         DEBUG_PRINT("wake       tcb=%p -> wake_tick=%u", (void*)top_tcb, top_tcb->wake_tick.value());
+         DEBUG_PRINT("wake       id=%u -> wake_tick=%u", top_tcb->id, top_tcb->wake_tick.value());
          set_task_ready(top_tcb);
       }
 
@@ -383,7 +373,7 @@ namespace rtk
           iss.current_task->state == TaskControlBlock::State::Running &&
           iss.ready_matrix.has_peer(iss.current_task->priority)) // Don't requeue for singular threads at a priority level
       {
-         DEBUG_PRINT("timeslice  rotate tcb=%p", (void*)iss.current_task);
+         DEBUG_PRINT("timeslice  rotate id=%u", iss.current_task->id);
          set_task_ready(iss.current_task);
       }
 
@@ -413,7 +403,7 @@ namespace rtk
          // Serve a fresh slice
          iss.next_slice_tick.store(now + TIME_SLICE);
       }
-      DEBUG_PRINT("pick       tcb=%p prio=%u", (void*)next_task, next_task->priority);
+      DEBUG_PRINT("pick       id=%u prio=%u", next_task->id, next_task->priority);
       context_switch_to(next_task);
    }
 
@@ -425,16 +415,16 @@ namespace rtk
       while (true) Scheduler::yield();
    }
 
-   alignas(RTK_STACK_ALIGN) static std::array<uint8_t, 1024> idle_stack{}; // TODO: size stack
+   alignas(RTK_STACK_ALIGN) static std::array<uint8_t, 2048> idle_stack{}; // TODO: size stack
    static void idle_entry(void*) { while(true) port_idle(); }
 
    void Scheduler::init(uint32_t tick_hz)
    {
-      iss.reset();
       port_init(tick_hz);
       // Create the idle thread
       StackLayout idle_layout(idle_stack.data(), idle_stack.size());
       iss.idle_tcb = ::new (idle_layout.tcb) TaskControlBlock{
+         .id         = 1, // Reserved for the idle thread
          .state      = TaskControlBlock::State::Ready,
          .priority   = IDLE_PRIORITY,
          .wake_tick  = Tick{0},
@@ -482,7 +472,7 @@ namespace rtk
 
    void Scheduler::yield()
    {
-      DEBUG_PRINT("yield by   tcb=%p", (void*)iss.current_task);
+      DEBUG_PRINT("yield by   id=%u", iss.current_task->id);
       if (iss.current_task && iss.current_task->state == TaskControlBlock::State::Running) {
          set_task_ready(iss.current_task); // put current at tail
       }
@@ -503,7 +493,7 @@ namespace rtk
       assert(iss.current_task->sleep_index == UINT16_MAX && "thread is already sleeping");
       iss.current_task->state = TaskControlBlock::State::Sleeping;
       iss.current_task->wake_tick = tick_now() + (ticks);
-      DEBUG_PRINT("sleep      tcb=%p until=%u (+%u)", (void*)iss.current_task, iss.current_task->wake_tick.value(), ticks);
+      DEBUG_PRINT("sleep      id=%u until=%u (+%u)", iss.current_task->id, iss.current_task->wake_tick.value(), ticks);
       iss.sleepers.push(iss.current_task);
 
       if (auto const* top_tcb = iss.sleepers.top()) {
@@ -519,10 +509,13 @@ namespace rtk
 
    Thread::Thread(EntryFunction fn, void* arg, void* stack_base, std::size_t stack_size, uint8_t priority)
    {
-      assert(priority < MAX_PRIORITIES);
+      assert(priority < IDLE_PRIORITY);
+
+      auto id = iss.next_thread_id.fetch_add(1, std::memory_order_relaxed);
 
       StackLayout stack_layout(stack_base, stack_size);
       tcb = ::new (stack_layout.tcb) TaskControlBlock{
+         .id = id,
          .priority = priority,
          .stack_base = stack_layout.stack_base,
          .stack_size = stack_layout.stack_size,
@@ -542,6 +535,11 @@ namespace rtk
       port_context_destroy(tcb->context());
       tcb->~TaskControlBlock();
       tcb = nullptr;
+   }
+
+   [[nodiscard]] Thread::Id Thread::get_id() const noexcept
+   {
+      return tcb->id;
    }
 
    std::size_t Thread::reserved_stack_size()
@@ -578,7 +576,7 @@ namespace rtk
             std::printf(" p%u(%zu)", p, iss.ready_matrix.size_at(p));
          }
       }
-      std::printf(" current_task=%p\n", (void*)iss.current_task);
+      std::printf(" current_task_id=%u\n", iss.current_task ? iss.current_task->id : 0);
    }
 
 } // namespace rtk

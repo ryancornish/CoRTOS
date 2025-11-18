@@ -44,9 +44,12 @@ namespace rtk
       struct TaskControlBlock* tcb;
 
    public:
+      using Id = std::uint32_t;
       using EntryFunction = void(*)(void*);
       Thread(EntryFunction fn, void* arg, void* stack_base, std::size_t stack_size, uint8_t priority);
       ~Thread();
+
+      [[nodiscard]] Id get_id() const noexcept;
 
       static std::size_t reserved_stack_size();
    };
