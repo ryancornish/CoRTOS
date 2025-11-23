@@ -20,15 +20,8 @@
 #include <span>
 #include <variant>
 
-// I hate macros but oh well
 #define DEBUG_PRINT_ENABLE 1
-#if DEBUG_PRINT_ENABLE
-# define DEBUG_PRINT(fmt, ...) \
-     std::printf("[tick=%08u] " fmt "\n", port_tick_now(), ##__VA_ARGS__)
-#else
-# define DEBUG_PRINT(...) ((void)0)
-#endif
-
+#include "DEBUG_PRINT.hpp"
 
 namespace rtk
 {
@@ -598,7 +591,7 @@ namespace rtk
          auto* current = iss.current_task;
          assert(self->owner != current && "Mutex::lock() called recursively by owner");
 
-         DEBUG_PRINT("mutex lock: id=%u blocked on mutex %p", current->id, (void*)this);
+         LOG_SYNC("Mutex::lock(): id=%u BLOCKED on mutex %p", current->id, (void*)this);
 
          current->wait_target = self.get();
          current->state = TaskControlBlock::State::Blocked;
@@ -635,7 +628,8 @@ namespace rtk
          auto* current = iss.current_task;
          assert(self->owner != current && "Mutex::lock() called recursively by owner");
 
-         DEBUG_PRINT("mutex lock: id=%u blocked on mutex %p", current->id, (void*)this);
+         LOG_SYNC("Mutex::try_lock_until(): id=%u BLOCKED on mutex %p", current->id, (void*)this);
+
          current->wait_target = self.get();
          self->wait_queue.push_back(current);
          remaining = deadline - now;
