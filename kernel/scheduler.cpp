@@ -56,8 +56,9 @@ namespace rtk
       uint16_t sleep_index{UINT16_MAX};
 
       // Opaque, in-place port context storage
-      alignas(RTK_PORT_CONTEXT_ALIGN) std::array<std::byte, RTK_PORT_CONTEXT_SIZE> context_storage{};
-      port_context_t* context() noexcept { return reinterpret_cast<port_context_t*>(context_storage.data()); }
+      OpaqueImpl<port_context_t, RTK_PORT_CONTEXT_SIZE, RTK_PORT_CONTEXT_ALIGN> context_storage;
+      constexpr port_context_t*       context()       noexcept { return context_storage.get(); }
+      constexpr port_context_t const* context() const noexcept { return context_storage.get(); }
 
       TaskControlBlock(uint32_t id, Thread::Priority priority, std::span<std::byte> stack, Thread::Entry entry) :
          id(id), priority(priority), stack(stack), entry(entry) {}
@@ -267,10 +268,10 @@ namespace rtk
       void remove(TaskControlBlock* tcb) noexcept
       {
          uint16_t i = tcb->sleep_index;
-         if (i == UINT16_MAX) return; // not in heap
+         if (i == UINT16_MAX) return; // Not in heap
          tcb->sleep_index = UINT16_MAX;
          --size_count;
-         if (i == size_count) return; // removed last
+         if (i == size_count) return; // Removed last
 
          heap_buffer[i] = heap_buffer[size_count];
          heap_buffer[i]->sleep_index = i;
@@ -630,7 +631,6 @@ namespace rtk
    {
       Scheduler::Lock guard;
       return self->try_lock_under_guard();
-
    }
 
    bool Mutex::try_lock_for(Tick::Delta timeout)

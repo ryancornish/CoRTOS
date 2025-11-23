@@ -160,10 +160,12 @@ namespace rtk
    {
       std::byte opaque[size]{};
       constexpr OpaqueImpl() = default;
-      constexpr T& operator* ()             { return *reinterpret_cast<T*>(opaque); }
-      constexpr T* operator->()             { return  reinterpret_cast<T*>(opaque); }
-      constexpr T const& operator* () const { return *reinterpret_cast<T const*>(opaque); }
-      constexpr T const* operator->() const { return  reinterpret_cast<T const*>(opaque); }
+      constexpr T*       get()       noexcept { return reinterpret_cast<T*>(opaque); }
+      constexpr T const* get() const noexcept { return reinterpret_cast<T const*>(opaque); }
+      constexpr T&       operator* ()       noexcept { return *get(); }
+      constexpr T const& operator* () const noexcept { return *get(); }
+      constexpr T*       operator->()       noexcept { return  get(); }
+      constexpr T const* operator->() const noexcept { return  get(); }
    };
 
    class Mutex
