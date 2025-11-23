@@ -181,9 +181,9 @@ namespace rtk
 
       [[nodiscard]] bool is_locked() const noexcept;
       void lock();
-      bool try_lock();
-      bool try_lock_for(Tick::Delta timeout);
-      bool try_lock_until(Tick deadline);
+      [[nodiscard]] bool try_lock();
+      [[nodiscard]] bool try_lock_for(Tick::Delta timeout);
+      [[nodiscard]] bool try_lock_until(Tick deadline);
       void unlock();
 
    private:

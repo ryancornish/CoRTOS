@@ -46,7 +46,7 @@ namespace rtk
       std::variant<std::monostate, MutexImpl*, Semaphore*, ConditionVar*> sync_prim;
       template<typename T> WaitTarget& operator=(T t) noexcept { sync_prim = t; return *this; }
       void clear() noexcept { sync_prim = std::monostate{}; }
-      constexpr operator bool() noexcept { return !std::holds_alternative<std::monostate>(sync_prim); }
+      constexpr operator bool() const noexcept { return !std::holds_alternative<std::monostate>(sync_prim); }
       void remove(TaskControlBlock* tcb) noexcept;
    };
 
@@ -352,7 +352,6 @@ namespace rtk
       if (next == iss.current_task) return;
       TaskControlBlock* previous_task = iss.current_task;
       iss.current_task = next;
-      if (previous_task) previous_task->state = TaskControlBlock::State::Ready; // Task might have already been set ready but ensure it is
       iss.current_task->state = TaskControlBlock::State::Running;
 
       DEBUG_PRINT("context_switch_to(): previous=%u -> next=%u", previous_task ? previous_task->id : 0u, next->id);
