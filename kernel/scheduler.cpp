@@ -61,7 +61,7 @@ namespace rtk
       std::span<std::byte> stack;
       Thread::Entry entry;
 
-      // Intrusive queue/array links
+      // Intrusive queue/list links for TaskQueue
       TaskControlBlock* next{nullptr};
       TaskControlBlock* prev{nullptr};
       uint16_t sleep_index{UINT16_MAX};
@@ -74,6 +74,53 @@ namespace rtk
       TaskControlBlock(uint32_t id, Thread::Priority priority, std::span<std::byte> stack, Thread::Entry entry) :
          id(id), priority(priority), stack(stack), entry(entry) {}
    };
+
+   class TaskQueue
+   {
+      TaskControlBlock* head;
+      TaskControlBlock* tail;
+
+   public:
+      [[nodiscard]] constexpr bool              empty() const noexcept { return !head; }
+      [[nodiscard]] constexpr bool           has_peer() const noexcept { return head && head != tail; }
+      [[nodiscard]] constexpr TaskControlBlock* front() const noexcept { return head; }
+
+      // This walks the linked list so isn't 'free'. Will be used for debugging only for now
+      [[nodiscard]] size_t size() const noexcept
+      {
+         std::size_t n = 0;
+         for (auto* tcb = head; tcb; tcb = tcb->next) ++n;
+         return n;
+      }
+
+      void push_back(TaskControlBlock* tcb) noexcept
+      {
+         assert(tcb->next == nullptr && tcb->prev == nullptr && "TCB already linked");
+         tcb->next = nullptr;
+         tcb->prev = tail;
+         if (tail) tail->next = tcb; else head = tcb;
+         tail = tcb;
+      }
+
+      TaskControlBlock* pop_front() noexcept
+      {
+         if (!head) return nullptr;
+         auto* tcb = head;
+         head = tcb->next;
+         if (head) head->prev = nullptr; else tail = nullptr;
+         tcb->next = tcb->prev = nullptr;
+         return tcb;
+      }
+
+      void remove(TaskControlBlock* tcb) noexcept
+      {
+         if (tcb->prev) tcb->prev->next = tcb->next; else head = tcb->next;
+         if (tcb->next) tcb->next->prev = tcb->prev; else tail = tcb->prev;
+         tcb->next = tcb->prev = nullptr;
+      }
+   };
+   static_assert(std::is_trivially_constructible_v<TaskQueue>, "Must be usable within OpaqueImpl structs");
+   static_assert(std::is_standard_layout_v<TaskQueue>,         "Must be usable within OpaqueImpl structs");
 
    struct StackLayout
    {
@@ -111,48 +158,7 @@ namespace rtk
 
    class ReadyMatrix
    {
-      class RoundRobinQueue
-      {
-         TaskControlBlock* head{nullptr};
-         TaskControlBlock* tail{nullptr};
-
-      public:
-         [[nodiscard]] constexpr bool empty() const noexcept { return !head; }
-         [[nodiscard]] constexpr TaskControlBlock* front() const noexcept { return head; }
-         [[nodiscard]] constexpr bool has_peer() const noexcept { return head && head != tail; }
-
-         void push_back(TaskControlBlock* tcb) noexcept
-         {
-            assert(tcb->next == nullptr && tcb->prev == nullptr && "TCB already linked");
-            tcb->next = nullptr;
-            tcb->prev = tail;
-            if (tail) tail->next = tcb; else head = tcb;
-            tail = tcb;
-         }
-         TaskControlBlock* pop_front() noexcept
-         {
-            if (!head) return nullptr;
-            auto* tcb = head;
-            head = tcb->next;
-            if (head) head->prev = nullptr; else tail = nullptr;
-            tcb->next = tcb->prev = nullptr;
-            return tcb;
-         }
-         void remove(TaskControlBlock* tcb) noexcept
-         {
-            if (tcb->prev) tcb->prev->next = tcb->next; else head = tcb->next;
-            if (tcb->next) tcb->next->prev = tcb->prev; else tail = tcb->prev;
-            tcb->next = tcb->prev = nullptr;
-         }
-         // This walks the linked list so isn't 'free'. Will be used for debugging only for now
-         [[nodiscard]] size_t size() const noexcept
-         {
-            std::size_t n = 0;
-            for (auto* tcb = head; tcb; tcb = tcb->next) ++n;
-            return n;
-         }
-      };
-
+      using RoundRobinQueue = TaskQueue;
       std::array<RoundRobinQueue, MAX_PRIORITIES> matrix{};
       uint32_t bitmap{0};
       static_assert(MAX_PRIORITIES <= UINT32_BITS, "bitmap cannot hold that many priorities!");
@@ -561,12 +567,9 @@ namespace rtk
    {
       // Implicitly initialized to nullptr when opaque is constinit'ed
       TaskControlBlock* owner;
-      TaskControlBlock* wait_head;
-      TaskControlBlock* wait_tail;
+      TaskQueue wait_queue;
 
       constexpr MutexImpl() = default;
-
-      [[nodiscard]] bool has_waiters() const noexcept { return wait_head != nullptr; };
 
       // Assumes preemption is already disabled
       bool try_lock_under_guard()
@@ -578,46 +581,6 @@ namespace rtk
          owner = current;
          return true;
       }
-
-      void push_back_waiter(TaskControlBlock* tcb) noexcept
-      {
-         // TCB must not be in any other intrusive list
-         assert(tcb->next == nullptr && tcb->prev == nullptr);
-
-         tcb->next = nullptr;
-         tcb->prev = wait_tail;
-
-         if (wait_tail) {
-            wait_tail->next = tcb;
-         } else {
-            wait_head = tcb;
-         }
-         wait_tail = tcb;
-      }
-
-      TaskControlBlock* pop_front_waiter() noexcept
-      {
-         TaskControlBlock* tcb = wait_head;
-         if (!tcb) return nullptr;
-
-         wait_head = tcb->next;
-         if (wait_head) {
-            wait_head->prev = nullptr;
-         } else {
-            wait_tail = nullptr;
-         }
-         tcb->next = nullptr;
-         tcb->prev = nullptr;
-         return tcb;
-      }
-
-      void remove_waiter(TaskControlBlock* tcb) noexcept
-      {
-         if (tcb->prev) tcb->prev->next = tcb->next; else wait_head = tcb->next;
-         if (tcb->next) tcb->next->prev = tcb->prev; else wait_tail = tcb->prev;
-         tcb->next = tcb->prev = nullptr;
-      }
-
    };
    static_assert(std::is_trivially_constructible_v<MutexImpl>, "Reinterpreting opaque block is now UB");
    static_assert(std::is_standard_layout_v<MutexImpl>,         "Reinterpreting opaque block is now UB");
@@ -639,7 +602,7 @@ namespace rtk
 
          current->wait_target = self.get();
          current->state = TaskControlBlock::State::Blocked;
-         self->push_back_waiter(current);
+         self->wait_queue.push_back(current);
 
          rtk_request_reschedule();
       }
@@ -674,7 +637,7 @@ namespace rtk
 
          DEBUG_PRINT("mutex lock: id=%u blocked on mutex %p", current->id, (void*)this);
          current->wait_target = self.get();
-         self->push_back_waiter(current);
+         self->wait_queue.push_back(current);
          remaining = deadline - now;
       }
       Scheduler::sleep_for(remaining);
@@ -693,12 +656,12 @@ namespace rtk
       assert(current && "Mutex::unlock() with no current task");
       assert(self->owner == current && "Mutex::unlock() by non-owner");
 
-      if (!self->has_waiters()) {
+      if (self->wait_queue.empty()) {
          self->owner = nullptr;
          return;
       }
 
-      TaskControlBlock* next_owner = self->pop_front_waiter();
+      TaskControlBlock* next_owner = self->wait_queue.pop_front();
       assert(next_owner);
       iss.sleepers.remove(next_owner); // noop if it wasn't in the heap
       next_owner->wait_target.clear();
@@ -716,7 +679,7 @@ namespace rtk
       std::visit([tcb](auto& sync_prim) {
          using SyncPrim = std::remove_reference_t<decltype(sync_prim)>;
          if constexpr (std::is_same_v<SyncPrim, MutexImpl*>) {
-            sync_prim->remove_waiter(tcb);
+            sync_prim->wait_queue.remove(tcb);
          }
       }, sync_prim);
       clear();
