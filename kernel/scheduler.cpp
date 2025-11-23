@@ -18,6 +18,7 @@
 #include <ctime>
 #include <limits>
 #include <span>
+#include <variant>
 
 // I hate macros but oh well
 #define DEBUG_PRINT_ENABLE 1
@@ -40,12 +41,22 @@ namespace rtk
    static constexpr std::size_t align_down(std::size_t size, std::size_t align) { return size & ~(align - 1); }
    static constexpr std::size_t align_up(std::size_t size, std::size_t align)   { return (size + (align - 1)) & ~(align - 1); }
 
+   struct WaitTarget
+   {
+      std::variant<std::monostate, MutexImpl*, Semaphore*, ConditionVar*> sync_prim;
+      template<typename T> WaitTarget& operator=(T t) noexcept { sync_prim = t; return *this; }
+      void clear() noexcept { sync_prim = std::monostate{}; }
+      constexpr operator bool() noexcept { return !std::holds_alternative<std::monostate>(sync_prim); }
+      void remove(TaskControlBlock* tcb) noexcept;
+   };
+
    struct TaskControlBlock
    {
       uint32_t id;
       enum class State : uint8_t { Ready, Running, Sleeping, Blocked} state{State::Ready};
       uint8_t priority;
       Tick    wake_tick{0};
+      WaitTarget wait_target;
 
       std::span<std::byte> stack;
       Thread::Entry entry;
@@ -365,6 +376,8 @@ namespace rtk
          auto* top_tcb = iss.sleepers.top();
          if (!top_tcb || now.is_before(top_tcb->wake_tick)) break; // Noone asleep or not due yet
          (void)iss.sleepers.pop_min();
+         //
+         if (top_tcb->wait_target) top_tcb->wait_target.remove(top_tcb); // Sleeper was waiting for a sync prim
          DEBUG_PRINT("wake       id=%u -> wake_tick=%u", top_tcb->id, top_tcb->wake_tick.value());
          set_task_ready(top_tcb);
       }
@@ -567,7 +580,7 @@ namespace rtk
          return true;
       }
 
-      void enqueue_waiter(TaskControlBlock* tcb) noexcept
+      void push_back_waiter(TaskControlBlock* tcb) noexcept
       {
          // TCB must not be in any other intrusive list
          assert(tcb->next == nullptr && tcb->prev == nullptr);
@@ -583,7 +596,7 @@ namespace rtk
          wait_tail = tcb;
       }
 
-      TaskControlBlock* pop_waiter() noexcept
+      TaskControlBlock* pop_front_waiter() noexcept
       {
          TaskControlBlock* tcb = wait_head;
          if (!tcb) return nullptr;
@@ -598,10 +611,18 @@ namespace rtk
          tcb->prev = nullptr;
          return tcb;
       }
+
+      void remove_waiter(TaskControlBlock* tcb) noexcept
+      {
+         if (tcb->prev) tcb->prev->next = tcb->next; else wait_head = tcb->next;
+         if (tcb->next) tcb->next->prev = tcb->prev; else wait_tail = tcb->prev;
+         tcb->next = tcb->prev = nullptr;
+      }
+
    };
    static_assert(std::is_trivially_constructible_v<MutexImpl>, "Reinterpreting opaque block is now UB");
-   static_assert(std::is_standard_layout_v<MutexImpl>, "Reinterpreting opaque block is now UB");
-   static_assert(sizeof(MutexImpl) == sizeof(Mutex::ImplStorage), "Adjust forward size declaration in header to match");
+   static_assert(std::is_standard_layout_v<MutexImpl>,         "Reinterpreting opaque block is now UB");
+   static_assert(sizeof(MutexImpl) == sizeof(Mutex::ImplStorage),   "Adjust forward size declaration in header to match");
    static_assert(alignof(MutexImpl) == alignof(Mutex::ImplStorage), "Adjust forward align declaration in header to match");
 
    [[nodiscard]] bool Mutex::is_locked() const noexcept { return self->owner != nullptr; }
@@ -617,8 +638,9 @@ namespace rtk
 
          DEBUG_PRINT("mutex lock: id=%u blocked on mutex %p", current->id, (void*)this);
 
+         current->wait_target = self.get();
          current->state = TaskControlBlock::State::Blocked;
-         self->enqueue_waiter(current);
+         self->push_back_waiter(current);
 
          rtk_request_reschedule();
       }
@@ -640,16 +662,27 @@ namespace rtk
 
    bool Mutex::try_lock_until(Tick deadline)
    {
-      while (true) {
-         Tick::Delta remaining;
-         {
-            Scheduler::Lock guard;
-            if (self->try_lock_under_guard()) return true;
-            auto const now = Scheduler::tick_now();
-            if (now.has_reached(deadline)) return false;
-            remaining = deadline - now;
-         }
-         Scheduler::sleep_for(remaining);
+      Tick::Delta remaining;
+      {
+         Scheduler::Lock guard;
+
+         if (self->try_lock_under_guard()) return true;
+         auto const now = Scheduler::tick_now();
+         if (now.has_reached(deadline)) return false;
+
+         auto* current = iss.current_task;
+         assert(self->owner != current && "Mutex::lock() called recursively by owner");
+
+         DEBUG_PRINT("mutex lock: id=%u blocked on mutex %p", current->id, (void*)this);
+         current->wait_target = self.get();
+         self->push_back_waiter(current);
+         remaining = deadline - now;
+      }
+      Scheduler::sleep_for(remaining);
+      {
+         Scheduler::Lock guard;
+         auto* current = iss.current_task;
+         return self->owner == current;
       }
    }
 
@@ -666,8 +699,10 @@ namespace rtk
          return;
       }
 
-      TaskControlBlock* next_owner = self->pop_waiter();
+      TaskControlBlock* next_owner = self->pop_front_waiter();
       assert(next_owner);
+      iss.sleepers.remove(next_owner); // noop if it wasn't in the heap
+      next_owner->wait_target.clear();
       self->owner = next_owner;
 
       DEBUG_PRINT("mutex unlock: id=%u -> waking waiter id=%u on mutex %p",
@@ -677,6 +712,16 @@ namespace rtk
       set_task_ready(next_owner);
    }
 
+   void WaitTarget::remove(TaskControlBlock* tcb) noexcept
+   {
+      std::visit([tcb](auto& sync_prim) {
+         using SyncPrim = std::remove_reference_t<decltype(sync_prim)>;
+         if constexpr (std::is_same_v<SyncPrim, MutexImpl*>) {
+            sync_prim->remove_waiter(tcb);
+         }
+      }, sync_prim);
+      clear();
+   }
 
    extern "C" void rtk_on_tick(void)
    {

@@ -35,7 +35,6 @@ struct port_context
    port_entry_t entry;
    void*        arg;
 };
-
 static_assert(RTK_PORT_CONTEXT_SIZE  == sizeof(port_context_t),  "Adjust port_traits.h definition to match");
 static_assert(RTK_PORT_CONTEXT_ALIGN == alignof(port_context_t), "Adjust port_traits.h definition to match");
 static_assert((RTK_STACK_ALIGN & (RTK_STACK_ALIGN - 1)) == 0,    "RTK_STACK_ALIGN must be a power of two");
