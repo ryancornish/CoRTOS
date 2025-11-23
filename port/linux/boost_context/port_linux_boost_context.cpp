@@ -15,6 +15,9 @@
 #include <cstring>
 #include <sys/time.h>
 
+#define DEBUG_PRINT_ENABLE 1
+#include "DEBUG_PRINT.hpp"
+
 static constinit std::atomic<uint32_t> global_tick{0};
 uint32_t port_tick_now() { return global_tick.load(std::memory_order_relaxed); }
 
@@ -60,12 +63,12 @@ void port_context_init(port_context_t* context,
 {
    // Construct/emplace port_context_t object within user-provided stack
    ::new (context) port_context{
-      .thread    = {},
-      .sched     = {},
-      .stack_top = static_cast<std::uint8_t*>(stack_base) + stack_size,
-      .stack_size= stack_size,
-      .entry     = entry,
-      .arg       = arg,
+      .thread     = {},
+      .sched      = {},
+      .stack_top  = static_cast<std::uint8_t*>(stack_base) + stack_size,
+      .stack_size = stack_size,
+      .entry      = entry,
+      .arg        = arg,
    };
 
    // Build a fiber bound to the user-provided stack.
@@ -145,8 +148,9 @@ void port_yield()
 
 void port_idle()
 {
+   LOG_PORT("port_idle()");
+
    // Sleep 1 ms (to simulate power saving) then yield cooperatively
-   std::printf("Port idle\n");
    struct timespec req{.tv_nsec = 1'000'000};
    nanosleep(&req, nullptr);
    port_yield();

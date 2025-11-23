@@ -337,7 +337,8 @@ namespace rtk
 
    static void set_task_ready(TaskControlBlock* tcb)
    {
-      DEBUG_PRINT("enqueue id=%u prio=%u", tcb->id, tcb->priority);
+      LOG_SCHED("set_task_ready() @ID(%u) @PRIO(%u)", tcb->id, tcb->priority);
+
       tcb->state = TaskControlBlock::State::Ready;
       iss.ready_matrix.enqueue_task(tcb);
       // If the new task is higher priority than the running one, we need to reschedule.
@@ -353,12 +354,12 @@ namespace rtk
       iss.current_task = next;
       iss.current_task->state = TaskControlBlock::State::Running;
 
-      DEBUG_PRINT("context_switch_to(): previous=%u -> next=%u", previous_task ? previous_task->id : 0u, next->id);
+      LOG_SCHED("context_switch_to() from @ID(%u) -> to @ID(%u)", previous_task ? previous_task->id : 0u, next->id);
 
       port_set_thread_pointer(next);
       port_switch(previous_task ? previous_task->context() : nullptr, iss.current_task->context());
 
-      DEBUG_PRINT("context_switch_to(): returned to scheduler");
+      LOG_SCHED("~context_switch_to() returned to scheduler");
    }
 
    static void schedule()
@@ -376,7 +377,9 @@ namespace rtk
          (void)iss.sleepers.pop_min();
          //
          if (top_tcb->wait_target) top_tcb->wait_target.remove(top_tcb); // Sleeper was waiting for a sync prim
-         DEBUG_PRINT("wake       id=%u -> wake_tick=%u", top_tcb->id, top_tcb->wake_tick.value());
+
+         LOG_SCHED("schedule() sleeper @ID(%u) woken up for @ALARM(%u)", top_tcb->id, top_tcb->wake_tick.value());
+
          set_task_ready(top_tcb);
       }
 
@@ -394,7 +397,8 @@ namespace rtk
           iss.current_task->state == TaskControlBlock::State::Running &&
           iss.ready_matrix.has_peer(iss.current_task->priority)) // Don't requeue for singular threads at a priority level
       {
-         DEBUG_PRINT("timeslice  rotate id=%u", iss.current_task->id);
+         LOG_SCHED("schedule() time-slice RR rotate @ID(%u) to the back of the queue", iss.current_task->id);
+
          set_task_ready(iss.current_task);
       }
 
@@ -403,7 +407,9 @@ namespace rtk
       if (!next_task) {
          iss.next_slice_tick.disarm();
          if (iss.current_task != iss.idle_tcb) {
-            DEBUG_PRINT("pick idle");
+
+            LOG_SCHED("schedule() pick IDLE @ID(%u) @PRIO(%u)", iss.idle_tcb->id, IDLE_PRIORITY);
+
             context_switch_to(iss.idle_tcb);
          }
          return;
@@ -424,7 +430,9 @@ namespace rtk
          // Serve a fresh slice
          iss.next_slice_tick.store(now + TIME_SLICE);
       }
-      DEBUG_PRINT("pick       id=%u prio=%u", next_task->id, next_task->priority);
+
+      LOG_SCHED("schedule() pick @ID(%u) @PRIO(%u)", next_task->id, next_task->priority);
+
       context_switch_to(next_task);
    }
 
@@ -486,7 +494,8 @@ namespace rtk
 
    void Scheduler::yield()
    {
-      DEBUG_PRINT("yield by   id=%u", iss.current_task->id);
+      LOG_SCHED("yield() by @ID(%u)", iss.current_task->id);
+
       if (iss.current_task && iss.current_task->state == TaskControlBlock::State::Running) {
          set_task_ready(iss.current_task); // put current at tail
       }
@@ -507,7 +516,9 @@ namespace rtk
       assert(iss.current_task->sleep_index == UINT16_MAX && "thread is already sleeping");
       iss.current_task->state = TaskControlBlock::State::Sleeping;
       iss.current_task->wake_tick = tick_now() + (ticks);
-      DEBUG_PRINT("sleep      id=%u until=%u (+%u)", iss.current_task->id, iss.current_task->wake_tick.value(), ticks);
+
+      LOG_SCHED("sleep_for() by @ID(%u) until @ALARM(%u) (+%u ticks)", iss.current_task->id, iss.current_task->wake_tick.value(), ticks);
+
       iss.sleepers.push(iss.current_task);
 
       if (auto const* top_tcb = iss.sleepers.top()) {
@@ -591,7 +602,7 @@ namespace rtk
          auto* current = iss.current_task;
          assert(self->owner != current && "Mutex::lock() called recursively by owner");
 
-         LOG_SYNC("Mutex::lock(): id=%u BLOCKED on mutex %p", current->id, (void*)this);
+         LOG_SYNC("Mutex::lock(): id=%u BLOCKED on @MUTEX_P(%p)", current->id, (void*)this);
 
          current->wait_target = self.get();
          current->state = TaskControlBlock::State::Blocked;
@@ -650,6 +661,8 @@ namespace rtk
       assert(current && "Mutex::unlock() with no current task");
       assert(self->owner == current && "Mutex::unlock() by non-owner");
 
+      LOG_SYNC("Mutex::unlock() by @ID(%u)", current->id);
+
       if (self->wait_queue.empty()) {
          self->owner = nullptr;
          return;
@@ -661,8 +674,7 @@ namespace rtk
       next_owner->wait_target.clear();
       self->owner = next_owner;
 
-      DEBUG_PRINT("mutex unlock: id=%u -> waking waiter id=%u on mutex %p",
-                  current->id, next_owner->id, (void*)this);
+      LOG_SYNC("Mutex::unlock() waking waiter @ID(%u) on @MUTEX_P(%p)", next_owner->id, (void*)this);
 
       next_owner->state = TaskControlBlock::State::Ready;
       set_task_ready(next_owner);
@@ -681,17 +693,21 @@ namespace rtk
 
    extern "C" void rtk_on_tick(void)
    {
-      DEBUG_PRINT("rtk_on_tick()");
+      LOG_PORT("rtk_on_tick()");
+
       auto const now = Scheduler::tick_now();
       if (iss.next_wake_tick.due(now) || iss.next_slice_tick.due(now)) {
-         DEBUG_PRINT("rtk_on_tick() -> %s%s", iss.next_wake_tick.due(now) ? "wake_tick due " : "", iss.next_slice_tick.due(now) ? "slice_tick due" : "");
+
+         LOG_PORT("rtk_on_tick() -> %s%s", iss.next_wake_tick.due(now) ? "wake_tick due " : "", iss.next_slice_tick.due(now) ? "slice_tick due" : "");
+
          rtk_request_reschedule();
       }
    }
 
    extern "C" void rtk_request_reschedule(void)
    {
-      DEBUG_PRINT("rtk_request_reschedule()");
+      LOG_PORT("rtk_request_reschedule()");
+
       iss.need_reschedule.store(true, std::memory_order_relaxed);
       // Under simulation we should return to the scheduler loop in user context
       // On bare metal, we should pend a software interrupt and return from this ISR

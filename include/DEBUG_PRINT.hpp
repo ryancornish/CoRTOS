@@ -5,7 +5,7 @@
 #include <cstdint>
 #include <cstdio>
 
-extern uint32_t port_tick_now(void);
+extern "C" uint32_t port_tick_now(void);
 
 
 
@@ -19,15 +19,15 @@ namespace debug
       Sync
    };
 
-#if DEBUG_PRINT_ENABLE && defined(RTK_SIMULATION)
-   // Simple ANSI colour table (tweak to taste)
+#if DEBUG_PRINT_ENABLE
+   // Simple ANSI colour table
    inline const char* color(Channel ch) noexcept
    {
       switch (ch) {
-      case Channel::Scheduler: return "\x1b[36m"; // cyan
-      case Channel::Port:      return "\x1b[35m"; // magenta
-      case Channel::Thread:    return "\x1b[32m"; // green
-      case Channel::Sync:      return "\x1b[33m"; // yellow
+         case Channel::Scheduler: return "\x1b[36m"; // cyan
+         case Channel::Port:      return "\x1b[35m"; // magenta
+         case Channel::Thread:    return "\x1b[32m"; // green
+         case Channel::Sync:      return "\x1b[33m"; // yellow
       }
       return "\x1b[0m";
    }
@@ -35,10 +35,10 @@ namespace debug
    inline const char* label(Channel ch) noexcept
    {
       switch (ch) {
-      case Channel::Scheduler: return "SCHED";
-      case Channel::Port:      return "PORT ";
-      case Channel::Thread:    return "THRD ";
-      case Channel::Sync:      return "SYNC ";
+         case Channel::Scheduler: return "SCHED";
+         case Channel::Port:      return "PORT ";
+         case Channel::Thread:    return "THRD ";
+         case Channel::Sync:      return "SYNC ";
       }
       return "????";
    }
