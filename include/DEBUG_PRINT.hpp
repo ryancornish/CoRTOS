@@ -4,6 +4,7 @@
 
 #include <cstdint>
 #include <cstdio>
+#include <format>
 
 extern "C" uint32_t port_tick_now(void);
 
@@ -76,11 +77,14 @@ namespace debug
 #  define LOG_PORT(fmt, ...)   ::debug::print(::debug::Channel::Port,      fmt, ##__VA_ARGS__)
 #  define LOG_THREAD(fmt, ...) ::debug::print(::debug::Channel::Thread,    fmt, ##__VA_ARGS__)
 #  define LOG_SYNC(fmt, ...)   ::debug::print(::debug::Channel::Sync,      fmt, ##__VA_ARGS__)
+[[maybe_unused]] static void LOG_SCHED_READY_MATRIX();
 #else
 #  define LOG_SCHED(...)  ((void)0)
 #  define LOG_PORT(...)   ((void)0)
 #  define LOG_THREAD(...) ((void)0)
 #  define LOG_SYNC(...)   ((void)0)
+#  define LOG_SCHED_READY_MATRIX() ((void)0)
+
 #endif
 
 #endif

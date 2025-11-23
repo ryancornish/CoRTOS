@@ -103,7 +103,7 @@ void port_context_destroy(port_context_t* context)
    if (context->thread) {
       // Ask the fiber to finish by giving it a chance to run a tiny trampoline
       context->thread = std::move(context->thread).resume_with(
-         [](boost::context::fiber&& fb){ return boost::context::fiber{}; } // Return an empty fiber -> done
+         [](boost::context::fiber&& /*fb*/){ return boost::context::fiber{}; } // Return an empty fiber -> done
       );
    }
    context->~port_context();
@@ -125,6 +125,8 @@ void port_switch(port_context_t* /*from*/, port_context_t* to)
 // Start the very first thread
 void port_start_first(port_context_t* first)
 {
+   LOG_PORT("port_start_first()", 0);
+
    tls_current = first;
    first->thread = std::move(first->thread).resume(); // Run until first yield
    tls_current = nullptr;
@@ -148,10 +150,10 @@ void port_yield()
 
 void port_idle()
 {
-   LOG_PORT("port_idle()");
+   LOG_PORT("port_idle()", 0);
 
    // Sleep 1 ms (to simulate power saving) then yield cooperatively
-   struct timespec req{.tv_nsec = 1'000'000};
+   struct timespec req{.tv_sec = 0, .tv_nsec = 1'000'000};
    nanosleep(&req, nullptr);
    port_yield();
 }

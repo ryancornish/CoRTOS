@@ -25,8 +25,6 @@
 
 namespace rtk
 {
-   static void DEBUG_DUMP_READY_QUEUE(const char* where);
-
    static constexpr uint32_t UINT32_BITS = std::numeric_limits<uint32_t>::digits;
    static constexpr uint8_t IDLE_THREAD_ID = 1; // Reserved
    static constexpr Thread::Priority IDLE_PRIORITY(MAX_PRIORITIES - 1);
@@ -359,14 +357,15 @@ namespace rtk
       port_set_thread_pointer(next);
       port_switch(previous_task ? previous_task->context() : nullptr, iss.current_task->context());
 
-      LOG_SCHED("~context_switch_to() returned to scheduler");
+      LOG_SCHED("~context_switch_to() returned to scheduler", 0);
    }
 
    static void schedule()
    {
       if (iss.preempt_disabled.load(std::memory_order_acquire)) return;
       if (!iss.need_reschedule.exchange(false)) return;
-      DEBUG_DUMP_READY_QUEUE("schedule() snapshot");
+
+      LOG_SCHED_READY_MATRIX();
 
       auto const now = Scheduler::tick_now();
 
@@ -449,6 +448,8 @@ namespace rtk
 
    void Scheduler::init(uint32_t tick_hz)
    {
+      LOG_SCHED("Scheduler::init(%u hz)", tick_hz);
+
       port_init(tick_hz);
       // Create the idle thread
       StackLayout slayout(idle_stack, 0);
@@ -470,10 +471,14 @@ namespace rtk
 
    void Scheduler::start()
    {
-      DEBUG_DUMP_READY_QUEUE("start() entry");
+      LOG_SCHED("Scheduler::start()", 0);
+      LOG_SCHED_READY_MATRIX();
+
       auto* first = iss.ready_matrix.pop_highest_task();
       assert(first != nullptr);
-      DEBUG_DUMP_READY_QUEUE("start() head picked/removed");
+
+      LOG_SCHED("Scheduler::start() pick first @ID(%u) @PRIO(%u)", first->id, first->priority);
+
       iss.current_task = first;
       iss.current_task->state = TaskControlBlock::State::Running;
       iss.next_slice_tick.store(Scheduler::tick_now() + TIME_SLICE);
@@ -485,7 +490,7 @@ namespace rtk
       if constexpr (RTK_SIMULATION) {
          while (true) {
             schedule();
-            struct timespec req{.tv_nsec = 1'000'000};
+            struct timespec req{.tv_sec = 0, .tv_nsec = 1'000'000};
             nanosleep(&req, nullptr);
          }
       }
@@ -544,7 +549,7 @@ namespace rtk
       port_context_init(tcb->context(), slayout.user_stack.data(), slayout.user_stack.size(), thread_trampoline, tcb);
       set_task_ready(tcb);
 
-      DEBUG_DUMP_READY_QUEUE("Thread() created");
+      LOG_SCHED_READY_MATRIX();
    }
 
    Thread::~Thread()
@@ -693,7 +698,7 @@ namespace rtk
 
    extern "C" void rtk_on_tick(void)
    {
-      LOG_PORT("rtk_on_tick()");
+      LOG_PORT("rtk_on_tick()", 0);
 
       auto const now = Scheduler::tick_now();
       if (iss.next_wake_tick.due(now) || iss.next_slice_tick.due(now)) {
@@ -706,23 +711,24 @@ namespace rtk
 
    extern "C" void rtk_request_reschedule(void)
    {
-      LOG_PORT("rtk_request_reschedule()");
+      LOG_PORT("rtk_request_reschedule()", 0);
 
       iss.need_reschedule.store(true, std::memory_order_relaxed);
       // Under simulation we should return to the scheduler loop in user context
       // On bare metal, we should pend a software interrupt and return from this ISR
    }
 
-
-   static void DEBUG_DUMP_READY_QUEUE(const char*)
-   {
-      std::printf("[tick=%08u] bitmap: %s", port_tick_now(), iss.ready_matrix.bitmap_view().to_string().c_str());
-      for (unsigned p = 0; p < MAX_PRIORITIES; ++p) {
-         if (!iss.ready_matrix.empty_at(p)) {
-            std::printf(" p%u(%zu)", p, iss.ready_matrix.size_at(p));
-         }
-      }
-      std::printf(" current_task_id=%u\n", iss.current_task ? iss.current_task->id : 0);
-   }
-
 } // namespace rtk
+
+
+static void LOG_SCHED_READY_MATRIX()
+{
+   std::string s("|");
+   for (unsigned p = 0; p < rtk::MAX_PRIORITIES; ++p) {
+      if (rtk::iss.ready_matrix.empty_at(p)) s.append(" 0|");
+      else s.append(std::format("{: >2}|", rtk::iss.ready_matrix.size_at(p)));
+   }
+             LOG_SCHED("ready_matrix table:  HIGH                                       MEDIUM                                          LOW  \n"
+"|---------------------     priority_level: | 0| 1| 2| 3| 4| 5| 6| 7| 8| 9|10|11|12|13|14|15|16|17|18|19|20|21|22|23|24|25|26|27|28|29|30|31|\n"
+"|---------------------        ready_count: %s", s.c_str());
+}
