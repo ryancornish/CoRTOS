@@ -357,7 +357,7 @@ namespace rtk
       port_set_thread_pointer(next);
       port_switch(previous_task ? previous_task->context() : nullptr, iss.current_task->context());
 
-      LOG_SCHED("~context_switch_to() returned to scheduler", 0);
+      LOG_SCHED("~context_switch_to() returned to scheduler");
    }
 
    static void schedule()
@@ -471,7 +471,7 @@ namespace rtk
 
    void Scheduler::start()
    {
-      LOG_SCHED("Scheduler::start()", 0);
+      LOG_SCHED("Scheduler::start()");
       LOG_SCHED_READY_MATRIX();
 
       auto* first = iss.ready_matrix.pop_highest_task();
@@ -698,7 +698,7 @@ namespace rtk
 
    extern "C" void rtk_on_tick(void)
    {
-      LOG_PORT("rtk_on_tick()", 0);
+      LOG_PORT("rtk_on_tick()");
 
       auto const now = Scheduler::tick_now();
       if (iss.next_wake_tick.due(now) || iss.next_slice_tick.due(now)) {
@@ -711,7 +711,7 @@ namespace rtk
 
    extern "C" void rtk_request_reschedule(void)
    {
-      LOG_PORT("rtk_request_reschedule()", 0);
+      LOG_PORT("rtk_request_reschedule()");
 
       iss.need_reschedule.store(true, std::memory_order_relaxed);
       // Under simulation we should return to the scheduler loop in user context
@@ -720,7 +720,7 @@ namespace rtk
 
 } // namespace rtk
 
-
+#if DEBUG_PRINT_ENABLE
 static void LOG_SCHED_READY_MATRIX()
 {
    std::string s("|");
@@ -732,3 +732,5 @@ static void LOG_SCHED_READY_MATRIX()
 "|---------------------     priority_level: | 0| 1| 2| 3| 4| 5| 6| 7| 8| 9|10|11|12|13|14|15|16|17|18|19|20|21|22|23|24|25|26|27|28|29|30|31|\n"
 "|---------------------        ready_count: %s", s.c_str());
 }
+#endif
+

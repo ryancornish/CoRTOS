@@ -125,7 +125,7 @@ void port_switch(port_context_t* /*from*/, port_context_t* to)
 // Start the very first thread
 void port_start_first(port_context_t* first)
 {
-   LOG_PORT("port_start_first()", 0);
+   LOG_PORT("port_start_first()");
 
    tls_current = first;
    first->thread = std::move(first->thread).resume(); // Run until first yield
@@ -150,7 +150,7 @@ void port_yield()
 
 void port_idle()
 {
-   LOG_PORT("port_idle()", 0);
+   LOG_PORT("port_idle()");
 
    // Sleep 1 ms (to simulate power saving) then yield cooperatively
    struct timespec req{.tv_sec = 0, .tv_nsec = 1'000'000};

@@ -54,18 +54,9 @@ namespace debug
                   color(ch),
                   port_tick_now(),
                   label(ch));
-      std::printf(fmt, args...);
+      if constexpr (sizeof...(args) == 0) std::printf("%s", fmt);
+      else std::printf(fmt, args...);
       std::printf("%s\n", reset());
-   }
-
-#else
-   // No-colour / no-logging version
-   template <typename... Args>
-   inline void print(Channel, const char* fmt, Args... args)
-   {
-      std::printf("[tick=%08u] ", port_tick_now());
-      std::printf(fmt, args...);
-      std::printf("\n");
    }
 #endif
 
