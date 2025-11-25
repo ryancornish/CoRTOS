@@ -41,11 +41,14 @@ namespace rtk
       void remove(TaskControlBlock* tcb) noexcept;
    };
 
+   template<typename T> struct LinkedListNode { T* next; T* prev; };
+
    struct TaskControlBlock
    {
       uint32_t id;
       enum class State : uint8_t { Ready, Running, Sleeping, Blocked} state{State::Ready};
-      uint8_t priority;
+      uint8_t base_priority;
+      uint8_t priority{base_priority};
       Tick    wake_tick{0};
       WaitTarget wait_target;
 
@@ -53,9 +56,11 @@ namespace rtk
       Thread::Entry entry;
 
       // Intrusive queue/list links for TaskQueue
-      TaskControlBlock* next{nullptr};
-      TaskControlBlock* prev{nullptr};
+      LinkedListNode<TaskControlBlock> tq_node{.next = nullptr, .prev = nullptr};
       uint16_t sleep_index{UINT16_MAX};
+
+      // List of mutexes currently held by me (used for priority inheritance)
+      struct MutexImpl* held_mutex_head{nullptr};
 
       // Opaque, in-place port context storage
       OpaqueImpl<port_context_t, RTK_PORT_CONTEXT_SIZE, RTK_PORT_CONTEXT_ALIGN> context_storage;
@@ -63,7 +68,7 @@ namespace rtk
       constexpr port_context_t const* context() const noexcept { return context_storage.get(); }
 
       TaskControlBlock(uint32_t id, Thread::Priority priority, std::span<std::byte> stack, Thread::Entry entry) :
-         id(id), priority(priority), stack(stack), entry(entry) {}
+         id(id), base_priority(priority), stack(stack), entry(entry) {}
    };
 
    class TaskQueue
@@ -80,16 +85,16 @@ namespace rtk
       [[nodiscard]] size_t size() const noexcept
       {
          std::size_t n = 0;
-         for (auto* tcb = head; tcb; tcb = tcb->next) ++n;
+         for (auto* tcb = head; tcb; tcb = tcb->tq_node.next) ++n;
          return n;
       }
 
       void push_back(TaskControlBlock* tcb) noexcept
       {
-         assert(tcb->next == nullptr && tcb->prev == nullptr && "TCB already linked");
-         tcb->next = nullptr;
-         tcb->prev = tail;
-         if (tail) tail->next = tcb; else head = tcb;
+         assert(tcb->tq_node.next == nullptr && tcb->tq_node.prev == nullptr && "TCB already linked");
+         tcb->tq_node.next = nullptr;
+         tcb->tq_node.prev = tail;
+         if (tail) tail->tq_node.next = tcb; else head = tcb;
          tail = tcb;
       }
 
@@ -97,17 +102,17 @@ namespace rtk
       {
          if (!head) return nullptr;
          auto* tcb = head;
-         head = tcb->next;
-         if (head) head->prev = nullptr; else tail = nullptr;
-         tcb->next = tcb->prev = nullptr;
+         head = tcb->tq_node.next;
+         if (head) head->tq_node.prev = nullptr; else tail = nullptr;
+         tcb->tq_node.next = tcb->tq_node.prev = nullptr;
          return tcb;
       }
 
       void remove(TaskControlBlock* tcb) noexcept
       {
-         if (tcb->prev) tcb->prev->next = tcb->next; else head = tcb->next;
-         if (tcb->next) tcb->next->prev = tcb->prev; else tail = tcb->prev;
-         tcb->next = tcb->prev = nullptr;
+         if (tcb->tq_node.prev) tcb->tq_node.prev->tq_node.next = tcb->tq_node.next; else head = tcb->tq_node.next;
+         if (tcb->tq_node.next) tcb->tq_node.next->tq_node.prev = tcb->tq_node.prev; else tail = tcb->tq_node.prev;
+         tcb->tq_node.next = tcb->tq_node.prev = nullptr;
       }
    };
    static_assert(std::is_trivially_constructible_v<TaskQueue>, "Must be usable within OpaqueImpl structs");
@@ -179,10 +184,10 @@ namespace rtk
 
       void enqueue_task(TaskControlBlock* tcb) noexcept
       {
-         assert(tcb->next == nullptr && tcb->prev == nullptr && "duplicate enqueue");
          matrix[tcb->priority].push_back(tcb);
          bitmap |= (1u << tcb->priority);
       }
+
       TaskControlBlock* pop_highest_task() noexcept
       {
          if (bitmap == 0) return nullptr;
@@ -191,12 +196,14 @@ namespace rtk
          if (matrix[priority].empty()) bitmap &= ~(1u << priority);
          return tcb;
       }
+
       [[nodiscard]] TaskControlBlock* peek_highest_task() const noexcept
       {
          if (bitmap == 0) return nullptr;
          auto const priority = std::countr_zero(bitmap);
          return matrix[priority].front();
       }
+
       void remove_task(TaskControlBlock* tcb) noexcept
       {
          auto const priority = tcb->priority;
@@ -578,7 +585,36 @@ namespace rtk
       TaskControlBlock* owner;
       TaskQueue wait_queue;
 
+      // List of mutexes held by owner
+      LinkedListNode<MutexImpl> ml_node;
+
       constexpr MutexImpl() = default;
+
+      // Assumes preemption is already disabled
+      void link_to_owner(TaskControlBlock* new_owner) noexcept
+      {
+         if (owner == new_owner) return;
+
+         // Unlink from previous owner, if any
+         if (owner) {
+            if (ml_node.prev) {
+               ml_node.prev->ml_node.next = ml_node.next;
+            } else {
+               owner->held_mutex_head = ml_node.next;
+            }
+            if (ml_node.next) ml_node.next->ml_node.prev = ml_node.prev;
+         }
+
+         owner = new_owner;
+         ml_node.next = ml_node.prev = nullptr;
+
+         // Link into new owner's list
+         if (owner) {
+            ml_node.next = owner->held_mutex_head;
+            if (ml_node.next) ml_node.next->ml_node.prev = this;
+            owner->held_mutex_head = this;
+         }
+      }
 
       // Assumes preemption is already disabled
       bool try_lock_under_guard()
@@ -587,7 +623,7 @@ namespace rtk
          assert(current && "Mutex::try_lock() with no current task");
 
          if (owner != nullptr) return false;
-         owner = current;
+         link_to_owner(current);
          return true;
       }
    };
@@ -595,6 +631,50 @@ namespace rtk
    static_assert(std::is_standard_layout_v<MutexImpl>,         "Reinterpreting opaque block is now UB");
    static_assert(sizeof(MutexImpl) == sizeof(Mutex::ImplStorage),   "Adjust forward size declaration in header to match");
    static_assert(alignof(MutexImpl) == alignof(Mutex::ImplStorage), "Adjust forward align declaration in header to match");
+
+   static void set_effective_priority(TaskControlBlock* tcb, uint8_t new_priority)
+   {
+      if (new_priority == tcb->priority) return;
+
+      bool was_ready = tcb->state == TaskControlBlock::State::Ready;
+      if (was_ready) iss.ready_matrix.remove_task(tcb);
+
+      tcb->priority = new_priority;
+      if (was_ready) iss.ready_matrix.enqueue_task(tcb);
+
+      // Let the scheduler re-evaluate who should run
+      iss.need_reschedule.store(true, std::memory_order_relaxed);
+   }
+
+   static void recompute_effective_priority(TaskControlBlock* tcb)
+   {
+      auto new_priority = tcb->base_priority;
+
+      // For each mutex this thread currently owns...
+      for (MutexImpl* mutex = tcb->held_mutex_head; mutex; mutex = mutex->ml_node.next) {
+         // ...scan waiters and inherit the highest priority
+         for (TaskControlBlock* waiter = mutex->wait_queue.front(); waiter; waiter = waiter->tq_node.next) {
+            new_priority = std::min(waiter->priority, new_priority);
+         }
+      }
+      set_effective_priority(tcb, new_priority);
+   }
+
+   static void propagate_priority_to_owner(MutexImpl* mutex, TaskControlBlock* blocking_tcb)
+   {
+      auto* owner = mutex->owner;
+      if (!owner) return;
+      if (blocking_tcb->priority >= owner->priority) return; // Owner is already as high or higher, nothing to do
+
+      set_effective_priority(owner, blocking_tcb->priority);
+
+      // If owner itself is blocked on another mutex, propagate further
+      if (auto* mutex_ptr = std::get_if<MutexImpl*>(&owner->wait_target.sync_prim)) {
+         if (*mutex_ptr && (*mutex_ptr)->owner && (*mutex_ptr)->owner != owner) {
+            propagate_priority_to_owner(*mutex_ptr, blocking_tcb);
+         }
+      }
+   }
 
    [[nodiscard]] bool Mutex::is_locked() const noexcept { return self->owner != nullptr; }
 
@@ -612,6 +692,9 @@ namespace rtk
          current->wait_target = self.get();
          current->state = TaskControlBlock::State::Blocked;
          self->wait_queue.push_back(current);
+
+         // Priority inheritance: boost owner and possibly chain
+         propagate_priority_to_owner(self.get(), current);
 
          rtk_request_reschedule();
       }
@@ -648,6 +731,7 @@ namespace rtk
 
          current->wait_target = self.get();
          self->wait_queue.push_back(current);
+         propagate_priority_to_owner(self.get(), current);
          remaining = deadline - now;
       }
       Scheduler::sleep_for(remaining);
@@ -669,7 +753,8 @@ namespace rtk
       LOG_SYNC("Mutex::unlock() by @ID(%u)", current->id);
 
       if (self->wait_queue.empty()) {
-         self->owner = nullptr;
+         self->link_to_owner(nullptr);
+         recompute_effective_priority(current);
          return;
       }
 
@@ -681,8 +766,13 @@ namespace rtk
 
       LOG_SYNC("Mutex::unlock() waking waiter @ID(%u) on @MUTEX_P(%p)", next_owner->id, (void*)this);
 
+      self->link_to_owner(next_owner);
+
       next_owner->state = TaskControlBlock::State::Ready;
       set_task_ready(next_owner);
+
+      // Old owner may have no more (or lower-prio) waiters across its remaining mutexes
+      recompute_effective_priority(current);
    }
 
    void WaitTarget::remove(TaskControlBlock* tcb) noexcept
@@ -691,6 +781,7 @@ namespace rtk
          using SyncPrim = std::remove_reference_t<decltype(sync_prim)>;
          if constexpr (std::is_same_v<SyncPrim, MutexImpl*>) {
             sync_prim->wait_queue.remove(tcb);
+            if (sync_prim->owner) recompute_effective_priority(sync_prim->owner);
          }
       }, sync_prim);
       clear();

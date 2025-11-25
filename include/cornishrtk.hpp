@@ -171,7 +171,7 @@ namespace rtk
    class Mutex
    {
    public:
-      using ImplStorage = OpaqueImpl<struct MutexImpl, 24, 8>;
+      using ImplStorage = OpaqueImpl<struct MutexImpl, 40, 8>;
       constexpr Mutex() = default;
       ~Mutex() = default;
       constexpr Mutex(Mutex&&)            = default;
