@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <format>
+#include <utility>
 
 extern "C" uint32_t port_tick_now(void);
 
@@ -58,6 +59,16 @@ namespace debug
       else std::printf(fmt, args...);
       std::printf("%s\n", reset());
    }
+
+   inline constexpr const char* state_to_str(uint8_t state) {
+      switch (state) {
+         case 0: return "Ready";
+         case 1: return "Running";
+         case 2: return "Sleeping";
+         case 3: return "Blocked";
+         default: return "???";
+      }
+   }
 #endif
 
 }
@@ -68,13 +79,18 @@ namespace debug
 #  define LOG_PORT(fmt, ...)   ::debug::print(::debug::Channel::Port,      fmt, ##__VA_ARGS__)
 #  define LOG_THREAD(fmt, ...) ::debug::print(::debug::Channel::Thread,    fmt, ##__VA_ARGS__)
 #  define LOG_SYNC(fmt, ...)   ::debug::print(::debug::Channel::Sync,      fmt, ##__VA_ARGS__)
+#  define STATE_TO_STR(state)  ::debug::state_to_str(std::to_underlying(state))
 [[maybe_unused]] static void LOG_SCHED_READY_MATRIX();
+   inline void* ptr_suffix(void* ptr) { return (void*)((uintptr_t)ptr % 10000); }
+#  define TRUE_FALSE(what) what ? "TRUE" : "FALSE"
 #else
 #  define LOG_SCHED(...)  ((void)0)
 #  define LOG_PORT(...)   ((void)0)
 #  define LOG_THREAD(...) ((void)0)
 #  define LOG_SYNC(...)   ((void)0)
 #  define LOG_SCHED_READY_MATRIX() ((void)0)
+#  define STATE_TO_STR(state)
+#  define TRUE_FALSE(what)
 
 #endif
 

@@ -46,7 +46,7 @@ namespace rtk
    struct TaskControlBlock
    {
       uint32_t id;
-      enum class State : uint8_t { Ready, Running, Sleeping, Blocked} state{State::Ready};
+      enum class State : uint8_t { Ready, Running, Sleeping, Blocked } state{State::Ready};
       uint8_t const base_priority;
       uint8_t priority{base_priority};
       Tick    wake_tick{0};
@@ -624,6 +624,7 @@ namespace rtk
 
          if (owner != nullptr) return false;
          link_to_owner(current);
+         LOG_SYNC("try_lock_under_guard() @ID(%u) ACQUIRED @MUTEX(%p)", current->id, ptr_suffix(this));
          return true;
       }
    };
@@ -635,12 +636,15 @@ namespace rtk
    static void set_effective_priority(TaskControlBlock* tcb, uint8_t new_priority)
    {
       if (new_priority == tcb->priority) return;
+      auto const old_priority = tcb->priority; // Just capturing for logging
 
       bool was_ready = tcb->state == TaskControlBlock::State::Ready;
       if (was_ready) iss.ready_matrix.remove_task(tcb);
 
       tcb->priority = new_priority;
       if (was_ready) iss.ready_matrix.enqueue_task(tcb);
+
+      LOG_SCHED("set_effective_priority() @ID(%u) %u -> %u (state=%s, was_ready=%s)", tcb->id, old_priority, new_priority, STATE_TO_STR(tcb->state), TRUE_FALSE(was_ready));
 
       // Let the scheduler re-evaluate who should run
       iss.need_reschedule.store(true, std::memory_order_relaxed);
@@ -649,28 +653,40 @@ namespace rtk
    static void recompute_effective_priority(TaskControlBlock* tcb)
    {
       auto new_priority = tcb->base_priority;
+      LOG_SCHED("recompute_effective_priority() @ID(%u) base=%u", tcb->id, new_priority);
 
       // For each mutex this thread currently owns...
       for (MutexImpl* mutex = tcb->held_mutex_head; mutex; mutex = mutex->ml_node.next) {
+         LOG_SCHED("  scanning held @MUTEX(%p) for waiters", ptr_suffix(mutex));
          // ...scan waiters and inherit the highest priority
          for (TaskControlBlock* waiter = mutex->wait_queue.front(); waiter; waiter = waiter->tq_node.next) {
+            LOG_SCHED("    waiter @ID(%u) @PRIO(%u)", waiter->id, waiter->priority);
             new_priority = std::min(waiter->priority, new_priority);
          }
       }
+      LOG_SCHED("  effective priority candidate for @ID(%u) is %u", tcb->id, new_priority);
       set_effective_priority(tcb, new_priority);
    }
 
    static void propagate_priority_to_owner(MutexImpl* mutex, TaskControlBlock* blocking_tcb)
    {
       auto* owner = mutex->owner;
-      if (!owner) return;
-      if (blocking_tcb->priority >= owner->priority) return; // Owner is already as high or higher, nothing to do
+      if (!owner) {
+         LOG_SYNC("propagate_priority_to_owner() on @MUTEX(%p) but no owner (blocking @ID(%u))", ptr_suffix(mutex), blocking_tcb->id);
+         return;
+      }
+      LOG_SYNC("propagate_priority_to_owner() @MUTEX(%p) owner @ID(%u @PRIO(%u)) <- blocking @ID(%u @PRIO(%u))", ptr_suffix(mutex), owner->id, owner->priority, blocking_tcb->id, blocking_tcb->priority);
+      if (blocking_tcb->priority >= owner->priority) {
+         LOG_SYNC("  no bump: owner priority %u already <= blocking %u", owner->priority, blocking_tcb->priority);
+         return; // Owner is already as high or higher, nothing to do
+      }
 
       set_effective_priority(owner, blocking_tcb->priority);
 
       // If owner itself is blocked on another mutex, propagate further
       if (auto* mutex_ptr = std::get_if<MutexImpl*>(&owner->wait_target.sync_prim)) {
          if (*mutex_ptr && (*mutex_ptr)->owner && (*mutex_ptr)->owner != owner) {
+            LOG_SYNC("  owner @ID(%u) is blocked on @MUTEX(%p): propagating further", owner->id, ptr_suffix(*mutex_ptr));
             propagate_priority_to_owner(*mutex_ptr, blocking_tcb);
          }
       }
@@ -687,7 +703,7 @@ namespace rtk
          auto* current = iss.current_task;
          assert(self->owner != current && "Mutex::lock() called recursively by owner");
 
-         LOG_SYNC("Mutex::lock(): id=%u BLOCKED on @MUTEX_P(%p)", current->id, (void*)this);
+         LOG_SYNC("Mutex::lock() @ID(%u) BLOCKED on @MUTEX(%p)", current->id, ptr_suffix(this));
 
          current->wait_target = self.get();
          current->state = TaskControlBlock::State::Blocked;
@@ -727,7 +743,7 @@ namespace rtk
          auto* current = iss.current_task;
          assert(self->owner != current && "Mutex::lock() called recursively by owner");
 
-         LOG_SYNC("Mutex::try_lock_until(): id=%u BLOCKED on mutex %p", current->id, (void*)this);
+         LOG_SYNC("Mutex::try_lock_until() @ID(%u) BLOCKED on @MUTEX(%p)", current->id, ptr_suffix(this));
 
          current->wait_target = self.get();
          self->wait_queue.push_back(current);
@@ -763,7 +779,7 @@ namespace rtk
       iss.sleepers.remove(next_owner); // noop if it wasn't in the heap
       next_owner->wait_target.clear();
 
-      LOG_SYNC("Mutex::unlock() waking waiter @ID(%u) on @MUTEX_P(%p)", next_owner->id, (void*)this);
+      LOG_SYNC("Mutex::unlock() waking waiter @ID(%u) on @MUTEX(%p)", next_owner->id, ptr_suffix(this));
 
       self->link_to_owner(next_owner);
 
