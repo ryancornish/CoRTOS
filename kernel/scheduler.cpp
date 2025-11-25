@@ -574,7 +574,7 @@ namespace rtk
 
    std::size_t Thread::reserved_stack_size()
    {
-      auto tcb_size = align_up(sizeof(TaskControlBlock), alignof(TaskControlBlock));
+      constexpr auto tcb_size = align_up(sizeof(TaskControlBlock), alignof(TaskControlBlock));
       auto tls_size = 0; // TODO
       return tcb_size + tls_size;
    }
