@@ -47,7 +47,7 @@ namespace rtk
    {
       uint32_t id;
       enum class State : uint8_t { Ready, Running, Sleeping, Blocked} state{State::Ready};
-      uint8_t base_priority;
+      uint8_t const base_priority;
       uint8_t priority{base_priority};
       Tick    wake_tick{0};
       WaitTarget wait_target;
@@ -762,7 +762,6 @@ namespace rtk
       assert(next_owner);
       iss.sleepers.remove(next_owner); // noop if it wasn't in the heap
       next_owner->wait_target.clear();
-      self->owner = next_owner;
 
       LOG_SYNC("Mutex::unlock() waking waiter @ID(%u) on @MUTEX_P(%p)", next_owner->id, (void*)this);
 
