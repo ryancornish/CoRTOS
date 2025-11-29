@@ -173,7 +173,7 @@ namespace rtk
    public:
       using ImplStorage = OpaqueImpl<struct MutexImpl, 40, 8>;
       constexpr Mutex() = default;
-      ~Mutex() = default;
+      ~Mutex()          = default;
       constexpr Mutex(Mutex&&)            = default;
       constexpr Mutex& operator=(Mutex&&) = default;
       Mutex(Mutex const&)            = delete;
@@ -190,7 +190,27 @@ namespace rtk
       ImplStorage self;
    };
 
-   class Semaphore;
+   class Semaphore
+   {
+   public:
+      using ImplStorage = OpaqueImpl<struct SemaphoreImpl, 24, 8>;
+      explicit constexpr Semaphore(unsigned initial_count) noexcept;
+      ~Semaphore() = default;
+      constexpr Semaphore(Semaphore&&)            = default;
+      constexpr Semaphore& operator=(Semaphore&&) = default;
+      Semaphore(Semaphore const&)            = delete;
+      Semaphore& operator=(Semaphore const&) = delete;
+
+      [[nodiscard]] unsigned count() const noexcept;
+      void acquire() noexcept;
+      [[nodiscard]] bool try_acquire() noexcept;
+      [[nodiscard]] bool try_acquire_for(Tick::Delta timeout) noexcept;
+      [[nodiscard]] bool try_acquire_until(Tick deadline) noexcept;
+      void release(unsigned n = 1) noexcept;
+
+   private:
+      ImplStorage self;
+   };
 
    class ConditionVar;
 

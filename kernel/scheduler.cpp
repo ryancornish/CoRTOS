@@ -34,9 +34,10 @@ namespace rtk
 
    struct WaitTarget
    {
-      std::variant<std::monostate, MutexImpl*, Semaphore*, ConditionVar*> sync_prim;
-      template<typename T> WaitTarget& operator=(T t) noexcept { sync_prim = t; return *this; }
-      void clear() noexcept { sync_prim = std::monostate{}; }
+      std::variant<std::monostate, MutexImpl*, SemaphoreImpl*, ConditionVar*> sync_prim;
+      bool acquired{false};
+      template<typename T> WaitTarget& operator=(T t) noexcept { sync_prim = t; acquired = false; return *this; }
+      void clear() noexcept { sync_prim = std::monostate{}; acquired = false; }
       constexpr operator bool() const noexcept { return !std::holds_alternative<std::monostate>(sync_prim); }
       void remove(TaskControlBlock* tcb) noexcept;
    };
@@ -113,6 +114,24 @@ namespace rtk
          if (tcb->tq_node.prev) tcb->tq_node.prev->tq_node.next = tcb->tq_node.next; else head = tcb->tq_node.next;
          if (tcb->tq_node.next) tcb->tq_node.next->tq_node.prev = tcb->tq_node.prev; else tail = tcb->tq_node.prev;
          tcb->tq_node.next = tcb->tq_node.prev = nullptr;
+      }
+
+      // FIFO among tcb's with equal priority. Used by sync primitive wait lists, not RR queue
+      TaskControlBlock* pop_highest_priority() noexcept
+      {
+         if (!head) return nullptr;
+
+         TaskControlBlock* best     = head;
+         uint8_t           best_pri = head->priority;
+
+         for (auto* tcb = head->tq_node.next; tcb; tcb = tcb->tq_node.next) {
+            if (tcb->priority < best_pri) {
+               best     = tcb;
+               best_pri = tcb->priority;
+            }
+         }
+         remove(best);
+         return best;
       }
    };
    static_assert(std::is_trivially_constructible_v<TaskQueue>, "Must be usable within OpaqueImpl structs");
@@ -352,6 +371,23 @@ namespace rtk
       }
    }
 
+   static void set_effective_priority(TaskControlBlock* tcb, uint8_t new_priority)
+   {
+      if (new_priority == tcb->priority) return;
+      auto const old_priority = tcb->priority; // Just capturing for logging
+
+      bool was_ready = tcb->state == TaskControlBlock::State::Ready;
+      if (was_ready) iss.ready_matrix.remove_task(tcb);
+
+      tcb->priority = new_priority;
+      if (was_ready) iss.ready_matrix.enqueue_task(tcb);
+
+      LOG_SCHED("set_effective_priority() @ID(%u) %u -> %u (state=%s, was_ready=%s)", tcb->id, old_priority, new_priority, STATE_TO_STR(tcb->state), TRUE_FALSE(was_ready));
+
+      // Let the scheduler re-evaluate who should run
+      iss.need_reschedule.store(true, std::memory_order_relaxed);
+   }
+
    static void context_switch_to(TaskControlBlock* next)
    {
       if (next == iss.current_task) return;
@@ -381,7 +417,6 @@ namespace rtk
          auto* top_tcb = iss.sleepers.top();
          if (!top_tcb || now.is_before(top_tcb->wake_tick)) break; // Noone asleep or not due yet
          (void)iss.sleepers.pop_min();
-         //
          if (top_tcb->wait_target) top_tcb->wait_target.remove(top_tcb); // Sleeper was waiting for a sync prim
 
          LOG_SCHED("schedule() sleeper @ID(%u) woken up for @ALARM(%u)", top_tcb->id, top_tcb->wake_tick.value());
@@ -620,11 +655,15 @@ namespace rtk
       bool try_lock_under_guard()
       {
          auto* current = iss.current_task;
-         assert(current && "Mutex::try_lock() with no current task");
+         assert(current && "Mutex::try_lock_under_guard() with no current task");
+         assert(current != owner && "Recursive mutex lock attempt");
 
-         if (owner != nullptr) return false;
+         if (owner != nullptr) {
+            LOG_SYNC("Mutex::try_lock_under_guard() @ID(%u) failed to acquire @MUTEX(%p) - owned by @ID()", current->id, ptr_suffix(this), owner->id);
+            return false;
+         }
          link_to_owner(current);
-         LOG_SYNC("try_lock_under_guard() @ID(%u) ACQUIRED @MUTEX(%p)", current->id, ptr_suffix(this));
+         LOG_SYNC("Mutex::try_lock_under_guard() @ID(%u) ACQUIRED @MUTEX(%p)", current->id, ptr_suffix(this));
          return true;
       }
    };
@@ -632,23 +671,6 @@ namespace rtk
    static_assert(std::is_standard_layout_v<MutexImpl>,         "Reinterpreting opaque block is now UB");
    static_assert(sizeof(MutexImpl) == sizeof(Mutex::ImplStorage),   "Adjust forward size declaration in header to match");
    static_assert(alignof(MutexImpl) == alignof(Mutex::ImplStorage), "Adjust forward align declaration in header to match");
-
-   static void set_effective_priority(TaskControlBlock* tcb, uint8_t new_priority)
-   {
-      if (new_priority == tcb->priority) return;
-      auto const old_priority = tcb->priority; // Just capturing for logging
-
-      bool was_ready = tcb->state == TaskControlBlock::State::Ready;
-      if (was_ready) iss.ready_matrix.remove_task(tcb);
-
-      tcb->priority = new_priority;
-      if (was_ready) iss.ready_matrix.enqueue_task(tcb);
-
-      LOG_SCHED("set_effective_priority() @ID(%u) %u -> %u (state=%s, was_ready=%s)", tcb->id, old_priority, new_priority, STATE_TO_STR(tcb->state), TRUE_FALSE(was_ready));
-
-      // Let the scheduler re-evaluate who should run
-      iss.need_reschedule.store(true, std::memory_order_relaxed);
-   }
 
    static void recompute_effective_priority(TaskControlBlock* tcb)
    {
@@ -684,7 +706,7 @@ namespace rtk
       set_effective_priority(owner, blocking_tcb->priority);
 
       // If owner itself is blocked on another mutex, propagate further
-      if (auto* mutex_ptr = std::get_if<MutexImpl*>(&owner->wait_target.sync_prim)) {
+      if (auto** mutex_ptr = std::get_if<MutexImpl*>(&owner->wait_target.sync_prim)) {
          if (*mutex_ptr && (*mutex_ptr)->owner && (*mutex_ptr)->owner != owner) {
             LOG_SYNC("  owner @ID(%u) is blocked on @MUTEX(%p): propagating further", owner->id, ptr_suffix(*mutex_ptr));
             propagate_priority_to_owner(*mutex_ptr, blocking_tcb);
@@ -699,24 +721,17 @@ namespace rtk
       {
          Scheduler::Lock guard;
          if (self->try_lock_under_guard()) return;
+         LOG_SYNC("Mutex::lock() @ID(%u) BLOCKED on @MUTEX(%p)", iss.current_task->id, ptr_suffix(this));
 
-         auto* current = iss.current_task;
-         assert(self->owner != current && "Mutex::lock() called recursively by owner");
-
-         LOG_SYNC("Mutex::lock() @ID(%u) BLOCKED on @MUTEX(%p)", current->id, ptr_suffix(this));
-
-         current->wait_target = self.get();
-         current->state = TaskControlBlock::State::Blocked;
-         self->wait_queue.push_back(current);
+         iss.current_task->wait_target = self.get();
+         iss.current_task->state = TaskControlBlock::State::Blocked;
+         self->wait_queue.push_back(iss.current_task);
 
          // Priority inheritance: boost owner and possibly chain
-         propagate_priority_to_owner(self.get(), current);
-
+         propagate_priority_to_owner(self.get(), iss.current_task);
          rtk_request_reschedule();
       }
-
-      // Actually block
-      port_yield();
+      port_yield(); // Actually block
    }
 
    bool Mutex::try_lock()
@@ -737,24 +752,24 @@ namespace rtk
          Scheduler::Lock guard;
 
          if (self->try_lock_under_guard()) return true;
+         LOG_SYNC("Mutex::lock() @ID(%u) BLOCKED on @MUTEX(%p)", iss.current_task->id, ptr_suffix(this));
+
          auto const now = Scheduler::tick_now();
          if (now.has_reached(deadline)) return false;
 
-         auto* current = iss.current_task;
-         assert(self->owner != current && "Mutex::lock() called recursively by owner");
-
-         LOG_SYNC("Mutex::try_lock_until() @ID(%u) BLOCKED on @MUTEX(%p)", current->id, ptr_suffix(this));
-
-         current->wait_target = self.get();
-         self->wait_queue.push_back(current);
-         propagate_priority_to_owner(self.get(), current);
+         iss.current_task->wait_target = self.get();
+         iss.current_task->state = TaskControlBlock::State::Blocked; // Will soon be overridden as sleeping
+         self->wait_queue.push_back(iss.current_task);
+         propagate_priority_to_owner(self.get(), iss.current_task);
          remaining = deadline - now;
       }
       Scheduler::sleep_for(remaining);
       {
          Scheduler::Lock guard;
-         auto* current = iss.current_task;
-         return self->owner == current;
+         bool acquired = iss.current_task->wait_target.acquired;
+         iss.current_task->wait_target.clear();
+         assert(!acquired || self->owner == iss.current_task); // If the wait target has been acquired, then we MUST be the owner!
+         return acquired;
       }
    }
 
@@ -762,32 +777,148 @@ namespace rtk
    {
       Scheduler::Lock guard;
 
-      auto* current = iss.current_task;
-      assert(current && "Mutex::unlock() with no current task");
-      assert(self->owner == current && "Mutex::unlock() by non-owner");
+      assert(iss.current_task && "Mutex::unlock() with no current task");
+      assert(self->owner == iss.current_task && "Mutex::unlock() by non-owner");
 
-      LOG_SYNC("Mutex::unlock() by @ID(%u)", current->id);
+      LOG_SYNC("Mutex::unlock() by @ID(%u)", iss.current_task->id);
 
       if (self->wait_queue.empty()) {
          self->link_to_owner(nullptr);
-         recompute_effective_priority(current);
+         recompute_effective_priority(iss.current_task);
          return;
       }
 
-      TaskControlBlock* next_owner = self->wait_queue.pop_front();
+      TaskControlBlock* next_owner = self->wait_queue.pop_highest_priority();
       assert(next_owner);
       iss.sleepers.remove(next_owner); // noop if it wasn't in the heap
-      next_owner->wait_target.clear();
+      next_owner->wait_target.acquired = true;
 
       LOG_SYNC("Mutex::unlock() waking waiter @ID(%u) on @MUTEX(%p)", next_owner->id, ptr_suffix(this));
 
       self->link_to_owner(next_owner);
 
       next_owner->state = TaskControlBlock::State::Ready;
+      auto* old_owner = iss.current_task;
       set_task_ready(next_owner);
 
       // Old owner may have no more (or lower-prio) waiters across its remaining mutexes
-      recompute_effective_priority(current);
+      recompute_effective_priority(old_owner);
+   }
+
+   struct SemaphoreImpl
+   {
+      unsigned internal_count;
+      TaskQueue wait_queue;
+      // Assumes preemption is already disabled
+      bool try_acquire_under_guard()
+      {
+         auto* current = iss.current_task;
+         assert(current && "Semaphore::try_acquire_under_guard() with no current task");
+
+         if (internal_count == 0) {
+            LOG_SYNC("Semaphore::try_acquire_under_guard() @ID(%u) failed to acquire. @COUNT(%u)", current, internal_count);
+            return false;
+         }
+         --internal_count;
+         LOG_SYNC("try_acquire_under_guard() @ID(%u) ACQUIRED. @COUNT(%u)", current, internal_count);
+         return true;
+      }
+   };
+   static_assert(std::is_trivially_constructible_v<SemaphoreImpl>, "Reinterpreting opaque block is now UB");
+   static_assert(std::is_standard_layout_v<SemaphoreImpl>,         "Reinterpreting opaque block is now UB");
+   static_assert(sizeof(SemaphoreImpl) == sizeof(Semaphore::ImplStorage),   "Adjust forward size declaration in header to match");
+   static_assert(alignof(SemaphoreImpl) == alignof(Semaphore::ImplStorage), "Adjust forward align declaration in header to match");
+
+   constexpr Semaphore::Semaphore(unsigned initial_count) noexcept
+   {
+      self->internal_count = initial_count;
+   }
+
+   [[nodiscard]] unsigned Semaphore::count() const noexcept { return self->internal_count; }
+
+   void Semaphore::acquire() noexcept
+   {
+      {
+         Scheduler::Lock guard;
+
+         if (self->try_acquire_under_guard()) return;
+         LOG_SYNC("Semaphore::acquire() @ID(%u) BLOCKED on @SEM(%p)", iss.current_task->id, ptr_suffix(this));
+
+         iss.current_task->wait_target = self.get();
+         iss.current_task->state = TaskControlBlock::State::Blocked;
+         self->wait_queue.push_back(iss.current_task);
+
+         rtk_request_reschedule();
+      }
+      // Actually block
+      port_yield();
+
+      LOG_SYNC("Semaphore::acquire() resumed @ID(%u) with token @COUNT(%u)", iss.current_task->id, self->internal_count);
+   }
+
+   [[nodiscard]] bool Semaphore::try_acquire() noexcept
+   {
+      Scheduler::Lock guard;
+      return (self->try_acquire_under_guard());
+   }
+
+   [[nodiscard]] bool Semaphore::try_acquire_for(Tick::Delta timeout) noexcept
+   {
+      return try_acquire_until(Scheduler::tick_now() + timeout);
+   }
+
+   [[nodiscard]] bool Semaphore::try_acquire_until(Tick deadline) noexcept
+   {
+      Tick::Delta remaining;
+      {
+         Scheduler::Lock guard;
+
+         if (self->try_acquire_under_guard()) return true;
+
+         auto const now = Scheduler::tick_now();
+         if (now.has_reached(deadline)) return false;
+         LOG_SYNC("Semaphore::try_acquire_until() @ID(%u) BLOCKED on @SEM(%p) until @ALARM(%u)", iss.current_task->id, ptr_suffix(this), deadline.value());
+
+         iss.current_task->wait_target = self.get();
+         iss.current_task->state = TaskControlBlock::State::Blocked; // Will soon be overridden as sleeping
+         self->wait_queue.push_back(iss.current_task);
+         remaining = deadline - now;
+      }
+      Scheduler::sleep_for(remaining);
+      {
+         Scheduler::Lock guard;
+         bool acquired = iss.current_task->wait_target.acquired;
+         iss.current_task->wait_target.clear();
+         return acquired;
+      }
+   }
+
+   void Semaphore::release(unsigned n) noexcept
+   {
+      if (n == 0U) return;
+
+      Scheduler::Lock guard;
+
+      LOG_SYNC("Semaphore::release(%u) on @SEM(%p)", n, ptr_suffix(this));
+
+      while (n-- > 0U) {
+         // If there is a waiter, wake it and give it the token.
+         auto* waiter = self->wait_queue.pop_highest_priority();
+         if (waiter) {
+            iss.sleepers.remove(waiter); // noop if it wasn't in the heap
+            waiter->wait_target.acquired = true;
+
+            LOG_SYNC("Semaphore::release() waking waiter @ID(%u) on @SEM(%p)", waiter->id, ptr_suffix(this));
+
+            waiter->state = TaskControlBlock::State::Ready;
+            set_task_ready(waiter);
+         } else {
+            // No waiters, increment the count.
+            ++self->internal_count;
+            LOG_SYNC("Semaphore::release() incremented @COUNT(%u -> %u)", self->internal_count - 1, self->internal_count);
+         }
+      }
+      rtk_request_reschedule();
    }
 
    void WaitTarget::remove(TaskControlBlock* tcb) noexcept
@@ -797,6 +928,8 @@ namespace rtk
          if constexpr (std::is_same_v<SyncPrim, MutexImpl*>) {
             sync_prim->wait_queue.remove(tcb);
             if (sync_prim->owner) recompute_effective_priority(sync_prim->owner);
+         } else if constexpr (std::is_same_v<SyncPrim, SemaphoreImpl*>) {
+            sync_prim->wait_queue.remove(tcb);
          }
       }, sync_prim);
       clear();
