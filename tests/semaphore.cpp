@@ -102,7 +102,7 @@ static void controller()
 }
 
 // --- Stacks and threads -----------------------------------------------------
-static constexpr std::size_t STACK_BYTES = 4096*2;
+static constexpr std::size_t STACK_BYTES = 4096;
 alignas(RTK_STACK_ALIGN) static constinit std::array<std::byte, STACK_BYTES> controller_stack{};
 alignas(RTK_STACK_ALIGN) static constinit std::array<std::byte, STACK_BYTES> high_stack{};
 alignas(RTK_STACK_ALIGN) static constinit std::array<std::byte, STACK_BYTES> mid_stack{};

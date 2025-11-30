@@ -485,7 +485,7 @@ namespace rtk
       while (true) Scheduler::yield();
    }
 
-   alignas(RTK_STACK_ALIGN) static std::array<std::byte, 2048> idle_stack{}; // TODO: size stack
+   alignas(RTK_STACK_ALIGN) static std::array<std::byte, 4096> idle_stack{}; // TODO: size stack
    static void idle_entry() { while(true) port_idle(); }
 
    void Scheduler::init(uint32_t tick_hz)
