@@ -390,7 +390,11 @@ namespace rtk
 
    static void context_switch_to(TaskControlBlock* next)
    {
-      if (next == iss.current_task) return;
+      // "do-not-switch-to-same-task" optimisation does not work
+      // under simulation when the only runnable thread yields
+      if constexpr (!RTK_SIMULATION) {
+         if (next == iss.current_task) return;
+      }
       TaskControlBlock* previous_task = iss.current_task;
       iss.current_task = next;
       iss.current_task->state = TaskControlBlock::State::Running;
