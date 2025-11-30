@@ -34,7 +34,7 @@ namespace rtk
 
    struct WaitTarget
    {
-      std::variant<std::monostate, MutexImpl*, SemaphoreImpl*, ConditionVar*> sync_prim;
+      std::variant<std::monostate, MutexImpl*, SemaphoreImpl*, ConditionVarImpl*> sync_prim;
       bool acquired{false};
       template<typename T> WaitTarget& operator=(T t) noexcept { sync_prim = t; acquired = false; return *this; }
       void clear() noexcept { sync_prim = std::monostate{}; acquired = false; }
@@ -911,6 +911,150 @@ namespace rtk
       rtk_request_reschedule();
    }
 
+   struct ConditionVarImpl
+   {
+      TaskQueue wait_queue;
+   };
+   static_assert(std::is_trivially_constructible_v<ConditionVarImpl>, "Reinterpreting opaque block is now UB");
+   static_assert(std::is_standard_layout_v<ConditionVarImpl>,         "Reinterpreting opaque block is now UB");
+   static_assert(sizeof(ConditionVarImpl) == sizeof(ConditionVar::ImplStorage),   "Adjust forward size declaration in header to match");
+   static_assert(alignof(ConditionVarImpl) == alignof(ConditionVar::ImplStorage), "Adjust forward align declaration in header to match");
+
+   void ConditionVar::wait(Mutex& lock) noexcept
+   {
+      {
+         Scheduler::Lock guard;
+
+         assert(iss.current_task && "ConditionVar::wait() with no current task");
+         LOG_SYNC("ConditionVar::wait() @ID(%u) on @CV(%p) with @MUTEX(%p)", iss.current_task->id, ptr_suffix(this), ptr_suffix(&lock));
+         assert(lock.self->owner == iss.current_task && "ConditionVar::wait() requires caller to own the mutex");
+
+         iss.current_task->wait_target = self.get();
+         iss.current_task->state       = TaskControlBlock::State::Blocked;
+         self->wait_queue.push_back(iss.current_task);
+
+         // Release the mutex, handing it to next waiter (if any)
+         if (lock.self->wait_queue.empty()) {
+            lock.self->link_to_owner(nullptr);
+            recompute_effective_priority(iss.current_task);
+         } else {
+            auto* next_owner = lock.self->wait_queue.pop_highest_priority();
+            assert(next_owner);
+            iss.sleepers.remove(next_owner); // noop if not sleeping
+            next_owner->wait_target.acquired = true; // For timed mutex waits
+
+            LOG_SYNC("ConditionVar::wait() handing @MUTEX(%p) to waiter @ID(%u)", ptr_suffix(&lock), next_owner->id);
+
+            lock.self->link_to_owner(next_owner);
+            auto* old_owner = iss.current_task;
+            set_task_ready(next_owner);
+
+            recompute_effective_priority(old_owner);
+         }
+         rtk_request_reschedule();
+      }
+      port_yield(); // Actually block
+
+      lock.lock();
+   }
+
+   bool ConditionVar::wait_for(Mutex& lock, Tick::Delta timeout) noexcept
+   {
+      return wait_until(lock, Scheduler::tick_now() + timeout);
+   }
+
+   bool ConditionVar::wait_until(Mutex& lock, Tick deadline) noexcept
+   {
+      Tick::Delta remaining;
+      bool signalled;
+
+      {
+         Scheduler::Lock guard;
+
+         assert(iss.current_task && "ConditionVar::wait_until() with no current task");
+
+         auto const now = Scheduler::tick_now();
+         if (now.has_reached(deadline)) {
+            // As per pthread semantics, when wait times out we must still hold the mutex.
+            // We haven't released it yet, so just return false.
+            return false;
+         }
+
+         LOG_SYNC("ConditionVar::wait_until() @ID(%u) on @CV(%p) with @MUTEX(%p) until @ALARM(%u)", iss.current_task->id, ptr_suffix(this), ptr_suffix(&lock), deadline.value());
+
+         assert(lock.self->owner == iss.current_task && "ConditionVar::wait_until() requires caller to own the mutex");
+
+         // 1) Enqueue on condvar
+         iss.current_task->wait_target = self.get();
+         iss.current_task->state       = TaskControlBlock::State::Blocked;
+         self->wait_queue.push_back(iss.current_task);
+
+         // 2) Release the mutex, handing to next owner if any (same as wait())
+         if (lock.self->wait_queue.empty()) {
+            lock.self->link_to_owner(nullptr);
+            recompute_effective_priority(iss.current_task);
+         } else {
+            TaskControlBlock* next_owner = lock.self->wait_queue.pop_highest_priority();
+            assert(next_owner);
+            iss.sleepers.remove(next_owner);
+            next_owner->wait_target.acquired = true;
+
+            LOG_SYNC("ConditionVar::wait_until() handing @MUTEX(%p) to waiter @ID(%u)", ptr_suffix(&lock), next_owner->id);
+
+            lock.self->link_to_owner(next_owner);
+            next_owner->state = TaskControlBlock::State::Ready;
+            auto* old_owner = iss.current_task;
+            set_task_ready(next_owner);
+
+            recompute_effective_priority(old_owner);
+         }
+
+         remaining = deadline - now;
+      }
+      Scheduler::sleep_for(remaining);
+      {
+         Scheduler::Lock guard;
+         signalled = iss.current_task->wait_target.acquired;
+         iss.current_task->wait_target.clear();
+      }
+      lock.lock();
+      return signalled;
+   }
+
+   void ConditionVar::notify_one() noexcept
+   {
+      Scheduler::Lock guard;
+
+      auto* waiter = self->wait_queue.pop_highest_priority();
+      if (!waiter) {
+         LOG_SYNC("ConditionVar::notify_one() no waiters on @CV(%p)", ptr_suffix(this));
+         return;
+      }
+
+      iss.sleepers.remove(waiter);          // If it was in a timed wait
+      waiter->wait_target.acquired = true;  // Mark "notified" for timed waits
+      LOG_SYNC("ConditionVar::notify_one() waking waiter @ID(%u) on @CV(%p)", waiter->id, ptr_suffix(this));
+      set_task_ready(waiter);
+
+      rtk_request_reschedule();
+   }
+
+   void ConditionVar::notify_all() noexcept
+   {
+      Scheduler::Lock guard;
+
+      LOG_SYNC("ConditionVar::notify_all() on @CV(%p)", ptr_suffix(this));
+
+      while (auto* waiter = self->wait_queue.pop_highest_priority()) {
+         iss.sleepers.remove(waiter);
+         waiter->wait_target.acquired = true;
+         LOG_SYNC("ConditionVar::notify_all() waking waiter @ID(%u) on @CV(%p)", waiter->id, ptr_suffix(this));
+         set_task_ready(waiter);
+      }
+
+      rtk_request_reschedule();
+   }
+
    void WaitTarget::remove(TaskControlBlock* tcb) noexcept
    {
       std::visit([tcb](auto& sync_prim) {
@@ -918,7 +1062,8 @@ namespace rtk
          if constexpr (std::is_same_v<SyncPrim, MutexImpl*>) {
             sync_prim->wait_queue.remove(tcb);
             if (sync_prim->owner) recompute_effective_priority(sync_prim->owner);
-         } else if constexpr (std::is_same_v<SyncPrim, SemaphoreImpl*>) {
+         } else if constexpr (std::is_same_v<SyncPrim, SemaphoreImpl*> ||
+                              std::is_same_v<SyncPrim, ConditionVarImpl*>) {
             sync_prim->wait_queue.remove(tcb);
          }
       }, sync_prim);

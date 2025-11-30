@@ -192,6 +192,7 @@ namespace rtk
       void unlock();
 
    private:
+      friend class ConditionVar;
       ImplStorage self;
    };
 
@@ -218,7 +219,31 @@ namespace rtk
       ImplStorage self;
    };
 
-   class ConditionVar;
+   class ConditionVar
+   {
+   public:
+      using ImplStorage = OpaqueImpl<struct ConditionVarImpl, 16, 8>;
+      constexpr ConditionVar() = default;
+      ~ConditionVar()          = default;
+      constexpr ConditionVar(ConditionVar&&)            = default;
+      constexpr ConditionVar& operator=(ConditionVar&&) = default;
+      ConditionVar(ConditionVar const&)            = delete;
+      ConditionVar& operator=(ConditionVar const&) = delete;
+
+      // Wait until notified; always returns with 'lock' held
+      void wait(Mutex& lock) noexcept;
+
+      // Timed waits: return true if notified; false on timeout.
+      // In all cases, return with 'lock' held.
+      [[nodiscard]] bool wait_for(Mutex& lock, Tick::Delta timeout) noexcept;
+      [[nodiscard]] bool wait_until(Mutex& lock, Tick deadline) noexcept;
+
+      void notify_one() noexcept;
+      void notify_all() noexcept;
+
+   private:
+      ImplStorage self;
+   };
 
 
 } // namespace rtk
