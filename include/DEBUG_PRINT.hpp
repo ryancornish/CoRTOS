@@ -9,8 +9,6 @@
 
 extern "C" uint32_t port_tick_now(void);
 
-
-
 namespace debug
 {
    enum class Channel
@@ -18,7 +16,8 @@ namespace debug
       Scheduler,
       Port,
       Thread,
-      Sync
+      Sync,
+      Test
    };
 
 #if DEBUG_PRINT_ENABLE
@@ -28,8 +27,9 @@ namespace debug
       switch (ch) {
          case Channel::Scheduler: return "\x1b[36m"; // cyan
          case Channel::Port:      return "\x1b[35m"; // magenta
-         case Channel::Thread:    return "\x1b[32m"; // green
+         case Channel::Thread:    return "\x1b[34m"; // blue
          case Channel::Sync:      return "\x1b[33m"; // yellow
+         case Channel::Test:      return "\x1b[32m"; // green
       }
       return "\x1b[0m";
    }
@@ -37,10 +37,11 @@ namespace debug
    inline const char* label(Channel ch) noexcept
    {
       switch (ch) {
-         case Channel::Scheduler: return "SCHED";
-         case Channel::Port:      return "PORT ";
-         case Channel::Thread:    return "THRD ";
-         case Channel::Sync:      return "SYNC ";
+         case Channel::Scheduler: return "SCHED ";
+         case Channel::Port:      return "PORT  ";
+         case Channel::Thread:    return "THREAD";
+         case Channel::Sync:      return "SYNC  ";
+         case Channel::Test:      return "TEST  ";
       }
       return "????";
    }
@@ -51,7 +52,7 @@ namespace debug
    inline void print(Channel ch, const char* fmt, Args... args)
    {
       // prefix with tick + channel label
-      std::printf("%s[tick=%08u][%s] ",
+      std::printf("%s[tick=%06u][%s] ",
                   color(ch),
                   port_tick_now(),
                   label(ch));
@@ -66,6 +67,7 @@ namespace debug
          case 1: return "Running";
          case 2: return "Sleeping";
          case 3: return "Blocked";
+         case 4: return "Terminated";
          default: return "???";
       }
    }
@@ -79,6 +81,7 @@ namespace debug
 #  define LOG_PORT(fmt, ...)   ::debug::print(::debug::Channel::Port,      fmt, ##__VA_ARGS__)
 #  define LOG_THREAD(fmt, ...) ::debug::print(::debug::Channel::Thread,    fmt, ##__VA_ARGS__)
 #  define LOG_SYNC(fmt, ...)   ::debug::print(::debug::Channel::Sync,      fmt, ##__VA_ARGS__)
+#  define LOG_TEST(fmt, ...)   ::debug::print(::debug::Channel::Test,      fmt, ##__VA_ARGS__)
 #  define STATE_TO_STR(state)  ::debug::state_to_str(std::to_underlying(state))
 [[maybe_unused]] static void LOG_SCHED_READY_MATRIX();
    inline void* ptr_suffix(void* ptr) { return (void*)((uintptr_t)ptr % 10000); }
@@ -88,6 +91,7 @@ namespace debug
 #  define LOG_PORT(...)   ((void)0)
 #  define LOG_THREAD(...) ((void)0)
 #  define LOG_SYNC(...)   ((void)0)
+#  define LOG_TEST(...)   ((void)0)
 #  define LOG_SCHED_READY_MATRIX() ((void)0)
 #  define STATE_TO_STR(state)
 #  define TRUE_FALSE(what)

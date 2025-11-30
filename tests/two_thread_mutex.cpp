@@ -1,10 +1,16 @@
-#include <cornishrtk.hpp>
+#include "cornishrtk.hpp"
+#include "port_traits.h"
+
 #include <array>
 #include <cstdint>
 #include <iostream>
 
-alignas(16) std::array<std::byte, 8 * 1024> t1_stack{};
-alignas(16) std::array<std::byte, 8 * 1024> t2_stack{};
+#define DEBUG_PRINT_ENABLE 1
+#include "DEBUG_PRINT.hpp"
+
+static constexpr std::size_t STACK_BYTES = 1024 * 8;
+alignas(RTK_STACK_ALIGN) static constinit std::array<std::byte, STACK_BYTES> t1_stack{};
+alignas(RTK_STACK_ALIGN) static constinit std::array<std::byte, STACK_BYTES> t2_stack{};
 
 // Shared state
 constinit static rtk::Mutex mutex;
@@ -24,12 +30,12 @@ static void worker(void* arg)
       auto my_id = rtk::Scheduler::tick_now().value(); // just to show something
       std::uint32_t local = ++counter;
 
-      std::cout << "[" << name << "] acquired mutex. Counter=" << local << ", tick=" << my_id << "\n";
+      LOG_THREAD("[%s] acquired mutex. Counter=%u, tick=%u", name, local, my_id);
 
       // Simulate some work while holding the lock
       rtk::Scheduler::sleep_for(5);
 
-      std::cout << "[" << name << "] releasing mutex. Counter=" << local << "\n";
+      LOG_THREAD("[%s] releasing mutex. Counter=%u", name, local);
       mutex.unlock();
       // --- End critical section ---
 
@@ -46,9 +52,9 @@ int main()
 {
    rtk::Scheduler::init(5);
 
-   rtk::Thread t1(rtk::Thread::Entry(worker, (void*)"T1"), t1_stack, rtk::Thread::Priority(1));
+   rtk::Thread t1(rtk::Thread::Entry(worker, (void*)"T1  "), t1_stack, rtk::Thread::Priority(1));
 
-   rtk::Thread t2(rtk::Thread::Entry(worker, (void*)"T2"), t2_stack, rtk::Thread::Priority(2));
+   rtk::Thread t2(rtk::Thread::Entry(worker, (void*)"T2  "), t2_stack, rtk::Thread::Priority(2));
 
    rtk::Scheduler::start();
    return 0;

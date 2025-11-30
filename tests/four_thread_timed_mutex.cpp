@@ -1,4 +1,5 @@
 #include "cornishrtk.hpp"
+#include "port_traits.h"
 
 #include <array>
 #include <cstdint>
@@ -8,13 +9,13 @@
 #include "DEBUG_PRINT.hpp"
 
 static constinit rtk::Mutex mutex;
-static std::uint32_t shared_counter = 0;
+static constinit std::uint32_t shared_counter = 0;
 
-// Snacks
-alignas(16) static std::array<std::byte, 16 * 1024> timed1_stack{};
-alignas(16) static std::array<std::byte, 16 * 1024> timed2_stack{};
-alignas(16) static std::array<std::byte, 16 * 1024> blocking_stack{};
-alignas(16) static std::array<std::byte, 16 * 1024> monitor_stack{};
+static constexpr std::size_t STACK_BYTES = 1024 * 16;
+alignas(RTK_STACK_ALIGN) static constinit std::array<std::byte, STACK_BYTES> timed1_stack{};
+alignas(RTK_STACK_ALIGN) static constinit std::array<std::byte, STACK_BYTES> timed2_stack{};
+alignas(RTK_STACK_ALIGN) static constinit std::array<std::byte, STACK_BYTES> blocking_stack{};
+alignas(RTK_STACK_ALIGN) static constinit std::array<std::byte, STACK_BYTES> monitor_stack{};
 
 // High-priority timed worker (uses try_lock_for / try_lock_until)
 static void timed_worker(void* arg)
@@ -25,27 +26,27 @@ static void timed_worker(void* arg)
    while (true) {
       auto now = rtk::Scheduler::tick_now().value();
 
-      LOG_THREAD("[%s] @ITER(%u) trying timed lock (5 ticks)", name, iteration);
+      LOG_TEST("[%s] @ITER(%u) trying timed lock (5 ticks)", name, iteration);
 
       auto const deadline = rtk::Scheduler::tick_now() + 5;
       if (mutex.try_lock_until(deadline)) {
          now = rtk::Scheduler::tick_now().value();
          ++shared_counter;
 
-         LOG_THREAD("[%s] acquired mutex. @SHRD_CTR(%u)", name, shared_counter);
+         LOG_TEST("[%s] acquired mutex. @SHRD_CTR(%u)", name, shared_counter);
 
          // Hold it a bit, enough to make the other timed worker occasionally time out
          rtk::Scheduler::sleep_for(7);
 
          now = rtk::Scheduler::tick_now().value();
 
-         LOG_THREAD("[%s] releasing mutex", name);
+         LOG_TEST("[%s] releasing mutex", name);
 
          mutex.unlock();
       } else {
          now = rtk::Scheduler::tick_now().value();
 
-         LOG_THREAD("[%s] timed out waiting for mutex", name);
+         LOG_TEST("[%s] timed out waiting for mutex", name);
       }
 
       // Back off so both timed workers get a chance to run
@@ -63,7 +64,7 @@ static void blocking_worker(void* arg)
    while (true) {
       auto now = rtk::Scheduler::tick_now().value();
 
-      LOG_THREAD("[%s] @ITER(%u) attempting to lock() mutex", name, iteration);
+      LOG_TEST("[%s] @ITER(%u) attempting to lock() mutex", name, iteration);
 
       // This exercises the waiter queue:
       // - If the mutex is free: immediate acquisition, no waiters.
@@ -74,7 +75,7 @@ static void blocking_worker(void* arg)
       now = rtk::Scheduler::tick_now().value();
       ++shared_counter;
 
-      LOG_THREAD("[%s] acquired mutex. @SHRD_CTR(%u)", name, shared_counter);
+      LOG_TEST("[%s] acquired mutex. @SHRD_CTR(%u)", name, shared_counter);
 
       // Hold a while so:
       // - timed workers may time out,
@@ -83,7 +84,7 @@ static void blocking_worker(void* arg)
 
       now = rtk::Scheduler::tick_now().value();
 
-      LOG_THREAD("[%s] releasing mutex", name);
+      LOG_TEST("[%s] releasing mutex", name);
 
       mutex.unlock();
 
@@ -103,8 +104,8 @@ static void monitor_worker(void* arg)
       auto now = rtk::Scheduler::tick_now().value();
       bool locked = mutex.is_locked();
 
-      LOG_THREAD("[%s] @HEARTBEAT(%u) @SHRD_CTR(%u)", name, heartbeat, shared_counter);
-      LOG_THREAD("[%s] mutex is %s", name, locked ? "busy, cannot acquire" : "free, acquirable" );
+      LOG_TEST("[%s] @HEARTBEAT(%u) @SHRD_CTR(%u)", name, heartbeat, shared_counter);
+      LOG_TEST("[%s] mutex is %s", name, locked ? "busy, cannot acquire" : "free, acquirable" );
 
       ++heartbeat;
       rtk::Scheduler::sleep_for(20);

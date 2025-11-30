@@ -21,11 +21,6 @@ static int order_high = -1;
 static int order_mid  = -1;
 static int order_low  = -1;
 
-// Just so we can see scheduler behaviour in the logs
-static void log_order()
-{
-   LOG_THREAD("[TEST] wake order: HIGH=%d MID=%d LOW=%d", order_high, order_mid, order_low);
-}
 
 // --- Worker threads ---------------------------------------------------------
 //
@@ -44,59 +39,59 @@ static void log_order()
 
 static void worker_high()
 {
-   LOG_THREAD("[HIGH] started, going to wait on condition");
+   LOG_TEST("[HIGH] started, going to wait on condition");
 
    mutex.lock();
    blocked_count.fetch_add(1, std::memory_order_acq_rel);
 
-   LOG_THREAD("[HIGH] now waiting on condition");
+   LOG_TEST("[HIGH] now waiting on condition");
    cond_var.wait(mutex);  // returns with mutex locked again
 
    int seq = wake_seq.fetch_add(1, std::memory_order_acq_rel);
    order_high = seq;
-   LOG_THREAD("[HIGH] woke from wait, seq=%d", seq);
+   LOG_TEST("[HIGH] woke from wait, seq=%d", seq);
 
    mutex.unlock();
 
-   while (true) rtk::Scheduler::sleep_for(1000);
+   LOG_TEST("[HIGH] ended");
 }
 
 static void worker_mid()
 {
-   LOG_THREAD("[MID ] started, going to wait on condition");
+   LOG_TEST("[MID ] started, going to wait on condition");
 
    mutex.lock();
    blocked_count.fetch_add(1, std::memory_order_acq_rel);
 
-   LOG_THREAD("[MID ] now waiting on condition");
+   LOG_TEST("[MID ] now waiting on condition");
    cond_var.wait(mutex);
 
    int seq = wake_seq.fetch_add(1, std::memory_order_acq_rel);
    order_mid = seq;
-   LOG_THREAD("[MID ] woke from wait, seq=%d", seq);
+   LOG_TEST("[MID ] woke from wait, seq=%d", seq);
 
    mutex.unlock();
 
-   while (true) rtk::Scheduler::sleep_for(1000);
+   LOG_TEST("[MID ] ended");
 }
 
 static void worker_low()
 {
-   LOG_THREAD("[LOW ] started, going to wait on condition");
+   LOG_TEST("[LOW ] started, going to wait on condition");
 
    mutex.lock();
    blocked_count.fetch_add(1, std::memory_order_acq_rel);
 
-   LOG_THREAD("[LOW ] now waiting on condition");
+   LOG_TEST("[LOW ] now waiting on condition");
    cond_var.wait(mutex);
 
    int seq = wake_seq.fetch_add(1, std::memory_order_acq_rel);
    order_low = seq;
-   LOG_THREAD("[LOW ] woke from wait, seq=%d", seq);
+   LOG_TEST("[LOW ] woke from wait, seq=%d", seq);
 
    mutex.unlock();
 
-   while (true) rtk::Scheduler::sleep_for(1000);
+   LOG_TEST("[LOW ] ended");
 }
 
 // --- Controller thread ------------------------------------------------------
@@ -111,19 +106,19 @@ static void worker_low()
 
 static void controller()
 {
-   LOG_THREAD("[CTRL] started");
+   LOG_TEST("[CTRL] started");
 
    // Wait for all 3 workers to be blocked on the condvar.
    // Using yield() instead of busy spinning purely in CPU.
    while (blocked_count.load(std::memory_order_acquire) < 3) {
-      LOG_THREAD("[CTRL] waiting for workers to block, blocked_count=%d", blocked_count.load(std::memory_order_relaxed));
+      LOG_TEST("[CTRL] waiting for workers to block, blocked_count=%d", blocked_count.load(std::memory_order_relaxed));
       rtk::Scheduler::sleep_for(3);
    }
 
-   LOG_THREAD("[CTRL] all workers are blocked, starting notify_one() sequence");
+   LOG_TEST("[CTRL] all workers are blocked, starting notify_one() sequence");
 
    // First wake: should go to highest-priority waiter (HIGH)
-   LOG_THREAD("[CTRL] notify_one() #1\n");
+   LOG_TEST("[CTRL] notify_one() #1");
    mutex.lock();
    cond_var.notify_one();
    mutex.unlock();
@@ -131,7 +126,7 @@ static void controller()
    rtk::Scheduler::sleep_for(5);
 
    // Second wake: next highest (MID)
-   LOG_THREAD("[CTRL] notify_one() #2");
+   LOG_TEST("[CTRL] notify_one() #2");
    mutex.lock();
    cond_var.notify_one();
    mutex.unlock();
@@ -139,31 +134,27 @@ static void controller()
    rtk::Scheduler::sleep_for(5);
 
    // Third wake: lowest (LOW)
-   LOG_THREAD("[CTRL] notify_one() #3");
+   LOG_TEST("[CTRL] notify_one() #3");
    mutex.lock();
    cond_var.notify_one();
    mutex.unlock();
 
    rtk::Scheduler::sleep_for(5);
 
-   log_order();
-
    bool pass = order_high == 0 && order_mid == 1 && order_low == 2;
 
    if (pass) {
-      LOG_THREAD("[CTRL] TEST PASS: condvar woke waiters in priority order.");
+      LOG_TEST("[CTRL] TEST PASS: condvar woke waiters in priority order.");
    } else {
-      LOG_THREAD("[CTRL] TEST FAIL!\n");
-      LOG_THREAD("       Expected wake order: HIGH=0 MID=1 LOW=2");
-      log_order();
+      LOG_TEST("[CTRL] TEST FAIL!\n");
+      LOG_TEST("       Expected wake order: HIGH=0 MID=1 LOW=2");
+      LOG_TEST("         Actual wake order: HIGH=%d MID=%d LOW=%d", order_high, order_mid, order_low);
    }
 
-   // Park forever
-   while (true) rtk::Scheduler::sleep_for(1000);
+   LOG_TEST("[CTRL] ended");
 }
 
-// --- Stacks and threads -----------------------------------------------------
-
+// --- Snacks and threads -----------------------------------------------------
 static constexpr std::size_t STACK_BYTES = 1024 * 8;
 
 alignas(RTK_STACK_ALIGN) static constinit std::array<std::byte, STACK_BYTES> controller_stack{};
@@ -192,7 +183,7 @@ int main()
                           low_stack,
                           rtk::Thread::Priority(3));
 
-   LOG_THREAD("[MAIN] starting scheduler");
+   LOG_TEST("[MAIN] starting scheduler");
    rtk::Scheduler::start();
 
    // Not reached

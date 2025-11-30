@@ -1,12 +1,17 @@
-#include <cornishrtk.hpp>
+#include "cornishrtk.hpp"
+#include "port_traits.h"
 
 #include <array>
 #include <cstdint>
 #include <iostream>
 
-alignas(16) static std::array<std::byte, 16 * 1024> fast_stack{};
-alignas(16) static std::array<std::byte, 16 * 1024> slow_stack{};
-alignas(16) static std::array<std::byte, 16 * 1024> logger_stack{};
+#define DEBUG_PRINT_ENABLE 1
+#include "DEBUG_PRINT.hpp"
+
+static constexpr std::size_t STACK_BYTES = 1024 * 4;
+alignas(RTK_STACK_ALIGN) static constinit std::array<std::byte, STACK_BYTES> fast_stack{};
+alignas(RTK_STACK_ALIGN) static constinit std::array<std::byte, STACK_BYTES> slow_stack{};
+alignas(RTK_STACK_ALIGN) static constinit std::array<std::byte, STACK_BYTES> logger_stack{};
 
 static void fast_worker(void* arg)
 {
@@ -15,7 +20,7 @@ static void fast_worker(void* arg)
 
    while (true)
    {
-      std::cout << "[FAST ] " << name << " count=" << counter++ << "\n";
+      LOG_THREAD("[FAST ] %s count=%u", name, counter);
       // Runs fairly often. high priority so it preempts others.
       rtk::Scheduler::sleep_for(10);
    }
@@ -28,7 +33,7 @@ static void slow_worker(void* arg)
 
    while (true)
    {
-      std::cout << "[SLOW ] " << name << " count=" << counter++ << "\n";
+      LOG_THREAD("[SLOW ] %s count=%u", name, counter++);
       rtk::Scheduler::sleep_for(25);
    }
 }
@@ -40,8 +45,7 @@ static void logger_worker()
    while (true)
    {
       auto now = rtk::Scheduler::tick_now().value();
-      std::cout << "[LOG  ] heartbeat at tick=" << now
-                << " (block=" << tick_block++ << ")\n";
+      LOG_THREAD("[LOG ] heartbeat at tick=%u (block=%u)", now, tick_block++);
 
       // Sleep long enough that higher-priority work dominates,
       // but occasionally yield cooperatively to show both paths.

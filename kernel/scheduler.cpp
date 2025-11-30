@@ -44,10 +44,31 @@ namespace rtk
 
    template<typename T> struct LinkedListNode { T* next; T* prev; };
 
+   class TaskQueue
+   {
+      TaskControlBlock* head;
+      TaskControlBlock* tail;
+
+   public:
+      [[nodiscard]] constexpr bool              empty() const noexcept { return !head; }
+      [[nodiscard]] constexpr bool           has_peer() const noexcept { return head && head != tail; }
+      [[nodiscard]] constexpr TaskControlBlock* front() const noexcept { return head; }
+
+      // This walks the linked list so isn't 'free'. Will be used for debugging only for now
+      [[nodiscard]] size_t size() const noexcept;
+      void push_back(TaskControlBlock* tcb) noexcept;
+      TaskControlBlock* pop_front() noexcept;
+      void remove(TaskControlBlock* tcb) noexcept;
+      // FIFO among tcb's with equal priority. Used by sync primitive wait lists, not RR queue
+      TaskControlBlock* pop_highest_priority() noexcept;
+   };
+   static_assert(std::is_trivially_constructible_v<TaskQueue>, "Must be usable within OpaqueImpl structs");
+   static_assert(std::is_standard_layout_v<TaskQueue>,         "Must be usable within OpaqueImpl structs");
+
    struct TaskControlBlock
    {
       uint32_t id;
-      enum class State : uint8_t { Ready, Running, Sleeping, Blocked } state{State::Ready};
+      enum class State : uint8_t { Ready, Running, Sleeping, Blocked, Terminated } state{State::Ready};
       uint8_t const base_priority;
       uint8_t priority{base_priority};
       Tick    wake_tick{0};
@@ -63,6 +84,9 @@ namespace rtk
       // List of mutexes currently held by me (used for priority inheritance)
       struct MutexImpl* held_mutex_head{nullptr};
 
+      // List of threads wanting to join with me
+      TaskQueue join_waiters{};
+
       // Opaque, in-place port context storage
       OpaqueImpl<port_context_t, RTK_PORT_CONTEXT_SIZE, RTK_PORT_CONTEXT_ALIGN> context_storage;
       constexpr port_context_t*       context()       noexcept { return context_storage.get(); }
@@ -72,70 +96,56 @@ namespace rtk
          id(id), base_priority(priority), stack(stack), entry(entry) {}
    };
 
-   class TaskQueue
+   // --------------- TaskQueue implementation ---------------
+   [[nodiscard]] size_t TaskQueue::size() const noexcept
    {
-      TaskControlBlock* head;
-      TaskControlBlock* tail;
+      std::size_t n = 0;
+      for (auto* tcb = head; tcb; tcb = tcb->tq_node.next) ++n;
+      return n;
+   }
 
-   public:
-      [[nodiscard]] constexpr bool              empty() const noexcept { return !head; }
-      [[nodiscard]] constexpr bool           has_peer() const noexcept { return head && head != tail; }
-      [[nodiscard]] constexpr TaskControlBlock* front() const noexcept { return head; }
+   void TaskQueue::push_back(TaskControlBlock* tcb) noexcept
+   {
+      assert(tcb->tq_node.next == nullptr && tcb->tq_node.prev == nullptr && "TCB already linked");
+      tcb->tq_node.next = nullptr;
+      tcb->tq_node.prev = tail;
+      if (tail) tail->tq_node.next = tcb; else head = tcb;
+      tail = tcb;
+   }
 
-      // This walks the linked list so isn't 'free'. Will be used for debugging only for now
-      [[nodiscard]] size_t size() const noexcept
-      {
-         std::size_t n = 0;
-         for (auto* tcb = head; tcb; tcb = tcb->tq_node.next) ++n;
-         return n;
-      }
+   TaskControlBlock* TaskQueue::pop_front() noexcept
+   {
+      if (!head) return nullptr;
+      auto* tcb = head;
+      head = tcb->tq_node.next;
+      if (head) head->tq_node.prev = nullptr; else tail = nullptr;
+      tcb->tq_node.next = tcb->tq_node.prev = nullptr;
+      return tcb;
+   }
 
-      void push_back(TaskControlBlock* tcb) noexcept
-      {
-         assert(tcb->tq_node.next == nullptr && tcb->tq_node.prev == nullptr && "TCB already linked");
-         tcb->tq_node.next = nullptr;
-         tcb->tq_node.prev = tail;
-         if (tail) tail->tq_node.next = tcb; else head = tcb;
-         tail = tcb;
-      }
+   void TaskQueue::remove(TaskControlBlock* tcb) noexcept
+   {
+      if (tcb->tq_node.prev) tcb->tq_node.prev->tq_node.next = tcb->tq_node.next; else head = tcb->tq_node.next;
+      if (tcb->tq_node.next) tcb->tq_node.next->tq_node.prev = tcb->tq_node.prev; else tail = tcb->tq_node.prev;
+      tcb->tq_node.next = tcb->tq_node.prev = nullptr;
+   }
 
-      TaskControlBlock* pop_front() noexcept
-      {
-         if (!head) return nullptr;
-         auto* tcb = head;
-         head = tcb->tq_node.next;
-         if (head) head->tq_node.prev = nullptr; else tail = nullptr;
-         tcb->tq_node.next = tcb->tq_node.prev = nullptr;
-         return tcb;
-      }
+   TaskControlBlock* TaskQueue::pop_highest_priority() noexcept
+   {
+      if (!head) return nullptr;
 
-      void remove(TaskControlBlock* tcb) noexcept
-      {
-         if (tcb->tq_node.prev) tcb->tq_node.prev->tq_node.next = tcb->tq_node.next; else head = tcb->tq_node.next;
-         if (tcb->tq_node.next) tcb->tq_node.next->tq_node.prev = tcb->tq_node.prev; else tail = tcb->tq_node.prev;
-         tcb->tq_node.next = tcb->tq_node.prev = nullptr;
-      }
+      TaskControlBlock* best     = head;
+      uint8_t           best_pri = head->priority;
 
-      // FIFO among tcb's with equal priority. Used by sync primitive wait lists, not RR queue
-      TaskControlBlock* pop_highest_priority() noexcept
-      {
-         if (!head) return nullptr;
-
-         TaskControlBlock* best     = head;
-         uint8_t           best_pri = head->priority;
-
-         for (auto* tcb = head->tq_node.next; tcb; tcb = tcb->tq_node.next) {
-            if (tcb->priority < best_pri) {
-               best     = tcb;
-               best_pri = tcb->priority;
-            }
+      for (auto* tcb = head->tq_node.next; tcb; tcb = tcb->tq_node.next) {
+         if (tcb->priority < best_pri) {
+            best     = tcb;
+            best_pri = tcb->priority;
          }
-         remove(best);
-         return best;
       }
-   };
-   static_assert(std::is_trivially_constructible_v<TaskQueue>, "Must be usable within OpaqueImpl structs");
-   static_assert(std::is_standard_layout_v<TaskQueue>,         "Must be usable within OpaqueImpl structs");
+      remove(best);
+      return best;
+   }
 
    struct StackLayout
    {
@@ -481,12 +491,25 @@ namespace rtk
       context_switch_to(next_task);
    }
 
-   static void thread_trampoline(void* arg_void)
+   static void thread_launcher(void* void_arg_is_tcb)
    {
-      auto* tcb = static_cast<TaskControlBlock*>(arg_void);
+      auto* tcb = static_cast<TaskControlBlock*>(void_arg_is_tcb);
+      LOG_THREAD("thread_launcher() @ID(%u)", tcb->id);
       tcb->entry();
-      // If user function returns, park/surrender forever (could signal joiners later)
-      while (true) Scheduler::yield();
+      {
+         Scheduler::Lock guard;
+
+         tcb->state = TaskControlBlock::State::Terminated;
+         // Wake any joiners
+         while (auto* waiter = tcb->join_waiters.pop_front()) {
+            LOG_THREAD("signalling join waiter @ID(%u)", waiter->id);
+            set_task_ready(waiter);
+         }
+         rtk_request_reschedule();
+      }
+      LOG_THREAD("@ID(%u) Terminated", tcb->id);
+      port_yield(); // Switch away and never come back
+      __builtin_unreachable();
    }
 
    alignas(RTK_STACK_ALIGN) static std::array<std::byte, 4096> idle_stack{}; // TODO: size stack
@@ -509,7 +532,7 @@ namespace rtk
       port_context_init(iss.idle_tcb->context(),
                         slayout.user_stack.data(),
                         slayout.user_stack.size(),
-                        thread_trampoline,
+                        thread_launcher,
                         iss.idle_tcb);
       // Note: we intentionally do NOT call set_task_ready(idle_tcb).
       // Idle is never in ready_matrix.
@@ -588,11 +611,12 @@ namespace rtk
       assert(priority < IDLE_PRIORITY);
 
       auto id = iss.next_thread_id.fetch_add(1, std::memory_order_relaxed);
+      LOG_THREAD("Thread::Thread() initialise @ID(%u)", id);
 
       StackLayout slayout(stack, 0);
       tcb = ::new (slayout.tcb) TaskControlBlock(id, priority, slayout.user_stack, entry);
 
-      port_context_init(tcb->context(), slayout.user_stack.data(), slayout.user_stack.size(), thread_trampoline, tcb);
+      port_context_init(tcb->context(), slayout.user_stack.data(), slayout.user_stack.size(), thread_launcher, tcb);
       set_task_ready(tcb);
 
       LOG_SCHED_READY_MATRIX();
@@ -601,6 +625,7 @@ namespace rtk
    Thread::~Thread()
    {
       if (!tcb) return;
+      LOG_THREAD("Thread::~Thread() destroy @ID(%u)", tcb->id);
       port_context_destroy(tcb->context());
       tcb->~TaskControlBlock();
       tcb = nullptr;
@@ -609,6 +634,30 @@ namespace rtk
    [[nodiscard]] Thread::Id Thread::get_id() const noexcept
    {
       return tcb->id;
+   }
+
+   void Thread::join()
+   {
+      LOG_THREAD("Thread::join() current thread @ID(%u) requests to join with @ID(%u)", iss.current_task->id, tcb->id);
+      if (!tcb) return; // TODO is this state possible? Investigate
+      {
+         Scheduler::Lock guard;
+
+         assert(iss.current_task && "join() with no current task");
+         assert(iss.current_task != tcb && "Thread cannot join itself");
+         if (tcb->state == TaskControlBlock::State::Terminated) {
+            LOG_THREAD("Thread::join() current thread @ID(%u) has joined with already-terminated @ID(%u)", iss.current_task->id, tcb->id);
+            return;
+         }
+
+         iss.current_task->state = TaskControlBlock::State::Blocked;
+         tcb->join_waiters.push_back(iss.current_task);
+         rtk_request_reschedule();
+      }
+      port_yield();
+
+      assert(tcb->state == TaskControlBlock::State::Terminated);
+      LOG_THREAD("Thread::join() current thread @ID(%u) has joined with @ID(%u)", iss.current_task->id, tcb->id);
    }
 
    std::size_t Thread::reserved_stack_size()

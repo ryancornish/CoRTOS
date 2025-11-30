@@ -1,17 +1,22 @@
-#include <cornishrtk.hpp>
+#include "cornishrtk.hpp"
+#include "port_traits.h"
+
 #include <iostream>
 #include <cstdint>
 #include <array>
 
-// Keep stacks here so the Thread ctor can hand them to the port
-alignas(16) static std::array<std::byte, 16 * 1024> t1_stack{};
-alignas(16) static std::array<std::byte, 16 * 1024> t2_stack{};
+#define DEBUG_PRINT_ENABLE 1
+#include "DEBUG_PRINT.hpp"
+
+static constexpr std::size_t STACK_BYTES = 1024 * 16;
+alignas(RTK_STACK_ALIGN) static constinit std::array<std::byte, STACK_BYTES> t1_stack{};
+alignas(RTK_STACK_ALIGN) static constinit std::array<std::byte, STACK_BYTES> t2_stack{};
 
 static void worker(void* arg)
 {
    while (true)
    {
-      std::cout << static_cast<char const*>(arg) << "\n";
+      LOG_THREAD("%s", static_cast<char const*>(arg));
       rtk::Scheduler::sleep_for(20); // Tune for testing
    }
 }

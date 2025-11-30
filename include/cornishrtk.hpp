@@ -152,6 +152,8 @@ namespace rtk
       ~Thread();
 
       [[nodiscard]] Id get_id() const noexcept;
+      void join();
+
 
       static std::size_t reserved_stack_size();
    };

@@ -10,54 +10,39 @@
 #include "DEBUG_PRINT.hpp"
 
 // --- Global semaphore and bookkeeping ---------------------------------------
-
 static constinit rtk::Semaphore sem{0};
-
-static std::atomic<int> acquire_seq{0};
-static int order_high = -1;
-static int order_mid  = -1;
-static int order_low  = -1;
-
-// Just so we can see scheduler behaviour in the logs
-static void log_order()
-{
-   LOG_THREAD("[TEST] acquire order: HIGH=%d MID=%d LOW=%d", order_high, order_mid, order_low);
-}
+static constinit std::atomic<int> acquire_seq{0};
+static constinit int order_high = -1;
+static constinit int order_mid  = -1;
+static constinit int order_low  = -1;
 
 // --- Worker threads ---------------------------------------------------------
 
 static void worker_high()
 {
-   LOG_THREAD("[HIGH] started, calling acquire()");
+   LOG_TEST("[HIGH] started, calling acquire()");
    sem.acquire();
    int seq = acquire_seq.fetch_add(1, std::memory_order_relaxed);
    order_high = seq;
-   LOG_THREAD("[HIGH] acquired semaphore at seq=%d", seq);
-
-   // Park forever so we don't re-enter the test logic
-   while (true) rtk::Scheduler::sleep_for(1000);
+   LOG_TEST("[HIGH] acquired semaphore at seq=%d", seq);
 }
 
 static void worker_mid()
 {
-   LOG_THREAD("[MID ] started, calling acquire()");
+   LOG_TEST("[MID ] started, calling acquire()");
    sem.acquire();
    int seq = acquire_seq.fetch_add(1, std::memory_order_relaxed);
    order_mid = seq;
-   LOG_THREAD("[MID ] acquired semaphore at seq=%d", seq);
-
-   while (true) rtk::Scheduler::sleep_for(1000);
+   LOG_TEST("[MID ] acquired semaphore at seq=%d", seq);
 }
 
 static void worker_low()
 {
-   LOG_THREAD("[LOW ] started, calling acquire()");
+   LOG_TEST("[LOW ] started, calling acquire()");
    sem.acquire();
    int seq = acquire_seq.fetch_add(1, std::memory_order_relaxed);
    order_low = seq;
-   LOG_THREAD("[LOW ] acquired semaphore at seq=%d", seq);
-
-   while (true) rtk::Scheduler::sleep_for(1000);
+   LOG_TEST("[LOW ] acquired semaphore at seq=%d", seq);
 }
 
 // --- Controller thread ------------------------------------------------------
@@ -67,45 +52,38 @@ static void worker_low()
 
 static void controller()
 {
-   LOG_THREAD("[CTRL] started\n");
+   LOG_TEST("[CTRL] started\n");
 
    // Give workers a chance to start and block on sem.acquire().
    // (If they haven't blocked yet, they'll just consume tokens earlier, which
    //  is still fine as long as they *eventually* all block before the last release.)
    rtk::Scheduler::sleep_for(5);
 
-   LOG_THREAD("[CTRL] releasing 1 token");
+   LOG_TEST("[CTRL] releasing 1 token");
    sem.release(1);
    rtk::Scheduler::sleep_for(5);
 
-   LOG_THREAD("[CTRL] releasing 1 token");
+   LOG_TEST("[CTRL] releasing 1 token");
    sem.release(1);
    rtk::Scheduler::sleep_for(5);
 
-   LOG_THREAD("[CTRL] releasing 1 token");
+   LOG_TEST("[CTRL] releasing 1 token");
    sem.release(1);
    rtk::Scheduler::sleep_for(5);
 
-   log_order();
-
-   bool pass =
-      (order_high == 0) &&
-      (order_mid  == 1) &&
-      (order_low  == 2);
+   bool pass = order_high == 0 && order_mid  == 1 && order_low  == 2;
 
    if (pass) {
-      LOG_THREAD("[CTRL] TEST PASS: semaphore woke waiters in priority order.");
+      LOG_TEST("[CTRL] TEST PASS: semaphore woke waiters in priority order.");
    } else {
-      LOG_THREAD("[CTRL] TEST FAIL!");
-      LOG_THREAD("       Expected: HIGH=0 MID=1 LOW=2");
-      log_order();
+      LOG_TEST("[CTRL] TEST FAIL!");
+      LOG_TEST("       Expected: HIGH=0 MID=1 LOW=2");
+      LOG_TEST("         Actual: HIGH=%d MID=%d LOW=%d", order_high, order_mid, order_low);
    }
-
-   while (true) rtk::Scheduler::sleep_for(1000);
 }
 
-// --- Stacks and threads -----------------------------------------------------
-static constexpr std::size_t STACK_BYTES = 4096;
+// --- Snacks and threads -----------------------------------------------------
+static constexpr std::size_t STACK_BYTES = 1024 * 4;
 alignas(RTK_STACK_ALIGN) static constinit std::array<std::byte, STACK_BYTES> controller_stack{};
 alignas(RTK_STACK_ALIGN) static constinit std::array<std::byte, STACK_BYTES> high_stack{};
 alignas(RTK_STACK_ALIGN) static constinit std::array<std::byte, STACK_BYTES> mid_stack{};
@@ -121,7 +99,7 @@ int main()
    rtk::Thread mid_thread(rtk::Thread::Entry(worker_mid), mid_stack, rtk::Thread::Priority(2));
    rtk::Thread low_thread(rtk::Thread::Entry(worker_low), low_stack, rtk::Thread::Priority(3));
 
-   LOG_THREAD("[MAIN] starting scheduler");
+   LOG_TEST("[MAIN] starting scheduler");
    rtk::Scheduler::start();
 
    // Not reached
