@@ -19,7 +19,7 @@ alignas(RTK_STACK_ALIGN) static constinit std::array<std::byte, STACK_BYTES> sta
 alignas(RTK_STACK_ALIGN) static constinit std::array<std::byte, STACK_BYTES> stack_HIGH{};
 
 // Low priority: holds B for a long time.
-static void thread_LOW_entry(void*)
+static void thread_LOW_entry()
 {
    LOG_THREAD("[LOW ] enter");
 
@@ -42,7 +42,7 @@ static void thread_LOW_entry(void*)
 }
 
 // Medium priority: lock A, then later try to lock B (blocked by L)
-static void thread_MED_entry(void*)
+static void thread_MED_entry()
 {
    LOG_THREAD("[MED ] enter");
 
@@ -74,7 +74,7 @@ static void thread_MED_entry(void*)
 }
 
 // High priority: eventually tries to lock A (owned by M)
-static void thread_HIGH_entry(void*)
+static void thread_HIGH_entry()
 {
    LOG_THREAD("[HIGH] enter");
 

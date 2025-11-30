@@ -13,6 +13,7 @@
 #include <limits>
 #include <span>
 #include <type_traits>
+#include <variant>
 
 namespace rtk
 {
@@ -129,17 +130,21 @@ namespace rtk
 
       struct Entry
       {
-         using Fn = void(*)(void*);
-         Fn fn;
-         void* arg;
-         explicit Entry(Fn fn, void* arg = nullptr) : fn(fn), arg(arg) {}
-         void operator()() const { fn(arg); }
+         std::variant<std::monostate, void(*)(void*), void(*)()> fn;
+         void* arg{nullptr};
+         constexpr Entry() = default;
+         Entry(void(*fn)()) : fn(fn) {} // Intentionally implicit
+         Entry(void(*fn)(void*), void* arg) : fn(fn), arg(arg) {}
+         void operator()() const { std::visit([this](auto const& func) {
+            if constexpr (std::is_same_v<std::decay_t<decltype(func)>, void(*)(void*)>) func(arg);
+            else if constexpr (std::is_same_v<std::decay_t<decltype(func)>, void(*)()>) func();   }, fn);
+         }
       };
 
       struct Priority
       {
          std::uint8_t val;
-         constexpr explicit Priority(std::uint8_t v) : val(v) {}
+         constexpr Priority(std::uint8_t v) : val(v) {} // Intentionally implicit
          operator uint8_t() const { return val; } // Intentionally implicit
       };
 
@@ -193,15 +198,15 @@ namespace rtk
    class Semaphore
    {
    public:
-      using ImplStorage = OpaqueImpl<struct SemaphoreImpl, 24, 8>;
-      explicit constexpr Semaphore(unsigned initial_count) noexcept;
+      using ImplStorage = OpaqueImpl<struct SemaphoreImpl, 16, 8>;
+      explicit constexpr Semaphore(unsigned initial_count) noexcept : counter(initial_count) {};
       ~Semaphore() = default;
       constexpr Semaphore(Semaphore&&)            = default;
       constexpr Semaphore& operator=(Semaphore&&) = default;
       Semaphore(Semaphore const&)            = delete;
       Semaphore& operator=(Semaphore const&) = delete;
 
-      [[nodiscard]] unsigned count() const noexcept;
+      [[nodiscard]] unsigned peek_count() const noexcept { return counter; };
       void acquire() noexcept;
       [[nodiscard]] bool try_acquire() noexcept;
       [[nodiscard]] bool try_acquire_for(Tick::Delta timeout) noexcept;
@@ -209,6 +214,7 @@ namespace rtk
       void release(unsigned n = 1) noexcept;
 
    private:
+      unsigned counter;
       ImplStorage self;
    };
 

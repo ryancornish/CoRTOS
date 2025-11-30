@@ -39,7 +39,7 @@ alignas(RTK_STACK_ALIGN) static constinit std::array<std::byte, STACK_BYTES> sta
 // ---------------------------------------------------------------------------
 
 // Low priority: holds B for a long time.
-static void thread_LOW_entry(void*)
+static void thread_LOW_entry()
 {
    LOG_THREAD("[LOW ] enter");
 
@@ -62,7 +62,7 @@ static void thread_LOW_entry(void*)
 }
 
 // Medium priority: lock A, then later try to lock B (blocked by LOW)
-static void thread_MED_entry(void*)
+static void thread_MED_entry()
 {
    LOG_THREAD("[MED ] enter");
 
@@ -94,7 +94,7 @@ static void thread_MED_entry(void*)
 }
 
 // High priority: eventually tries to lock A (owned by MED)
-static void thread_HIGH_entry(void*)
+static void thread_HIGH_entry()
 {
    LOG_THREAD("[HIGH] enter");
 
@@ -121,7 +121,7 @@ static void thread_HIGH_entry(void*)
 // ---------------------------------------------------------------------------
 
 // Owner of mutex_C: low-ish priority, holds it for a while
-static void thread_OWNER_C_entry(void*)
+static void thread_OWNER_C_entry()
 {
    LOG_THREAD("[OWNC] enter");
 
@@ -141,7 +141,7 @@ static void thread_OWNER_C_entry(void*)
 }
 
 // High-priority waiter with a *short* timeout: donates briefly, then times out
-static void thread_W1_entry(void*)
+static void thread_W1_entry()
 {
    LOG_THREAD("[W1  ] enter");
 
@@ -164,7 +164,7 @@ static void thread_W1_entry(void*)
 }
 
 // Medium-high waiter with a long timeout: should eventually acquire mutex_C
-static void thread_W2_entry(void*)
+static void thread_W2_entry()
 {
    LOG_THREAD("[W2  ] enter");
 
@@ -189,7 +189,7 @@ static void thread_W2_entry(void*)
 }
 
 // Lower-priority waiter: plain lock, should be last to acquire mutex_C
-static void thread_W3_entry(void*)
+static void thread_W3_entry()
 {
    LOG_THREAD("[W3  ] enter");
 
@@ -232,7 +232,7 @@ static void print_stack_high_water(const char* name, const std::array<std::byte,
    LOG_THREAD("[MON ] %-4s stack usage: used=%zu bytes (of %zu user bytes)", name, user_used, user_capacity);
 }
 
-static void thread_MON_entry(void*)
+static void thread_MON_entry()
 {
    LOG_THREAD("[MON ] enter");
 

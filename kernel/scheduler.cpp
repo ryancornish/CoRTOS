@@ -486,7 +486,7 @@ namespace rtk
    }
 
    alignas(RTK_STACK_ALIGN) static std::array<std::byte, 2048> idle_stack{}; // TODO: size stack
-   static void idle_entry(void*) { while(true) port_idle(); }
+   static void idle_entry() { while(true) port_idle(); }
 
    void Scheduler::init(uint32_t tick_hz)
    {
@@ -659,7 +659,7 @@ namespace rtk
          assert(current != owner && "Recursive mutex lock attempt");
 
          if (owner != nullptr) {
-            LOG_SYNC("Mutex::try_lock_under_guard() @ID(%u) failed to acquire @MUTEX(%p) - owned by @ID()", current->id, ptr_suffix(this), owner->id);
+            LOG_SYNC("Mutex::try_lock_under_guard() @ID(%u) failed to acquire @MUTEX(%p) - owned by @ID(%u)", current->id, ptr_suffix(this), owner->id);
             return false;
          }
          link_to_owner(current);
@@ -807,20 +807,17 @@ namespace rtk
 
    struct SemaphoreImpl
    {
-      unsigned internal_count;
       TaskQueue wait_queue;
       // Assumes preemption is already disabled
-      bool try_acquire_under_guard()
+      bool try_acquire_under_guard(unsigned& counter)
       {
-         auto* current = iss.current_task;
-         assert(current && "Semaphore::try_acquire_under_guard() with no current task");
-
-         if (internal_count == 0) {
-            LOG_SYNC("Semaphore::try_acquire_under_guard() @ID(%u) failed to acquire. @COUNT(%u)", current, internal_count);
+         assert(iss.current_task && "Semaphore::try_acquire_under_guard() with no current task");
+         if (counter == 0) {
+            LOG_SYNC("Semaphore::try_acquire_under_guard() @ID(%u) failed to acquire. @COUNT(%u)", iss.current_task->id, counter);
             return false;
          }
-         --internal_count;
-         LOG_SYNC("try_acquire_under_guard() @ID(%u) ACQUIRED. @COUNT(%u)", current, internal_count);
+         --counter;
+         LOG_SYNC("try_acquire_under_guard() @ID(%u) ACQUIRED. @COUNT(%u)", iss.current_task->id, counter);
          return true;
       }
    };
@@ -829,19 +826,12 @@ namespace rtk
    static_assert(sizeof(SemaphoreImpl) == sizeof(Semaphore::ImplStorage),   "Adjust forward size declaration in header to match");
    static_assert(alignof(SemaphoreImpl) == alignof(Semaphore::ImplStorage), "Adjust forward align declaration in header to match");
 
-   constexpr Semaphore::Semaphore(unsigned initial_count) noexcept
-   {
-      self->internal_count = initial_count;
-   }
-
-   [[nodiscard]] unsigned Semaphore::count() const noexcept { return self->internal_count; }
-
    void Semaphore::acquire() noexcept
    {
       {
          Scheduler::Lock guard;
 
-         if (self->try_acquire_under_guard()) return;
+         if (self->try_acquire_under_guard(counter)) return;
          LOG_SYNC("Semaphore::acquire() @ID(%u) BLOCKED on @SEM(%p)", iss.current_task->id, ptr_suffix(this));
 
          iss.current_task->wait_target = self.get();
@@ -853,13 +843,13 @@ namespace rtk
       // Actually block
       port_yield();
 
-      LOG_SYNC("Semaphore::acquire() resumed @ID(%u) with token @COUNT(%u)", iss.current_task->id, self->internal_count);
+      LOG_SYNC("Semaphore::acquire() resumed @ID(%u) with token. @COUNTER(%u)", iss.current_task->id, counter);
    }
 
    [[nodiscard]] bool Semaphore::try_acquire() noexcept
    {
       Scheduler::Lock guard;
-      return (self->try_acquire_under_guard());
+      return (self->try_acquire_under_guard(counter));
    }
 
    [[nodiscard]] bool Semaphore::try_acquire_for(Tick::Delta timeout) noexcept
@@ -873,7 +863,7 @@ namespace rtk
       {
          Scheduler::Lock guard;
 
-         if (self->try_acquire_under_guard()) return true;
+         if (self->try_acquire_under_guard(counter)) return true;
 
          auto const now = Scheduler::tick_now();
          if (now.has_reached(deadline)) return false;
@@ -914,8 +904,8 @@ namespace rtk
             set_task_ready(waiter);
          } else {
             // No waiters, increment the count.
-            ++self->internal_count;
-            LOG_SYNC("Semaphore::release() incremented @COUNT(%u -> %u)", self->internal_count - 1, self->internal_count);
+            ++counter;
+            LOG_SYNC("Semaphore::release() incremented @COUNTER(%u -> %u)", counter - 1, counter);
          }
       }
       rtk_request_reschedule();

@@ -33,7 +33,7 @@ static void slow_worker(void* arg)
    }
 }
 
-static void logger_worker(void* /*arg*/)
+static void logger_worker()
 {
    std::uint32_t tick_block = 0;
 
