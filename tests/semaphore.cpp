@@ -6,6 +6,9 @@
 #include <cstdint>
 #include <cstdio>
 
+#define DEBUG_PRINT_ENABLE 1
+#include "DEBUG_PRINT.hpp"
+
 // --- Global semaphore and bookkeeping ---------------------------------------
 
 static constinit rtk::Semaphore sem{0};
@@ -18,43 +21,43 @@ static int order_low  = -1;
 // Just so we can see scheduler behaviour in the logs
 static void log_order()
 {
-   std::printf("[TEST] acquire order: HIGH=%d MID=%d LOW=%d\n", order_high, order_mid, order_low);
+   LOG_THREAD("[TEST] acquire order: HIGH=%d MID=%d LOW=%d", order_high, order_mid, order_low);
 }
 
 // --- Worker threads ---------------------------------------------------------
 
 static void worker_high()
 {
-   std::printf("[HIGH] started, calling acquire()\n");
+   LOG_THREAD("[HIGH] started, calling acquire()");
    sem.acquire();
    int seq = acquire_seq.fetch_add(1, std::memory_order_relaxed);
    order_high = seq;
-   std::printf("[HIGH] acquired semaphore at seq=%d\n", seq);
+   LOG_THREAD("[HIGH] acquired semaphore at seq=%d", seq);
 
    // Park forever so we don't re-enter the test logic
-   while (true) rtk::Scheduler::yield();
+   while (true) rtk::Scheduler::sleep_for(1000);
 }
 
 static void worker_mid()
 {
-   std::printf("[MID ] started, calling acquire()\n");
+   LOG_THREAD("[MID ] started, calling acquire()");
    sem.acquire();
    int seq = acquire_seq.fetch_add(1, std::memory_order_relaxed);
    order_mid = seq;
-   std::printf("[MID ] acquired semaphore at seq=%d\n", seq);
+   LOG_THREAD("[MID ] acquired semaphore at seq=%d", seq);
 
-   while (true) rtk::Scheduler::yield();
+   while (true) rtk::Scheduler::sleep_for(1000);
 }
 
 static void worker_low()
 {
-   std::printf("[LOW ] started, calling acquire()\n");
+   LOG_THREAD("[LOW ] started, calling acquire()");
    sem.acquire();
    int seq = acquire_seq.fetch_add(1, std::memory_order_relaxed);
    order_low = seq;
-   std::printf("[LOW ] acquired semaphore at seq=%d\n", seq);
+   LOG_THREAD("[LOW ] acquired semaphore at seq=%d", seq);
 
-   while (true) rtk::Scheduler::yield();
+   while (true) rtk::Scheduler::sleep_for(1000);
 }
 
 // --- Controller thread ------------------------------------------------------
@@ -64,22 +67,22 @@ static void worker_low()
 
 static void controller()
 {
-   std::printf("[CTRL] started\n");
+   LOG_THREAD("[CTRL] started\n");
 
    // Give workers a chance to start and block on sem.acquire().
    // (If they haven't blocked yet, they'll just consume tokens earlier, which
    //  is still fine as long as they *eventually* all block before the last release.)
    rtk::Scheduler::sleep_for(5);
 
-   std::printf("[CTRL] releasing 1 token\n");
+   LOG_THREAD("[CTRL] releasing 1 token");
    sem.release(1);
    rtk::Scheduler::sleep_for(5);
 
-   std::printf("[CTRL] releasing 1 token\n");
+   LOG_THREAD("[CTRL] releasing 1 token");
    sem.release(1);
    rtk::Scheduler::sleep_for(5);
 
-   std::printf("[CTRL] releasing 1 token\n");
+   LOG_THREAD("[CTRL] releasing 1 token");
    sem.release(1);
    rtk::Scheduler::sleep_for(5);
 
@@ -91,14 +94,14 @@ static void controller()
       (order_low  == 2);
 
    if (pass) {
-      std::printf("[CTRL] TEST PASS: semaphore woke waiters in priority order.\n");
+      LOG_THREAD("[CTRL] TEST PASS: semaphore woke waiters in priority order.");
    } else {
-      std::printf("[CTRL] TEST FAIL!\n");
-      std::printf("       Expected: HIGH=0 MID=1 LOW=2\n");
+      LOG_THREAD("[CTRL] TEST FAIL!");
+      LOG_THREAD("       Expected: HIGH=0 MID=1 LOW=2");
       log_order();
    }
 
-   while (true) rtk::Scheduler::yield();
+   while (true) rtk::Scheduler::sleep_for(1000);
 }
 
 // --- Stacks and threads -----------------------------------------------------
@@ -118,7 +121,7 @@ int main()
    rtk::Thread mid_thread(rtk::Thread::Entry(worker_mid), mid_stack, rtk::Thread::Priority(2));
    rtk::Thread low_thread(rtk::Thread::Entry(worker_low), low_stack, rtk::Thread::Priority(3));
 
-   std::printf("[MAIN] starting scheduler\n");
+   LOG_THREAD("[MAIN] starting scheduler");
    rtk::Scheduler::start();
 
    // Not reached
