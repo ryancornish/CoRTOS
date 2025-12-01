@@ -44,6 +44,11 @@ namespace rtk
 
    template<typename T> struct LinkedListNode { T* next; T* prev; };
 
+   // Intrusive doubly-linked-list of Task Control Blocks.
+   // Used for:
+   // - Task Round-Robin ready queues within the ReadyMatrix.
+   // - Sync primitive waiter queues within Mutex/Semaphore/ConditionVar.
+   // - Thread joining waiter queues within the TaskControlBlock itself.
    class TaskQueue
    {
       TaskControlBlock* head;
@@ -65,25 +70,33 @@ namespace rtk
    static_assert(std::is_trivially_constructible_v<TaskQueue>, "Must be usable within OpaqueImpl structs");
    static_assert(std::is_standard_layout_v<TaskQueue>,         "Must be usable within OpaqueImpl structs");
 
+   // Per-Thread metadata.
+   // Is constructed-in-place within the user defined stack.
+   // ^ See StackLayout for user stack layout details
    struct TaskControlBlock
    {
-      uint32_t id;
-      enum class State : uint8_t { Ready, Running, Sleeping, Blocked, Terminated } state{State::Ready};
-      uint8_t const base_priority;
-      uint8_t priority{base_priority};
-      Tick    wake_tick{0};
-      WaitTarget wait_target;
+      enum class State : uint8_t { Ready, Running, Sleeping, Blocked, Terminated };
+      State state{State::Ready};
 
+      // Intrusive link for a TaskQueue
+      // Note: Because there is only one link here, the following invariant _must_ hold at all times:
+      // This TaskControlBlock object may only be a member of at-most ONE TaskQueue at any given moment!
+      LinkedListNode<TaskControlBlock> tq_node{.next = nullptr, .prev = nullptr};
+      // Intrusive link for the SleepMinHeap
+      uint16_t sleep_index{UINT16_MAX}; // UINT16_MAX == not in the SleepMinHeap
+      Tick wake_tick{0};
+
+      // User-defined properties
+      uint32_t id;
+      uint8_t const base_priority;
+      uint8_t priority{base_priority}; // AKA effective-priority - can change dynamically
       std::span<std::byte> stack;
       Thread::Entry entry;
 
-      // Intrusive queue/list links for TaskQueue
-      LinkedListNode<TaskControlBlock> tq_node{.next = nullptr, .prev = nullptr};
-      uint16_t sleep_index{UINT16_MAX};
-
+      // What (if any) sync primitive object I am waiting on
+      WaitTarget wait_target;
       // List of mutexes currently held by me (used for priority inheritance)
-      struct MutexImpl* held_mutex_head{nullptr};
-
+      MutexImpl* held_mutex_head{nullptr};
       // List of threads wanting to join with me
       TaskQueue join_waiters{};
 
@@ -96,7 +109,7 @@ namespace rtk
          id(id), base_priority(priority), stack(stack), entry(entry) {}
    };
 
-   // --------------- TaskQueue implementation ---------------
+   // TaskQueue implementation.
    [[nodiscard]] size_t TaskQueue::size() const noexcept
    {
       std::size_t n = 0;
@@ -147,6 +160,14 @@ namespace rtk
       return best;
    }
 
+   // Carves a user-provided buffer region into:
+   // +----------------------+ <-- buffer's end (high address)
+   // +   TaskControlBlock   + (Fixed size)
+   // +----------------------+
+   // + Thread-local storage + (Variable size)
+   // +----------------------+
+   // +     User's stack     +
+   // +----------------------+ <-- buffer's base (low address)
    struct StackLayout
    {
       TaskControlBlock* tcb;
@@ -391,9 +412,7 @@ namespace rtk
 
       tcb->priority = new_priority;
       if (was_ready) iss.ready_matrix.enqueue_task(tcb);
-
       LOG_SCHED("set_effective_priority() @ID(%u) %u -> %u (state=%s, was_ready=%s)", tcb->id, old_priority, new_priority, STATE_TO_STR(tcb->state), TRUE_FALSE(was_ready));
-
       // Let the scheduler re-evaluate who should run
       iss.need_reschedule.store(true, std::memory_order_relaxed);
    }
@@ -410,10 +429,8 @@ namespace rtk
       iss.current_task->state = TaskControlBlock::State::Running;
 
       LOG_SCHED("context_switch_to() from @ID(%u) -> to @ID(%u)", previous_task ? previous_task->id : 0u, next->id);
-
       port_set_thread_pointer(next);
       port_switch(previous_task ? previous_task->context() : nullptr, iss.current_task->context());
-
       LOG_SCHED("~context_switch_to() returned to scheduler");
    }
 
@@ -432,9 +449,7 @@ namespace rtk
          if (!top_tcb || now.is_before(top_tcb->wake_tick)) break; // Noone asleep or not due yet
          (void)iss.sleepers.pop_min();
          if (top_tcb->wait_target) top_tcb->wait_target.remove(top_tcb); // Sleeper was waiting for a sync prim
-
          LOG_SCHED("schedule() sleeper @ID(%u) woken up for @ALARM(%u)", top_tcb->id, top_tcb->wake_tick.value());
-
          set_task_ready(top_tcb);
       }
 
@@ -453,7 +468,6 @@ namespace rtk
           iss.ready_matrix.has_peer(iss.current_task->priority)) // Don't requeue for singular threads at a priority level
       {
          LOG_SCHED("schedule() time-slice RR rotate @ID(%u) to the back of the queue", iss.current_task->id);
-
          set_task_ready(iss.current_task);
       }
 
@@ -462,9 +476,7 @@ namespace rtk
       if (!next_task) {
          iss.next_slice_tick.disarm();
          if (iss.current_task != iss.idle_tcb) {
-
             LOG_SCHED("schedule() pick IDLE @ID(%u) @PRIO(%u)", iss.idle_tcb->id, IDLE_PRIORITY);
-
             context_switch_to(iss.idle_tcb);
          }
          return;
