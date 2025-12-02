@@ -27,7 +27,7 @@ namespace rtk
 {
    static constexpr uint32_t UINT32_BITS = std::numeric_limits<uint32_t>::digits;
    static constexpr uint8_t IDLE_THREAD_ID = 1; // Reserved
-   static constexpr Thread::Priority IDLE_PRIORITY(MAX_PRIORITIES - 1);
+   static constexpr Thread::Priority IDLE_PRIORITY(Config::MAX_PRIORITIES - 1);
 
    static constexpr std::size_t align_down(std::size_t size, std::size_t align) { return size & ~(align - 1); }
    static constexpr std::size_t align_up(std::size_t size, std::size_t align)   { return (size + (align - 1)) & ~(align - 1); }
@@ -205,9 +205,9 @@ namespace rtk
    class ReadyMatrix
    {
       using RoundRobinQueue = TaskQueue;
-      std::array<RoundRobinQueue, MAX_PRIORITIES> matrix{};
+      std::array<RoundRobinQueue, Config::MAX_PRIORITIES> matrix{};
       uint32_t bitmap{0};
-      static_assert(MAX_PRIORITIES <= UINT32_BITS, "bitmap cannot hold that many priorities!");
+      static_assert(Config::MAX_PRIORITIES <= UINT32_BITS, "bitmap cannot hold that many priorities!");
 
    public:
       [[nodiscard]] constexpr bool empty() const noexcept { return bitmap == 0; }
@@ -264,7 +264,7 @@ namespace rtk
 
    class SleepMinHeap
    {
-      std::array<TaskControlBlock*, MAX_THREADS> heap_buffer{};
+      std::array<TaskControlBlock*, Config::MAX_THREADS> heap_buffer{};
       uint16_t size_count{0};
 
       static uint16_t parent(uint16_t i) noexcept { return (i - 1u) >> 1; }
@@ -495,7 +495,7 @@ namespace rtk
          iss.next_slice_tick.disarm();
       } else {
          // Serve a fresh slice
-         iss.next_slice_tick.store(now + TIME_SLICE);
+         iss.next_slice_tick.store(now + Config::TIME_SLICE);
       }
 
       LOG_SCHED("schedule() pick @ID(%u) @PRIO(%u)", next_task->id, next_task->priority);
@@ -562,7 +562,7 @@ namespace rtk
 
       iss.current_task = first;
       iss.current_task->state = TaskControlBlock::State::Running;
-      iss.next_slice_tick.store(Scheduler::tick_now() + TIME_SLICE);
+      iss.next_slice_tick.store(Scheduler::tick_now() + Config::TIME_SLICE);
       iss.preempt_disabled.store(false, std::memory_order_release); // Open the scheduler
 
       port_set_thread_pointer(iss.current_task); // I think this is correct?
@@ -1163,7 +1163,7 @@ namespace rtk
 static void LOG_SCHED_READY_MATRIX()
 {
    std::string s("|");
-   for (unsigned p = 0; p < rtk::MAX_PRIORITIES; ++p) {
+   for (unsigned p = 0; p < rtk::Config::MAX_PRIORITIES; ++p) {
       if (rtk::iss.ready_matrix.empty_at(p)) s.append(" 0|");
       else s.append(std::format("{: >2}|", rtk::iss.ready_matrix.size_at(p)));
    }

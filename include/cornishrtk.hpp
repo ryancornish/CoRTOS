@@ -17,20 +17,25 @@
 
 namespace rtk
 {
-   //-------------- Config ---------------
-   static constexpr uint32_t MAX_PRIORITIES = 32; // 0 = highest, 31 = lowest
-   static constexpr uint32_t MAX_THREADS    = 64;
-   static constexpr uint32_t TIME_SLICE     = 10; // In ticks
-   enum class JobHeapPolicy
+   // User Config
+   struct Config
    {
-      NoHeap,      // Compile-time assert if the callable cannot fit within the inline storage.
-      CanUseHeap,  // Callable will be placed in the inline storage IF it fits, else will use the heap.
-      MustUseHeap, // Callable will always be placed on the heap, even if it fits.
-   };
-   static constexpr JobHeapPolicy JOB_HEAP_POLICY         = JobHeapPolicy::CanUseHeap;
-   static constexpr   std::size_t JOB_INLINE_STORAGE_SIZE = 16;
+      static constexpr uint32_t MAX_PRIORITIES = 32; // 0 = highest, 31 = lowest
+      static constexpr uint32_t MAX_THREADS    = 64;
+      static constexpr uint32_t TIME_SLICE     = 10; // In ticks
 
-   static_assert(MAX_PRIORITIES <= std::numeric_limits<uint32_t>::digits, "Unsupported configuration");
+      enum class JobHeapPolicy
+      {
+         NoHeap,      // Compile-time assert if the callable cannot fit within the inline storage.
+         CanUseHeap,  // Callable will be placed in the inline storage IF it fits, else will use the heap.
+         MustUseHeap, // Callable will always be placed on the heap, even if it fits.
+      };
+      static constexpr JobHeapPolicy JOB_HEAP_POLICY         = JobHeapPolicy::CanUseHeap;
+      static constexpr   std::size_t JOB_INLINE_STORAGE_SIZE = 16;
+
+      static_assert(MAX_PRIORITIES <= std::numeric_limits<uint32_t>::digits, "Unsupported configuration");
+   };
+
 
    class Tick
    {
@@ -260,11 +265,11 @@ namespace rtk
    // Instantiate a JobModel with:
    // - InlineStorageSize defines the internal buffer size for capturing data accompanied by the callable.
    // - HeapPolicy defines whether constructing a Job can/can't or will use the heap.
-   template<std::size_t InlineStorageSize, JobHeapPolicy HeapPolicy>
+   template<std::size_t InlineStorageSize, Config::JobHeapPolicy HeapPolicy>
    class JobModel
    {
-      static constexpr bool AllowHeap = (HeapPolicy != JobHeapPolicy::NoHeap);
-      static constexpr bool ForceHeap = (HeapPolicy == JobHeapPolicy::MustUseHeap);
+      static constexpr bool AllowHeap = (HeapPolicy != Config::JobHeapPolicy::NoHeap);
+      static constexpr bool ForceHeap = (HeapPolicy == Config::JobHeapPolicy::MustUseHeap);
       using InvokeFn  = void(*)(void*);
       using MoveFn    = void(*)(void*, void*);
       using DestroyFn = void(*)(void*);
@@ -411,7 +416,7 @@ namespace rtk
    };
 
    // Job's VTable definition (out-of-line)
-   template<std::size_t InlineStorageSize, JobHeapPolicy HeapPolicy>
+   template<std::size_t InlineStorageSize, Config::JobHeapPolicy HeapPolicy>
    template<typename F, bool Heap>
    const typename JobModel<InlineStorageSize, HeapPolicy>::VTable
    JobModel<InlineStorageSize, HeapPolicy>::VTableImpl<F, Heap>::table{
@@ -420,8 +425,8 @@ namespace rtk
       .destroy = &VTableImpl::destroy
    };
 
-   // User's Job model instantiated:
-   using Job = JobModel<JOB_INLINE_STORAGE_SIZE, JOB_HEAP_POLICY>;
+   // User configured Job model instantiated:
+   using Job = JobModel<Config::JOB_INLINE_STORAGE_SIZE, Config::JOB_HEAP_POLICY>;
 
 } // namespace rtk
 
