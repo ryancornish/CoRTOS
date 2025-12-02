@@ -20,10 +20,8 @@ static std::uint32_t counter = 0;
 constexpr std::uint32_t T1_SLEEP_TICKS = 15;
 constexpr std::uint32_t T2_SLEEP_TICKS = 20;
 
-static void worker(void* arg)
+static void worker(char const* name)
 {
-   const char* name = static_cast<const char*>(arg);
-
    while (true) {
       // --- Critical section ---
       mutex.lock();
@@ -52,9 +50,9 @@ int main()
 {
    rtk::Scheduler::init(5);
 
-   rtk::Thread t1(rtk::Thread::Entry(worker, (void*)"T1  "), t1_stack, rtk::Thread::Priority(1));
+   rtk::Thread t1(rtk::Thread::Entry([]{worker("T1  ");}), t1_stack, rtk::Thread::Priority(1));
 
-   rtk::Thread t2(rtk::Thread::Entry(worker, (void*)"T2  "), t2_stack, rtk::Thread::Priority(2));
+   rtk::Thread t2(rtk::Thread::Entry([]{worker("T2  ");}), t2_stack, rtk::Thread::Priority(2));
 
    rtk::Scheduler::start();
    return 0;

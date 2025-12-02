@@ -105,8 +105,8 @@ namespace rtk
       constexpr port_context_t*       context()       noexcept { return context_storage.get(); }
       constexpr port_context_t const* context() const noexcept { return context_storage.get(); }
 
-      TaskControlBlock(uint32_t id, Thread::Priority priority, std::span<std::byte> stack, Thread::Entry entry) :
-         id(id), base_priority(priority), stack(stack), entry(entry) {}
+      TaskControlBlock(uint32_t id, Thread::Priority priority, std::span<std::byte> stack, Thread::Entry&& entry) :
+         id(id), base_priority(priority), stack(stack), entry(std::move(entry)) {}
    };
 
    // TaskQueue implementation.
@@ -538,7 +538,7 @@ namespace rtk
          IDLE_THREAD_ID,
          IDLE_PRIORITY,
          slayout.user_stack,
-         Thread::Entry(idle_entry)
+         idle_entry
       );
 
       port_context_init(iss.idle_tcb->context(),
@@ -618,7 +618,7 @@ namespace rtk
    void Scheduler::preempt_disable() { port_preempt_disable(); iss.preempt_disabled.store(true, std::memory_order_release); }
    void Scheduler::preempt_enable()  { iss.preempt_disabled.store(false, std::memory_order_release); port_preempt_enable(); }
 
-   Thread::Thread(Entry entry, std::span<std::byte> stack, Priority priority)
+   Thread::Thread(Entry&& entry, std::span<std::byte> stack, Priority priority)
    {
       assert(priority < IDLE_PRIORITY);
 
@@ -626,7 +626,7 @@ namespace rtk
       LOG_THREAD("Thread::Thread() initialise @ID(%u)", id);
 
       StackLayout slayout(stack, 0);
-      tcb = ::new (slayout.tcb) TaskControlBlock(id, priority, slayout.user_stack, entry);
+      tcb = ::new (slayout.tcb) TaskControlBlock(id, priority, slayout.user_stack, std::move(entry));
 
       port_context_init(tcb->context(), slayout.user_stack.data(), slayout.user_stack.size(), thread_launcher, tcb);
       set_task_ready(tcb);

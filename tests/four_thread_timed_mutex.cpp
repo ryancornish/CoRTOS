@@ -18,9 +18,8 @@ alignas(RTK_STACK_ALIGN) static constinit std::array<std::byte, STACK_BYTES> blo
 alignas(RTK_STACK_ALIGN) static constinit std::array<std::byte, STACK_BYTES> monitor_stack{};
 
 // High-priority timed worker (uses try_lock_for / try_lock_until)
-static void timed_worker(void* arg)
+static void timed_worker(char const* name)
 {
-   auto const* name = static_cast<char const*>(arg);
    std::uint32_t iteration = 0;
 
    while (true) {
@@ -56,9 +55,8 @@ static void timed_worker(void* arg)
 }
 
 // Medium-priority worker that uses *blocking* Mutex::lock()
-static void blocking_worker(void* arg)
+static void blocking_worker(char const* name)
 {
-   char const* name = static_cast<char const*>(arg);
    std::uint32_t iteration = 0;
 
    while (true) {
@@ -95,9 +93,8 @@ static void blocking_worker(void* arg)
 }
 
 // Low-priority monitor
-static void monitor_worker(void* arg)
+static void monitor_worker(char const* name)
 {
-   char const* name = static_cast<char const*>(arg);
    std::uint32_t heartbeat = 0;
 
    while (true) {
@@ -119,12 +116,12 @@ int main()
 
    // Two timed-lock workers at highest user priority (1)
    rtk::Thread timed_worker1(
-      rtk::Thread::Entry(timed_worker, (void*)"T1  "),
+      rtk::Thread::Entry([]{timed_worker("T1  ");}),
       timed1_stack,
       rtk::Thread::Priority(1));
 
    rtk::Thread timed_worker2(
-      rtk::Thread::Entry(timed_worker, (void*)"T2  "),
+      rtk::Thread::Entry([]{timed_worker("T2  ");}),
       timed2_stack,
       rtk::Thread::Priority(1));
 
@@ -133,13 +130,13 @@ int main()
    // enters the waiter queue, but also lets BLOCK get the CPU often enough
    // to demonstrate both immediate and queued acquisition.
    rtk::Thread blocking_thread(
-      rtk::Thread::Entry(blocking_worker, (void*)"BLOCK"),
+      rtk::Thread::Entry([]{blocking_worker("BLOCK");}),
       blocking_stack,
       rtk::Thread::Priority(2));
 
    // Monitor at low priority (10)
    rtk::Thread monitor_thread(
-      rtk::Thread::Entry(monitor_worker, (void*)"MON"),
+      rtk::Thread::Entry([]{monitor_worker("MON");}),
       monitor_stack,
       rtk::Thread::Priority(10));
 

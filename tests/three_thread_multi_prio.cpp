@@ -13,9 +13,8 @@ alignas(RTK_STACK_ALIGN) static constinit std::array<std::byte, STACK_BYTES> fas
 alignas(RTK_STACK_ALIGN) static constinit std::array<std::byte, STACK_BYTES> slow_stack{};
 alignas(RTK_STACK_ALIGN) static constinit std::array<std::byte, STACK_BYTES> logger_stack{};
 
-static void fast_worker(void* arg)
+static void fast_worker(const char* name)
 {
-   const char* name = static_cast<const char*>(arg);
    std::uint32_t counter = 0;
 
    while (true)
@@ -26,9 +25,8 @@ static void fast_worker(void* arg)
    }
 }
 
-static void slow_worker(void* arg)
+static void slow_worker(const char* name)
 {
-   const char* name = static_cast<const char*>(arg);
    std::uint32_t counter = 0;
 
    while (true)
@@ -65,9 +63,9 @@ int main()
    //   fast:   prio 1 (preempts others)
    //   slow:   prio 2
    //   logger: prio 10 (only runs when others are sleeping)
-   rtk::Thread fast_thread(rtk::Thread::Entry(fast_worker, (void*)"fast_worker"), fast_stack, rtk::Thread::Priority(1));
+   rtk::Thread fast_thread(rtk::Thread::Entry([]{fast_worker("fast_worker");}), fast_stack, rtk::Thread::Priority(1));
 
-   rtk::Thread slow_thread(rtk::Thread::Entry(slow_worker, (void*)"slow_worker"), slow_stack, rtk::Thread::Priority(2));
+   rtk::Thread slow_thread(rtk::Thread::Entry([]{slow_worker("slow_worker");}), slow_stack, rtk::Thread::Priority(2));
 
    rtk::Thread logger_thread(rtk::Thread::Entry(logger_worker), logger_stack, rtk::Thread::Priority(10));
 

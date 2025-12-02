@@ -134,34 +134,25 @@ namespace rtk
       };
    };
 
+   // Forward declare this because Threads like to use Jobs to launch!
+   template<std::size_t InlineStorageSize, Config::JobHeapPolicy HeapPolicy> class JobModel;
+
    class Thread
    {
       struct TaskControlBlock* tcb;
 
    public:
       using Id = std::uint32_t;
-
-      struct Entry
-      {
-         std::variant<std::monostate, void(*)(void*), void(*)()> fn;
-         void* arg{nullptr};
-         constexpr Entry() = default;
-         Entry(void(*fn)()) : fn(fn) {} // Intentionally implicit
-         Entry(void(*fn)(void*), void* arg) : fn(fn), arg(arg) {}
-         void operator()() const { std::visit([this](auto const& func) {
-            if constexpr (std::is_same_v<std::decay_t<decltype(func)>, void(*)(void*)>) func(arg);
-            else if constexpr (std::is_same_v<std::decay_t<decltype(func)>, void(*)()>) func();   }, fn);
-         }
-      };
+      using Entry = JobModel<16, Config::JobHeapPolicy::NoHeap>;
 
       struct Priority
       {
          std::uint8_t val;
-         constexpr Priority(std::uint8_t v) : val(v) {} // Intentionally implicit
-         operator uint8_t() const { return val; } // Intentionally implicit
+         constexpr Priority(std::uint8_t v) : val(v) {}     // Intentionally implicit
+         constexpr operator uint8_t() const { return val; } // Intentionally implicit
       };
 
-      Thread(Entry entry, std::span<std::byte> stack, Priority priority);
+      Thread(Entry&& entry, std::span<std::byte> stack, Priority priority);
       ~Thread();
 
       [[nodiscard]] Id get_id() const noexcept;
@@ -262,9 +253,10 @@ namespace rtk
 
    // Beware the template spaghetti!
 
+   // An instantiation of a JobModel is similar to a 'std::function<void()>'
    // Instantiate a JobModel with:
-   // - InlineStorageSize defines the internal buffer size for capturing data accompanied by the callable.
-   // - HeapPolicy defines whether constructing a Job can/can't or will use the heap.
+   // - InlineStorageSize (defines the internal buffer size for capturing data accompanied by the callable).
+   // - HeapPolicy (defines whether constructing a Job can/can't or will use the heap).
    template<std::size_t InlineStorageSize, Config::JobHeapPolicy HeapPolicy>
    class JobModel
    {
