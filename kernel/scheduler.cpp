@@ -60,7 +60,7 @@ namespace rtk
       [[nodiscard]] constexpr TaskControlBlock* front() const noexcept { return head; }
 
       // This walks the linked list so isn't 'free'. Will be used for debugging only for now
-      [[nodiscard]] size_t size() const noexcept;
+      [[nodiscard]] std::size_t size() const noexcept;
       void push_back(TaskControlBlock* tcb) noexcept;
       TaskControlBlock* pop_front() noexcept;
       void remove(TaskControlBlock* tcb) noexcept;
@@ -110,7 +110,7 @@ namespace rtk
    };
 
    // TaskQueue implementation.
-   [[nodiscard]] size_t TaskQueue::size() const noexcept
+   [[nodiscard]] std::size_t TaskQueue::size() const noexcept
    {
       std::size_t n = 0;
       for (auto* tcb = head; tcb; tcb = tcb->tq_node.next) ++n;

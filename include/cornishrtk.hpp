@@ -21,6 +21,14 @@ namespace rtk
    static constexpr uint32_t MAX_PRIORITIES = 32; // 0 = highest, 31 = lowest
    static constexpr uint32_t MAX_THREADS    = 64;
    static constexpr uint32_t TIME_SLICE     = 10; // In ticks
+   enum class JobHeapPolicy
+   {
+      NoHeap,      // Compile-time assert if the callable cannot fit within the inline storage.
+      CanUseHeap,  // Callable will be placed in the inline storage IF it fits, else will use the heap.
+      MustUseHeap, // Callable will always be placed on the heap, even if it fits.
+   };
+   static constexpr JobHeapPolicy JOB_HEAP_POLICY         = JobHeapPolicy::CanUseHeap;
+   static constexpr   std::size_t JOB_INLINE_STORAGE_SIZE = 16;
 
    static_assert(MAX_PRIORITIES <= std::numeric_limits<uint32_t>::digits, "Unsupported configuration");
 
@@ -247,6 +255,173 @@ namespace rtk
       ImplStorage self;
    };
 
+   // Beware the template spaghetti!
+
+   // Instantiate a JobModel with:
+   // - InlineStorageSize defines the internal buffer size for capturing data accompanied by the callable.
+   // - HeapPolicy defines whether constructing a Job can/can't or will use the heap.
+   template<std::size_t InlineStorageSize, JobHeapPolicy HeapPolicy>
+   class JobModel
+   {
+      static constexpr bool AllowHeap = (HeapPolicy != JobHeapPolicy::NoHeap);
+      static constexpr bool ForceHeap = (HeapPolicy == JobHeapPolicy::MustUseHeap);
+      using InvokeFn  = void(*)(void*);
+      using MoveFn    = void(*)(void*, void*);
+      using DestroyFn = void(*)(void*);
+
+      struct VTable
+      {
+         InvokeFn  invoke;
+         MoveFn    move;
+         DestroyFn destroy;
+      };
+      VTable const* vtable{nullptr};
+
+      // Storage for either inline object or heap pointer
+      union Storage
+      {
+         alignas(std::max_align_t) std::array<std::byte, InlineStorageSize> inline_storage;
+         void* heap_ptr;
+      } storage{};
+
+   public:
+      JobModel() = default;
+      JobModel(std::nullptr_t) noexcept {}
+      // Generic constructor from callable
+      template<typename F> JobModel(F&& f) { emplace(std::forward<F>(f)); }
+      ~JobModel() { reset(); }
+      JobModel(JobModel&& other) noexcept { move_from(std::move(other)); }
+      JobModel& operator=(JobModel&& other) noexcept
+      {
+         if (this != &other) {
+            reset();
+            move_from(std::move(other));
+         }
+         return *this;
+      }
+      JobModel(const JobModel&) = delete;
+      JobModel& operator=(const JobModel&) = delete;
+
+      // Replace current callable
+      template<typename F>
+      void emplace(F&& f)
+      {
+         using Decayed = std::decay_t<F>;
+         static_assert(std::is_invocable_r_v<void, Decayed&>, "Job callables must be invocable as void()");
+         constexpr std::size_t FuncSize  = sizeof(Decayed);
+         constexpr bool FitsInline       = (FuncSize <= InlineStorageSize);
+         constexpr bool NeedsHeapForSize = !FitsInline;
+         constexpr bool UseHeap          = ForceHeap || NeedsHeapForSize;
+         static_assert(!NeedsHeapForSize || AllowHeap, "Callable too big for this JobModel. Increase InlineStorageSize or allow heap.");
+
+         reset(); // Destroy old callable if any
+         if constexpr (UseHeap) {
+            static_assert(AllowHeap, "Heap usage is disabled for this JobModel.");
+            auto* ptr = new Decayed(std::forward<F>(f));
+            storage.heap_ptr = ptr;
+            vtable = &VTableImpl<Decayed, true>::table;
+         } else {
+            void* buf = &storage.inline_storage;
+            new (buf) Decayed(std::forward<F>(f));
+            vtable = &VTableImpl<Decayed, false>::table;
+         }
+      }
+
+      void operator()() const noexcept
+      {
+         // const_cast is fine: we delegate constness enforcement
+         if (vtable) vtable->invoke(const_cast<JobModel*>(this));
+      }
+
+      explicit operator bool() const noexcept { return vtable != nullptr; }
+
+      void reset() noexcept
+      {
+         if (vtable) {
+            vtable->destroy(this);
+            vtable = nullptr;
+         }
+      }
+
+   private:
+      template<typename F, bool Heap>
+      struct VTableImpl
+      {
+         static void invoke(void* self_void)
+         {
+            auto* self = static_cast<JobModel*>(self_void);
+            F* obj = get(self);
+            (*obj)();
+         }
+
+         static void move(void* dst_void, void* src_void)
+         {
+            auto* dst = static_cast<JobModel*>(dst_void);
+            auto* src = static_cast<JobModel*>(src_void);
+            if constexpr (Heap) {
+               dst->storage.heap_ptr = src->storage.heap_ptr;
+               src->storage.heap_ptr = nullptr;
+            } else {
+               F* src_obj = get(src);
+               void* dst_buf = &dst->storage.inline_storage;
+               new (dst_buf) F(std::move(*src_obj));
+               src_obj->~F();
+            }
+            dst->vtable = src->vtable;
+            src->vtable = nullptr;
+         }
+
+         static void destroy(void* self_void)
+         {
+            auto* self = static_cast<JobModel*>(self_void);
+            if constexpr (Heap) {
+               if (self->storage.heap_ptr) {
+                  delete static_cast<F*>(self->storage.heap_ptr);
+                  self->storage.heap_ptr = nullptr;
+               }
+            } else {
+               F* obj = get(self);
+               obj->~F();
+            }
+         }
+
+         static F* get(JobModel* self)
+         {
+            if constexpr (Heap) {
+               return static_cast<F*>(self->storage.heap_ptr);
+            } else {
+               return std::launder(reinterpret_cast<F*>(&self->storage.inline_storage));
+            }
+         }
+
+         static const VTable table;
+      };
+
+      template<typename F, bool Heap>
+      friend struct JobModel::VTableImpl;
+
+      void move_from(JobModel&& other) noexcept
+      {
+         if (!other.vtable) {
+            vtable = nullptr;
+            return;
+         }
+         other.vtable->move(this, &other);
+      }
+   };
+
+   // Job's VTable definition (out-of-line)
+   template<std::size_t InlineStorageSize, JobHeapPolicy HeapPolicy>
+   template<typename F, bool Heap>
+   const typename JobModel<InlineStorageSize, HeapPolicy>::VTable
+   JobModel<InlineStorageSize, HeapPolicy>::VTableImpl<F, Heap>::table{
+      .invoke  = &VTableImpl::invoke,
+      .move    = &VTableImpl::move,
+      .destroy = &VTableImpl::destroy
+   };
+
+   // User's Job model instantiated:
+   using Job = JobModel<JOB_INLINE_STORAGE_SIZE, JOB_HEAP_POLICY>;
 
 } // namespace rtk
 
