@@ -1,6 +1,7 @@
 # Kernel library
 add_library(cortos_kernel STATIC
   cortos_kernel.cpp
+  cortos_jobqueue.cpp
 )
 
 # Kernel depends on the selected port.
