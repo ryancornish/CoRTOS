@@ -1,7 +1,7 @@
 # WORK IN PROGRESS!
 
-# CornishRTK
-CornishRTK (Cornish Real-Time Kernel) is a compact, single-core, preemptive scheduler and synchronization kernel written in modern C++.
+# CornishCORTOS
+CornishCORTOS (Cornish Real-Time Kernel) is a compact, single-core, preemptive scheduler and synchronization kernel written in modern C++.
 It provides just enough kernel primitives to build or host higher-level threading systems - including the ability to run std::thread, std::mutex, and related C++ standard library features via the GCC gthreads API.
 
 ## Architectural Overview
@@ -29,7 +29,7 @@ It provides just enough kernel primitives to build or host higher-level threadin
               │                    │
               ▼                    ▼
  ┌──────────────────────────────────────────────────────────┐
- │                    CornishRTK Kernel                     │
+ │                    CornishCORTOS Kernel                     │
  │   • Preemptive, priority-based scheduler                 │
  │   • Ready / wait queues                                  │
  │   • Time-slicing and tick handling                       │

@@ -9,9 +9,9 @@
 #include "DEBUG_PRINT.hpp"
 
 static constexpr std::size_t STACK_BYTES = 1024 * 4;
-alignas(RTK_STACK_ALIGN) static constinit std::array<std::byte, STACK_BYTES> fast_stack{};
-alignas(RTK_STACK_ALIGN) static constinit std::array<std::byte, STACK_BYTES> slow_stack{};
-alignas(RTK_STACK_ALIGN) static constinit std::array<std::byte, STACK_BYTES> logger_stack{};
+alignas(CORTOS_STACK_ALIGN) static constinit std::array<std::byte, STACK_BYTES> fast_stack{};
+alignas(CORTOS_STACK_ALIGN) static constinit std::array<std::byte, STACK_BYTES> slow_stack{};
+alignas(CORTOS_STACK_ALIGN) static constinit std::array<std::byte, STACK_BYTES> logger_stack{};
 
 static void fast_worker(const char* name)
 {
@@ -21,7 +21,7 @@ static void fast_worker(const char* name)
    {
       LOG_THREAD("[FAST ] %s count=%u", name, counter);
       // Runs fairly often. high priority so it preempts others.
-      rtk::Scheduler::sleep_for(10);
+      cortos::Scheduler::sleep_for(10);
    }
 }
 
@@ -32,7 +32,7 @@ static void slow_worker(const char* name)
    while (true)
    {
       LOG_THREAD("[SLOW ] %s count=%u", name, counter++);
-      rtk::Scheduler::sleep_for(25);
+      cortos::Scheduler::sleep_for(25);
    }
 }
 
@@ -42,33 +42,33 @@ static void logger_worker()
 
    while (true)
    {
-      auto now = rtk::Scheduler::tick_now().value();
+      auto now = cortos::Scheduler::tick_now().value();
       LOG_THREAD("[LOG ] heartbeat at tick=%u (block=%u)", now, tick_block++);
 
       // Sleep long enough that higher-priority work dominates,
       // but occasionally yield cooperatively to show both paths.
-      rtk::Scheduler::sleep_for(50);
+      cortos::Scheduler::sleep_for(50);
 
       // Explicit cooperative yield inside our own timeslice
       // (on real MCU this would just pend a switch).
-      rtk::Scheduler::yield();
+      cortos::Scheduler::yield();
    }
 }
 
 int main()
 {
-   rtk::Scheduler::init(10);
+   cortos::Scheduler::init(10);
 
    // Priorities: lower number = higher priority.
    //   fast:   prio 1 (preempts others)
    //   slow:   prio 2
    //   logger: prio 10 (only runs when others are sleeping)
-   rtk::Thread fast_thread(rtk::Thread::Entry([]{fast_worker("fast_worker");}), fast_stack, rtk::Thread::Priority(1));
+   cortos::Thread fast_thread(cortos::Thread::Entry([]{fast_worker("fast_worker");}), fast_stack, cortos::Thread::Priority(1));
 
-   rtk::Thread slow_thread(rtk::Thread::Entry([]{slow_worker("slow_worker");}), slow_stack, rtk::Thread::Priority(2));
+   cortos::Thread slow_thread(cortos::Thread::Entry([]{slow_worker("slow_worker");}), slow_stack, cortos::Thread::Priority(2));
 
-   rtk::Thread logger_thread(rtk::Thread::Entry(logger_worker), logger_stack, rtk::Thread::Priority(10));
+   cortos::Thread logger_thread(cortos::Thread::Entry(logger_worker), logger_stack, cortos::Thread::Priority(10));
 
-   rtk::Scheduler::start();
+   cortos::Scheduler::start();
    return 0;
 }

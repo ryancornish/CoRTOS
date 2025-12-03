@@ -10,7 +10,7 @@
 #include "DEBUG_PRINT.hpp"
 
 // --- Global semaphore and bookkeeping ---------------------------------------
-static constinit rtk::Semaphore sem{0};
+static constinit cortos::Semaphore sem{0};
 static constinit std::atomic<int> acquire_seq{0};
 static constinit int order_high = -1;
 static constinit int order_mid  = -1;
@@ -57,19 +57,19 @@ static void controller()
    // Give workers a chance to start and block on sem.acquire().
    // (If they haven't blocked yet, they'll just consume tokens earlier, which
    //  is still fine as long as they *eventually* all block before the last release.)
-   rtk::Scheduler::sleep_for(5);
+   cortos::Scheduler::sleep_for(5);
 
    LOG_TEST("[CTRL] releasing 1 token");
    sem.release(1);
-   rtk::Scheduler::sleep_for(5);
+   cortos::Scheduler::sleep_for(5);
 
    LOG_TEST("[CTRL] releasing 1 token");
    sem.release(1);
-   rtk::Scheduler::sleep_for(5);
+   cortos::Scheduler::sleep_for(5);
 
    LOG_TEST("[CTRL] releasing 1 token");
    sem.release(1);
-   rtk::Scheduler::sleep_for(5);
+   cortos::Scheduler::sleep_for(5);
 
    bool pass = order_high == 0 && order_mid  == 1 && order_low  == 2;
 
@@ -84,23 +84,23 @@ static void controller()
 
 // --- Snacks and threads -----------------------------------------------------
 static constexpr std::size_t STACK_BYTES = 1024 * 4;
-alignas(RTK_STACK_ALIGN) static constinit std::array<std::byte, STACK_BYTES> controller_stack{};
-alignas(RTK_STACK_ALIGN) static constinit std::array<std::byte, STACK_BYTES> high_stack{};
-alignas(RTK_STACK_ALIGN) static constinit std::array<std::byte, STACK_BYTES> mid_stack{};
-alignas(RTK_STACK_ALIGN) static constinit std::array<std::byte, STACK_BYTES> low_stack{};
+alignas(CORTOS_STACK_ALIGN) static constinit std::array<std::byte, STACK_BYTES> controller_stack{};
+alignas(CORTOS_STACK_ALIGN) static constinit std::array<std::byte, STACK_BYTES> high_stack{};
+alignas(CORTOS_STACK_ALIGN) static constinit std::array<std::byte, STACK_BYTES> mid_stack{};
+alignas(CORTOS_STACK_ALIGN) static constinit std::array<std::byte, STACK_BYTES> low_stack{};
 
 int main()
 {
-   rtk::Scheduler::init(10);
+   cortos::Scheduler::init(10);
 
    // Priorities: 0 is highest. Give controller the absolute highest.
-   rtk::Thread controller_thread( rtk::Thread::Entry(controller), controller_stack, rtk::Thread::Priority(0));
-   rtk::Thread high_thread(rtk::Thread::Entry(worker_high), high_stack, rtk::Thread::Priority(1));
-   rtk::Thread mid_thread(rtk::Thread::Entry(worker_mid), mid_stack, rtk::Thread::Priority(2));
-   rtk::Thread low_thread(rtk::Thread::Entry(worker_low), low_stack, rtk::Thread::Priority(3));
+   cortos::Thread controller_thread( cortos::Thread::Entry(controller), controller_stack, cortos::Thread::Priority(0));
+   cortos::Thread high_thread(cortos::Thread::Entry(worker_high), high_stack, cortos::Thread::Priority(1));
+   cortos::Thread mid_thread(cortos::Thread::Entry(worker_mid), mid_stack, cortos::Thread::Priority(2));
+   cortos::Thread low_thread(cortos::Thread::Entry(worker_low), low_stack, cortos::Thread::Priority(3));
 
    LOG_TEST("[MAIN] starting scheduler");
-   rtk::Scheduler::start();
+   cortos::Scheduler::start();
 
    // Not reached
    return 0;

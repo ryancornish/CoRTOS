@@ -10,23 +10,23 @@
 #include "DEBUG_PRINT.hpp"
 
 // --- Mutexes -----------------------------------------------------
-static constinit rtk::Mutex mutex_A; // For PI chain: MED <-> HIGH
-static constinit rtk::Mutex mutex_B; // For PI chain: LOW  <-> MED
-static constinit rtk::Mutex mutex_C; // For multi-waiter + timeout test
+static constinit cortos::Mutex mutex_A; // For PI chain: MED <-> HIGH
+static constinit cortos::Mutex mutex_B; // For PI chain: LOW  <-> MED
+static constinit cortos::Mutex mutex_C; // For multi-waiter + timeout test
 
 // --- Snacks for threads -----------------------------------------------------
 static constexpr std::size_t STACK_BYTES = 1024 * 4;
 
-alignas(RTK_STACK_ALIGN) static constinit std::array<std::byte, STACK_BYTES> stack_LOW{};
-alignas(RTK_STACK_ALIGN) static constinit std::array<std::byte, STACK_BYTES> stack_MED{};
-alignas(RTK_STACK_ALIGN) static constinit std::array<std::byte, STACK_BYTES> stack_HIGH{};
+alignas(CORTOS_STACK_ALIGN) static constinit std::array<std::byte, STACK_BYTES> stack_LOW{};
+alignas(CORTOS_STACK_ALIGN) static constinit std::array<std::byte, STACK_BYTES> stack_MED{};
+alignas(CORTOS_STACK_ALIGN) static constinit std::array<std::byte, STACK_BYTES> stack_HIGH{};
 
-alignas(RTK_STACK_ALIGN) static constinit std::array<std::byte, STACK_BYTES> stack_OWNC{};
-alignas(RTK_STACK_ALIGN) static constinit std::array<std::byte, STACK_BYTES> stack_W1{};
-alignas(RTK_STACK_ALIGN) static constinit std::array<std::byte, STACK_BYTES> stack_W2{};
-alignas(RTK_STACK_ALIGN) static constinit std::array<std::byte, STACK_BYTES> stack_W3{};
+alignas(CORTOS_STACK_ALIGN) static constinit std::array<std::byte, STACK_BYTES> stack_OWNC{};
+alignas(CORTOS_STACK_ALIGN) static constinit std::array<std::byte, STACK_BYTES> stack_W1{};
+alignas(CORTOS_STACK_ALIGN) static constinit std::array<std::byte, STACK_BYTES> stack_W2{};
+alignas(CORTOS_STACK_ALIGN) static constinit std::array<std::byte, STACK_BYTES> stack_W3{};
 
-alignas(RTK_STACK_ALIGN) static constinit std::array<std::byte, STACK_BYTES> stack_MON{}; // monitor
+alignas(CORTOS_STACK_ALIGN) static constinit std::array<std::byte, STACK_BYTES> stack_MON{}; // monitor
 
 // ---------------------------------------------------------------------------
 // Thread entries - Priority Inheritance Chain (LOW, MED, HIGH)
@@ -38,13 +38,13 @@ static void thread_LOW_entry()
    LOG_TEST("[LOW ] enter");
 
    // Let others get created and maybe arrange their sleeps
-   rtk::Scheduler::sleep_for(1);
+   cortos::Scheduler::sleep_for(1);
 
    LOG_TEST("[LOW ] locking mutex_B");
    mutex_B.lock();
    LOG_TEST("[LOW ] acquired mutex_B, holding for 50 ticks");
 
-   rtk::Scheduler::sleep_for(50);
+   cortos::Scheduler::sleep_for(50);
 
    LOG_TEST("[LOW ] unlocking mutex_B");
    mutex_B.unlock();
@@ -58,19 +58,19 @@ static void thread_MED_entry()
    LOG_TEST("[MED ] enter");
 
    // Give LOW time to start and grab B first
-   rtk::Scheduler::sleep_for(5);
+   cortos::Scheduler::sleep_for(5);
 
    LOG_TEST("[MED ] locking mutex_A");
    mutex_A.lock();
    LOG_TEST("[MED ] acquired mutex_A, holding for 5 ticks");
 
-   rtk::Scheduler::sleep_for(5);
+   cortos::Scheduler::sleep_for(5);
 
    LOG_TEST("[MED ] trying to lock mutex_B (should block, LOW holds it)");
    mutex_B.lock();
    LOG_TEST("[MED ] acquired mutex_B after blocking");
 
-   rtk::Scheduler::sleep_for(5);
+   cortos::Scheduler::sleep_for(5);
 
    LOG_TEST("[MED ] unlocking mutex_B");
    mutex_B.unlock();
@@ -87,13 +87,13 @@ static void thread_HIGH_entry()
    LOG_TEST("[HIGH] enter");
 
    // Let MED first lock A, and LOW already have B
-   rtk::Scheduler::sleep_for(20);
+   cortos::Scheduler::sleep_for(20);
 
    LOG_TEST("[HIGH] trying to lock mutex_A (will block on MED, which is blocked on LOW)");
    mutex_A.lock();
    LOG_TEST("[HIGH] acquired mutex_A after PI chain resolved");
 
-   rtk::Scheduler::sleep_for(5);
+   cortos::Scheduler::sleep_for(5);
 
    LOG_TEST("[HIGH] unlocking mutex_A");
    mutex_A.unlock();
@@ -114,7 +114,7 @@ static void thread_OWNER_C_entry()
    mutex_C.lock();
    LOG_TEST("[OWNC] acquired mutex_C, holding for 40 ticks");
 
-   rtk::Scheduler::sleep_for(40);
+   cortos::Scheduler::sleep_for(40);
 
    LOG_TEST("[OWNC] unlocking mutex_C");
    mutex_C.unlock();
@@ -128,7 +128,7 @@ static void thread_W1_entry()
    LOG_TEST("[W1  ] enter");
 
    // Wait a bit so OWNER_C has mutex_C
-   rtk::Scheduler::sleep_for(5);
+   cortos::Scheduler::sleep_for(5);
 
    LOG_TEST("[W1  ] try_lock_for(5) on mutex_C (should TIMEOUT while donating)");
    bool got = mutex_C.try_lock_for(5);
@@ -148,13 +148,13 @@ static void thread_W2_entry()
    LOG_TEST("[W2  ] enter");
 
    // Arrive shortly after W1
-   rtk::Scheduler::sleep_for(6);
+   cortos::Scheduler::sleep_for(6);
 
    LOG_TEST("[W2  ] try_lock_for(50) on mutex_C (should acquire after OWNER_C unlocks)");
    bool got = mutex_C.try_lock_for(50);
    if (got) {
       LOG_TEST("[W2  ] acquired mutex_C after waiting");
-      rtk::Scheduler::sleep_for(5);
+      cortos::Scheduler::sleep_for(5);
       LOG_TEST("[W2  ] unlocking mutex_C");
       mutex_C.unlock();
    } else {
@@ -170,13 +170,13 @@ static void thread_W3_entry()
    LOG_TEST("[W3  ] enter");
 
    // Arrive after W2 - still before OWNER_C unlocks
-   rtk::Scheduler::sleep_for(7);
+   cortos::Scheduler::sleep_for(7);
 
    LOG_TEST("[W3  ] locking mutex_C (should block until W2 releases)");
    mutex_C.lock();
    LOG_TEST("[W3  ] acquired mutex_C after other waiters");
 
-   rtk::Scheduler::sleep_for(5);
+   cortos::Scheduler::sleep_for(5);
 
    LOG_TEST("[W3  ] unlocking mutex_C");
    mutex_C.unlock();
@@ -209,11 +209,11 @@ static void thread_MON_entry()
 {
    LOG_TEST("[MON ] enter");
 
-   const std::size_t reserved = rtk::Thread::reserved_stack_size();
+   const std::size_t reserved = cortos::Thread::reserved_stack_size();
 
    while (true) {
       // You can change the interval as needed
-      rtk::Scheduler::sleep_for(25);
+      cortos::Scheduler::sleep_for(25);
 
       LOG_TEST("[MON ] ----- Stack high-water marks -----");
 
@@ -250,22 +250,22 @@ int main()
    paint_stack(stack_W3);
    paint_stack(stack_MON);
 
-   rtk::Scheduler::init(10); // 10 ticks per second like before
+   cortos::Scheduler::init(10); // 10 ticks per second like before
 
    // PI chain threads
-   rtk::Thread tL (rtk::Thread::Entry(thread_LOW_entry),       stack_LOW,  rtk::Thread::Priority(15));
-   rtk::Thread tM (rtk::Thread::Entry(thread_MED_entry),       stack_MED,  rtk::Thread::Priority(8));
-   rtk::Thread tH (rtk::Thread::Entry(thread_HIGH_entry),      stack_HIGH, rtk::Thread::Priority(1));
+   cortos::Thread tL (cortos::Thread::Entry(thread_LOW_entry),       stack_LOW,  cortos::Thread::Priority(15));
+   cortos::Thread tM (cortos::Thread::Entry(thread_MED_entry),       stack_MED,  cortos::Thread::Priority(8));
+   cortos::Thread tH (cortos::Thread::Entry(thread_HIGH_entry),      stack_HIGH, cortos::Thread::Priority(1));
 
    // Multi-waiter / timeout threads on mutex_C
    // Owner is relatively low priority; waiters span a range above it.
-   rtk::Thread tOwnC(rtk::Thread::Entry(thread_OWNER_C_entry), stack_OWNC, rtk::Thread::Priority(12));
-   rtk::Thread tW1  (rtk::Thread::Entry(thread_W1_entry),      stack_W1,   rtk::Thread::Priority(2)); // highest waiter, times out
-   rtk::Thread tW2  (rtk::Thread::Entry(thread_W2_entry),      stack_W2,   rtk::Thread::Priority(4)); // long waiter, eventually acquires
-   rtk::Thread tW3  (rtk::Thread::Entry(thread_W3_entry),      stack_W3,   rtk::Thread::Priority(7)); // plain waiter
+   cortos::Thread tOwnC(cortos::Thread::Entry(thread_OWNER_C_entry), stack_OWNC, cortos::Thread::Priority(12));
+   cortos::Thread tW1  (cortos::Thread::Entry(thread_W1_entry),      stack_W1,   cortos::Thread::Priority(2)); // highest waiter, times out
+   cortos::Thread tW2  (cortos::Thread::Entry(thread_W2_entry),      stack_W2,   cortos::Thread::Priority(4)); // long waiter, eventually acquires
+   cortos::Thread tW3  (cortos::Thread::Entry(thread_W3_entry),      stack_W3,   cortos::Thread::Priority(7)); // plain waiter
 
    // Monitor thread; modest priority so it runs when things are calmer
-   rtk::Thread tMon (rtk::Thread::Entry(thread_MON_entry),     stack_MON,  rtk::Thread::Priority(13));
+   cortos::Thread tMon (cortos::Thread::Entry(thread_MON_entry),     stack_MON,  cortos::Thread::Priority(13));
 
-   rtk::Scheduler::start();
+   cortos::Scheduler::start();
 }

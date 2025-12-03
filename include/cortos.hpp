@@ -15,7 +15,7 @@
 #include <span>
 #include <type_traits>
 
-namespace rtk
+namespace cortos
 {
    // User Config
    struct Config
@@ -458,6 +458,6 @@ namespace rtk
       [[nodiscard]] std::optional<Job> try_take() noexcept;
    };
 
-} // namespace rtk
+} // namespace cortos
 
 #endif

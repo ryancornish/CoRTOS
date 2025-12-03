@@ -4,7 +4,7 @@ add_library(cortos_kernel STATIC
 )
 
 # Kernel depends on the selected port.
-target_link_libraries(cortos_kernel PUBLIC rtk::port)
+target_link_libraries(cortos_kernel PUBLIC cortos::port)
 
 # Expose public headers
 target_include_directories(cortos_kernel PUBLIC

@@ -11,8 +11,8 @@
 
 // --- Global sync primitives and bookkeeping ---------------------------------
 
-static constinit rtk::Mutex        mutex;
-static constinit rtk::ConditionVar cond_var;
+static constinit cortos::Mutex        mutex;
+static constinit cortos::ConditionVar cond_var;
 
 static std::atomic<int> blocked_count{0};  // how many workers have reached wait()
 static std::atomic<int> wake_seq{0};       // incremented as workers wake
@@ -112,7 +112,7 @@ static void controller()
    // Using yield() instead of busy spinning purely in CPU.
    while (blocked_count.load(std::memory_order_acquire) < 3) {
       LOG_TEST("[CTRL] waiting for workers to block, blocked_count=%d", blocked_count.load(std::memory_order_relaxed));
-      rtk::Scheduler::sleep_for(3);
+      cortos::Scheduler::sleep_for(3);
    }
 
    LOG_TEST("[CTRL] all workers are blocked, starting notify_one() sequence");
@@ -123,7 +123,7 @@ static void controller()
    cond_var.notify_one();
    mutex.unlock();
 
-   rtk::Scheduler::sleep_for(5);
+   cortos::Scheduler::sleep_for(5);
 
    // Second wake: next highest (MID)
    LOG_TEST("[CTRL] notify_one() #2");
@@ -131,7 +131,7 @@ static void controller()
    cond_var.notify_one();
    mutex.unlock();
 
-   rtk::Scheduler::sleep_for(5);
+   cortos::Scheduler::sleep_for(5);
 
    // Third wake: lowest (LOW)
    LOG_TEST("[CTRL] notify_one() #3");
@@ -139,7 +139,7 @@ static void controller()
    cond_var.notify_one();
    mutex.unlock();
 
-   rtk::Scheduler::sleep_for(5);
+   cortos::Scheduler::sleep_for(5);
 
    bool pass = order_high == 0 && order_mid == 1 && order_low == 2;
 
@@ -157,34 +157,34 @@ static void controller()
 // --- Snacks and threads -----------------------------------------------------
 static constexpr std::size_t STACK_BYTES = 1024 * 8;
 
-alignas(RTK_STACK_ALIGN) static constinit std::array<std::byte, STACK_BYTES> controller_stack{};
-alignas(RTK_STACK_ALIGN) static constinit std::array<std::byte, STACK_BYTES> high_stack{};
-alignas(RTK_STACK_ALIGN) static constinit std::array<std::byte, STACK_BYTES> mid_stack{};
-alignas(RTK_STACK_ALIGN) static constinit std::array<std::byte, STACK_BYTES> low_stack{};
+alignas(CORTOS_STACK_ALIGN) static constinit std::array<std::byte, STACK_BYTES> controller_stack{};
+alignas(CORTOS_STACK_ALIGN) static constinit std::array<std::byte, STACK_BYTES> high_stack{};
+alignas(CORTOS_STACK_ALIGN) static constinit std::array<std::byte, STACK_BYTES> mid_stack{};
+alignas(CORTOS_STACK_ALIGN) static constinit std::array<std::byte, STACK_BYTES> low_stack{};
 
 int main()
 {
-   rtk::Scheduler::init(10);
+   cortos::Scheduler::init(10);
 
    // Priorities: 0 is highest.
-   rtk::Thread controller_thread(rtk::Thread::Entry(controller),
+   cortos::Thread controller_thread(cortos::Thread::Entry(controller),
                                  controller_stack,
-                                 rtk::Thread::Priority(0));
+                                 cortos::Thread::Priority(0));
 
-   rtk::Thread high_thread(rtk::Thread::Entry(worker_high),
+   cortos::Thread high_thread(cortos::Thread::Entry(worker_high),
                            high_stack,
-                           rtk::Thread::Priority(1));
+                           cortos::Thread::Priority(1));
 
-   rtk::Thread mid_thread(rtk::Thread::Entry(worker_mid),
+   cortos::Thread mid_thread(cortos::Thread::Entry(worker_mid),
                           mid_stack,
-                          rtk::Thread::Priority(2));
+                          cortos::Thread::Priority(2));
 
-   rtk::Thread low_thread(rtk::Thread::Entry(worker_low),
+   cortos::Thread low_thread(cortos::Thread::Entry(worker_low),
                           low_stack,
-                          rtk::Thread::Priority(3));
+                          cortos::Thread::Priority(3));
 
    LOG_TEST("[MAIN] starting scheduler");
-   rtk::Scheduler::start();
+   cortos::Scheduler::start();
 
    // Not reached
    return 0;

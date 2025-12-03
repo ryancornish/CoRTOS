@@ -1,6 +1,6 @@
 
-#ifndef _PORT_H_
-#define _PORT_H_
+#ifndef PORT_H
+#define PORT_H
 #include <stddef.h>
 #include <stdint.h>
 
@@ -47,8 +47,8 @@ void* port_get_thread_pointer(void);
 void port_idle(void);
 
 // Kernel implements these!
-void rtk_on_tick(void);                 // tick ISR hook
-void rtk_request_reschedule(void);      // ask kernel to reschedule
+void cortos_on_tick(void);                 // tick ISR hook
+void cortos_request_reschedule(void);      // ask kernel to reschedule
 
 #ifdef __cplusplus
 }

@@ -23,7 +23,7 @@
 #define DEBUG_PRINT_ENABLE 1
 #include "DEBUG_PRINT.hpp"
 
-namespace rtk
+namespace cortos
 {
    static constexpr uint32_t UINT32_BITS = std::numeric_limits<uint32_t>::digits;
    static constexpr uint8_t IDLE_THREAD_ID = 1; // Reserved
@@ -101,7 +101,7 @@ namespace rtk
       TaskQueue join_waiters{};
 
       // Opaque, in-place port context storage
-      OpaqueImpl<port_context_t, RTK_PORT_CONTEXT_SIZE, RTK_PORT_CONTEXT_ALIGN> context_storage;
+      OpaqueImpl<port_context_t, CORTOS_PORT_CONTEXT_SIZE, CORTOS_PORT_CONTEXT_ALIGN> context_storage;
       constexpr port_context_t*       context()       noexcept { return context_storage.get(); }
       constexpr port_context_t const* context() const noexcept { return context_storage.get(); }
 
@@ -421,7 +421,7 @@ namespace rtk
    {
       // "do-not-switch-to-same-task" optimisation does not work
       // under simulation when the only runnable thread yields
-      if constexpr (!RTK_SIMULATION) {
+      if constexpr (!CORTOS_SIMULATION) {
          if (next == iss.current_task) return;
       }
       TaskControlBlock* previous_task = iss.current_task;
@@ -517,14 +517,14 @@ namespace rtk
             LOG_THREAD("signalling join waiter @ID(%u)", waiter->id);
             set_task_ready(waiter);
          }
-         rtk_request_reschedule();
+         cortos_request_reschedule();
       }
       LOG_THREAD("@ID(%u) Terminated", tcb->id);
       port_yield(); // Switch away and never come back
       __builtin_unreachable();
    }
 
-   alignas(RTK_STACK_ALIGN) static std::array<std::byte, 4096> idle_stack{}; // TODO: size stack
+   alignas(CORTOS_STACK_ALIGN) static std::array<std::byte, 4096> idle_stack{}; // TODO: size stack
    static void idle_entry() { while(true) port_idle(); }
 
    void Scheduler::init(uint32_t tick_hz)
@@ -568,7 +568,7 @@ namespace rtk
       port_set_thread_pointer(iss.current_task); // I think this is correct?
       port_start_first(iss.current_task->context());
 
-      if constexpr (RTK_SIMULATION) {
+      if constexpr (CORTOS_SIMULATION) {
          while (true) {
             schedule();
             struct timespec req{.tv_sec = 0, .tv_nsec = 1'000'000};
@@ -585,7 +585,7 @@ namespace rtk
       if (iss.current_task && iss.current_task->state == TaskControlBlock::State::Running) {
          set_task_ready(iss.current_task); // put current at tail
       }
-      rtk_request_reschedule();
+      cortos_request_reschedule();
       port_yield();
    }
 
@@ -611,7 +611,7 @@ namespace rtk
          iss.next_wake_tick.store(top_tcb->wake_tick);
       }
 
-      rtk_request_reschedule();
+      cortos_request_reschedule();
       port_yield();
    }
 
@@ -664,7 +664,7 @@ namespace rtk
 
          iss.current_task->state = TaskControlBlock::State::Blocked;
          tcb->join_waiters.push_back(iss.current_task);
-         rtk_request_reschedule();
+         cortos_request_reschedule();
       }
       port_yield();
 
@@ -794,7 +794,7 @@ namespace rtk
 
          // Priority inheritance: boost owner and possibly chain
          propagate_priority_to_owner(self.get(), iss.current_task);
-         rtk_request_reschedule();
+         cortos_request_reschedule();
       }
       port_yield(); // Actually block
    }
@@ -903,7 +903,7 @@ namespace rtk
          iss.current_task->state = TaskControlBlock::State::Blocked;
          self->wait_queue.push_back(iss.current_task);
 
-         rtk_request_reschedule();
+         cortos_request_reschedule();
       }
       // Actually block
       port_yield();
@@ -973,7 +973,7 @@ namespace rtk
             LOG_SYNC("Semaphore::release() incremented @COUNTER(%u -> %u)", counter - 1, counter);
          }
       }
-      rtk_request_reschedule();
+      cortos_request_reschedule();
    }
 
    struct ConditionVarImpl
@@ -1016,7 +1016,7 @@ namespace rtk
 
             recompute_effective_priority(old_owner);
          }
-         rtk_request_reschedule();
+         cortos_request_reschedule();
       }
       port_yield(); // Actually block
 
@@ -1101,7 +1101,7 @@ namespace rtk
       LOG_SYNC("ConditionVar::notify_one() waking waiter @ID(%u) on @CV(%p)", waiter->id, ptr_suffix(this));
       set_task_ready(waiter);
 
-      rtk_request_reschedule();
+      cortos_request_reschedule();
    }
 
    void ConditionVar::notify_all() noexcept
@@ -1117,7 +1117,7 @@ namespace rtk
          set_task_ready(waiter);
       }
 
-      rtk_request_reschedule();
+      cortos_request_reschedule();
    }
 
    void WaitTarget::remove(TaskControlBlock* tcb) noexcept
@@ -1190,37 +1190,37 @@ namespace rtk
       return job;
    }
 
-   extern "C" void rtk_on_tick(void)
+   extern "C" void cortos_on_tick(void)
    {
-      LOG_PORT("rtk_on_tick()");
+      LOG_PORT("cortos_on_tick()");
 
       auto const now = Scheduler::tick_now();
       if (iss.next_wake_tick.due(now) || iss.next_slice_tick.due(now)) {
 
-         LOG_PORT("rtk_on_tick() -> %s%s", iss.next_wake_tick.due(now) ? "wake_tick due " : "", iss.next_slice_tick.due(now) ? "slice_tick due" : "");
+         LOG_PORT("cortos_on_tick() -> %s%s", iss.next_wake_tick.due(now) ? "wake_tick due " : "", iss.next_slice_tick.due(now) ? "slice_tick due" : "");
 
-         rtk_request_reschedule();
+         cortos_request_reschedule();
       }
    }
 
-   extern "C" void rtk_request_reschedule(void)
+   extern "C" void cortos_request_reschedule(void)
    {
-      LOG_PORT("rtk_request_reschedule()");
+      LOG_PORT("cortos_request_reschedule()");
 
       iss.need_reschedule.store(true, std::memory_order_relaxed);
       // Under simulation we should return to the scheduler loop in user context
       // On bare metal, we should pend a software interrupt and return from this ISR
    }
 
-} // namespace rtk
+} // namespace cortos
 
 #if DEBUG_PRINT_ENABLE
 static void LOG_SCHED_READY_MATRIX()
 {
    std::string s("|");
-   for (unsigned p = 0; p < rtk::Config::MAX_PRIORITIES; ++p) {
-      if (rtk::iss.ready_matrix.empty_at(p)) s.append(" 0|");
-      else s.append(std::format("{: >2}|", rtk::iss.ready_matrix.size_at(p)));
+   for (unsigned p = 0; p < cortos::Config::MAX_PRIORITIES; ++p) {
+      if (cortos::iss.ready_matrix.empty_at(p)) s.append(" 0|");
+      else s.append(std::format("{: >2}|", cortos::iss.ready_matrix.size_at(p)));
    }
              LOG_SCHED("ready_matrix table:  HIGH                                       MEDIUM                                          LOW  \n"
 "|---------------------     priority_level: | 0| 1| 2| 3| 4| 5| 6| 7| 8| 9|10|11|12|13|14|15|16|17|18|19|20|21|22|23|24|25|26|27|28|29|30|31|\n"

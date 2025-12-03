@@ -38,9 +38,9 @@ struct port_context
    port_entry_t entry;
    void*        arg;
 };
-static_assert(RTK_PORT_CONTEXT_SIZE  == sizeof(port_context_t),  "Adjust port_traits.h definition to match");
-static_assert(RTK_PORT_CONTEXT_ALIGN == alignof(port_context_t), "Adjust port_traits.h definition to match");
-static_assert((RTK_STACK_ALIGN & (RTK_STACK_ALIGN - 1)) == 0,    "RTK_STACK_ALIGN must be a power of two");
+static_assert(CORTOS_PORT_CONTEXT_SIZE  == sizeof(port_context_t),  "Adjust port_traits.h definition to match");
+static_assert(CORTOS_PORT_CONTEXT_ALIGN == alignof(port_context_t), "Adjust port_traits.h definition to match");
+static_assert((CORTOS_STACK_ALIGN & (CORTOS_STACK_ALIGN - 1)) == 0,    "CORTOS_STACK_ALIGN must be a power of two");
 
 // thread-local "am I inside a thread?"
 static thread_local port_context* tls_current = nullptr;
@@ -54,7 +54,7 @@ struct preallocated_stack_noop
 };
 
 // Initialize an opaque port_context_t using caller-owned stack memory
-// 'stack_base'/'stack_size' must obey RTK_STACK_ALIGN constraints
+// 'stack_base'/'stack_size' must obey CORTOS_STACK_ALIGN constraints
 void port_context_init(port_context_t* context,
                        void* stack_base,
                        std::size_t stack_size,
@@ -137,7 +137,7 @@ void port_yield()
 {
    if (!tls_current) {
       // Special case when there is no current just reschedule!
-      rtk_request_reschedule();
+      cortos_request_reschedule();
       return;
    }
 
@@ -168,7 +168,7 @@ void port_init(uint32_t tick_hz)
    struct sigaction sa{};
    sa.sa_handler = [](int){
       global_tick.fetch_add(1, std::memory_order_relaxed);
-      rtk_on_tick();
+      cortos_on_tick();
    };
    sigemptyset(&sa.sa_mask);
    sa.sa_flags = SA_ONSTACK | SA_RESTART;
