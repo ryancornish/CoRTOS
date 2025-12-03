@@ -1,12 +1,12 @@
 /**
- * Cornish Real-Time Kernel Application Programming Interface
+ * CoRTOS Application Programming Interface
  *
  *
  *
  *
 */
-#ifndef _CORNISH_RTK_HPP_
-#define _CORNISH_RTK_HPP_
+#ifndef CORTOS_HPP
+#define CORTOS_HPP
 
 #include <cstddef>
 #include <cstdint>
@@ -14,7 +14,6 @@
 #include <optional>
 #include <span>
 #include <type_traits>
-#include <variant>
 
 namespace rtk
 {
