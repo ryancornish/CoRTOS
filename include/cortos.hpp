@@ -22,6 +22,7 @@ namespace cortos
    {
       static constexpr uint32_t MAX_PRIORITIES = 32; // 0 = highest, 31 = lowest
       static constexpr uint32_t MAX_THREADS    = 64;
+      static constexpr uint32_t MAX_TIMERS     = 64;
       static constexpr uint32_t TIME_SLICE     = 10; // In ticks
 
       enum class JobHeapPolicy
@@ -457,6 +458,44 @@ namespace cortos
       Job take();
       [[nodiscard]] std::optional<Job> try_take() noexcept;
    };
+
+   // TODO: reorder this
+   class Timer
+   {
+   public:
+      using ImplStorage = OpaqueImpl<struct TimerImpl, 80, 16>;
+      using Callback = JobModel<16, Config::JobHeapPolicy::NoHeap>;
+      enum class Mode { OneShot, Periodic };
+
+      // Cannot be constexpr for now as internal TimerImpl cannot nto be trivially constructed
+      Timer();
+      explicit Timer(Callback&& cb, Mode mode = Mode::OneShot);
+
+      Timer(Timer&&) noexcept;
+      Timer& operator=(Timer&&) noexcept;
+      Timer(const Timer&)            = delete;
+      Timer& operator=(const Timer&) = delete;
+      ~Timer() { stop(); }
+
+      // ---- Configuration (only valid while !is_running()) ----
+      void set_callback(Callback&& cb);
+      void set_mode(Mode mode);
+      void set_period(Tick::Delta ticks);   // for Mode::Periodic
+
+      // ---- Control ----
+      void start_after(Tick::Delta delay);
+      void start_at(Tick deadline);
+      void restart();  // uses last deadline/period if any
+      void stop();     // no more future callbacks
+
+      [[nodiscard]] bool is_running()  const noexcept;
+      [[nodiscard]] bool is_oneshot()  const noexcept;
+      [[nodiscard]] bool is_periodic() const noexcept;
+
+   private:
+      ImplStorage self;
+   };
+
 
 } // namespace cortos
 

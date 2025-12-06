@@ -32,6 +32,105 @@ namespace cortos
    static constexpr std::size_t align_down(std::size_t size, std::size_t align) { return size & ~(align - 1); }
    static constexpr std::size_t align_up(std::size_t size, std::size_t align)   { return (size + (align - 1)) & ~(align - 1); }
 
+   template<typename Traits>
+   class IntrusiveMinHeap
+   {
+   public:
+      using Node      = typename Traits::Node;
+      using IndexType = uint16_t;
+
+   private:
+      static constexpr IndexType CAPACITY = Traits::CAPACITY;
+      std::array<Node*, CAPACITY> heap_buffer{};
+      IndexType size_count{0};
+
+      static IndexType parent(IndexType i) noexcept { return (i - 1u) >> 1; }
+      static IndexType left  (IndexType i) noexcept { return (i << 1) + 1u; }
+      static IndexType right (IndexType i) noexcept { return (i << 1) + 2u; }
+
+      static bool earlier(const Node* a, const Node* b) noexcept { return Traits::earlier(a, b); }
+
+      static IndexType& index(Node* n) noexcept { return Traits::index(n); }
+
+      void swap_nodes(IndexType a, IndexType b) noexcept
+      {
+         std::swap(heap_buffer[a], heap_buffer[b]);
+         index(heap_buffer[a]) = a;
+         index(heap_buffer[b]) = b;
+      }
+
+      void sift_up(IndexType i) noexcept
+      {
+         while (i > 0) {
+            IndexType p = parent(i);
+            if (!earlier(heap_buffer[i], heap_buffer[p])) break;
+            swap_nodes(i, p);
+            i = p;
+         }
+      }
+
+      void sift_down(IndexType i) noexcept
+      {
+         while (true) {
+            IndexType l = left(i), r = right(i), m = i;
+            if (l < size_count && earlier(heap_buffer[l], heap_buffer[m])) m = l;
+            if (r < size_count && earlier(heap_buffer[r], heap_buffer[m])) m = r;
+            if (m == i) break;
+            swap_nodes(i, m);
+            i = m;
+         }
+      }
+
+   public:
+      [[nodiscard]] bool empty() const noexcept { return size_count == 0; }
+      [[nodiscard]] IndexType size() const noexcept { return size_count; }
+      [[nodiscard]] Node* top() const noexcept { return size_count ? heap_buffer[0] : nullptr; }
+
+      void push(Node* n) noexcept
+      {
+         // You can assert if you want a hard fail on overflow:
+         // assert(size_count < CAPACITY);
+         IndexType i = size_count++;
+         heap_buffer[i] = n;
+         index(n) = i;
+         sift_up(i);
+      }
+
+      Node* pop_min() noexcept
+      {
+         if (!size_count) return nullptr;
+         Node* n = heap_buffer[0];
+         index(n) = std::numeric_limits<IndexType>::max();
+         --size_count;
+         if (size_count) {
+            heap_buffer[0] = heap_buffer[size_count];
+            index(heap_buffer[0]) = 0;
+            sift_down(0);
+         }
+         return n;
+      }
+
+      void remove(Node* n) noexcept
+      {
+         IndexType i = index(n);
+         if (i == std::numeric_limits<IndexType>::max()) return; // not in heap
+
+         index(n) = std::numeric_limits<IndexType>::max();
+         --size_count;
+         if (i == size_count) return; // removed last
+
+         heap_buffer[i] = heap_buffer[size_count];
+         index(heap_buffer[i]) = i;
+
+         // Re-heapify from i (either direction)
+         if (i > 0 && earlier(heap_buffer[i], heap_buffer[parent(i)])) {
+            sift_up(i);
+         } else {
+            sift_down(i);
+         }
+      }
+   };
+
    struct WaitTarget
    {
       std::variant<std::monostate, MutexImpl*, SemaphoreImpl*, ConditionVarImpl*> sync_prim;
@@ -262,91 +361,63 @@ namespace cortos
       }
    };
 
-   class SleepMinHeap
+   struct SleepHeapTraits
    {
-      std::array<TaskControlBlock*, Config::MAX_THREADS> heap_buffer{};
-      uint16_t size_count{0};
+      using Node = TaskControlBlock;
+      static constexpr uint16_t CAPACITY = Config::MAX_THREADS;
+      static uint16_t& index(Node* tcb) noexcept { return tcb->sleep_index; }
+      static bool earlier(Node const* a, Node const* b) noexcept { return a->wake_tick.is_before(b->wake_tick); }
+   };
+   using SleepMinHeap = IntrusiveMinHeap<SleepHeapTraits>;
 
-      static uint16_t parent(uint16_t i) noexcept { return (i - 1u) >> 1; }
-      static uint16_t left  (uint16_t i) noexcept { return (i << 1) + 1u; }
-      static uint16_t right (uint16_t i) noexcept { return (i << 1) + 2u; }
+   struct TimerImpl
+   {
+      Timer::Mode mode{Timer::Mode::OneShot};
+      Timer::Callback cb;
+      Tick deadline;
+      uint16_t heap_index{std::numeric_limits<uint16_t>::max()};
+      Timer* owner{nullptr};
+      bool armed{false};
+   };
+   static_assert(sizeof(TimerImpl) == sizeof(Timer::ImplStorage),   "Adjust forward size declaration in header to match");
+   static_assert(alignof(TimerImpl) == alignof(Timer::ImplStorage), "Adjust forward align declaration in header to match");
 
-      static bool earlier(const TaskControlBlock* a, const TaskControlBlock* b) noexcept
+   struct TimerHeapTraits
+   {
+      using Node = TimerImpl;
+      static constexpr uint16_t CAPACITY = Config::MAX_TIMERS;
+      static uint16_t& index(Node* timer) noexcept { return timer->heap_index; }
+      static bool earlier(Node const* a, Node const* b) noexcept { return a->deadline.is_before(b->deadline); }
+   };
+   using TimerMinHeap = IntrusiveMinHeap<TimerHeapTraits>;
+
+   struct TimerJobQueue
+   {
+      std::array<Timer::Callback, TimerHeapTraits::CAPACITY> buffer{};
+      std::size_t head{0};
+      std::size_t tail{0};
+      std::size_t count{0};
+      [[nodiscard]] bool empty() const noexcept { return count == 0; }
+
+      bool push(Timer::Callback&& job)
       {
-         return a->wake_tick.is_before(b->wake_tick);
-      }
-      void swap_nodes(uint16_t a, uint16_t b) noexcept
-      {
-         std::swap(heap_buffer[a], heap_buffer[b]);
-         heap_buffer[a]->sleep_index = a;
-         heap_buffer[b]->sleep_index = b;
-      }
-      void sift_up(uint16_t i) noexcept
-      {
-         while (i > 0) {
-            uint16_t pnt = parent(i);
-            if (!earlier(heap_buffer[i], heap_buffer[pnt])) break;
-            swap_nodes(i, pnt);
-            i = pnt;
+         if (count == buffer.size()) {
+            // This is a bug in the kernel config: timer service saturated.
+            std::abort();
          }
-      }
-      void sift_down(uint16_t i) noexcept
-      {
-         while (true) {
-            uint16_t lft = left(i), rht = right(i), mid = i;
-            if (lft < size_count && earlier(heap_buffer[lft], heap_buffer[mid])) mid = lft;
-            if (rht < size_count && earlier(heap_buffer[rht], heap_buffer[mid])) mid = rht;
-            if (mid == i) break;
-            swap_nodes(i, mid);
-            i = mid;
-         }
+         buffer[tail] = std::move(job);
+         tail = (tail + 1) % buffer.size();
+         ++count;
+         return true;
       }
 
-   public:
-      [[nodiscard]] bool empty() const noexcept { return size_count == 0; }
-      [[nodiscard]] uint16_t size() const noexcept { return size_count; }
-      [[nodiscard]] TaskControlBlock* top() const noexcept
+      std::optional<Timer::Callback> pop()
       {
-         return size_count ? heap_buffer[0] : nullptr;
-      }
-
-      void push(TaskControlBlock* tcb) noexcept
-      {
-         uint16_t i = size_count++;
-         heap_buffer[i] = tcb;
-         tcb->sleep_index = i;
-         sift_up(i);
-      }
-      TaskControlBlock* pop_min() noexcept
-      {
-         if (!size_count) return nullptr;
-         TaskControlBlock* tcb = heap_buffer[0];
-         tcb->sleep_index = UINT16_MAX;
-         --size_count;
-         if (size_count) {
-            heap_buffer[0] = heap_buffer[size_count];
-            heap_buffer[0]->sleep_index = 0;
-            sift_down(0);
-         }
-         return tcb;
-      }
-      void remove(TaskControlBlock* tcb) noexcept
-      {
-         uint16_t i = tcb->sleep_index;
-         if (i == UINT16_MAX) return; // Not in heap
-         tcb->sleep_index = UINT16_MAX;
-         --size_count;
-         if (i == size_count) return; // Removed last
-
-         heap_buffer[i] = heap_buffer[size_count];
-         heap_buffer[i]->sleep_index = i;
-
-         // Re-heapify from i (either direction)
-         if (i > 0 && earlier(heap_buffer[i], heap_buffer[parent(i)])) {
-            sift_up(i);
-         } else {
-            sift_down(i);
-         }
+         if (!count) return std::nullopt;
+         auto cb = std::make_optional(std::move(buffer[head]));
+         head = (head + 1) % buffer.size();
+         --count;
+         return cb;
       }
    };
 
@@ -381,12 +452,16 @@ namespace cortos
       std::atomic_bool     preempt_disabled{true};
       std::atomic_bool     need_reschedule{false};
       TaskControlBlock* current_task{nullptr};
+      TaskControlBlock* timer_tcb{nullptr};
       TaskControlBlock* idle_tcb{nullptr};
 
       ReadyMatrix ready_matrix;
+      AtomicDeadline next_slice_tick; // When the next RR rotation is due
       SleepMinHeap sleepers;
       AtomicDeadline next_wake_tick; // When next sleeper must be woken
-      AtomicDeadline next_slice_tick; // When the next RR rotation is due
+      TimerMinHeap timers;
+      AtomicDeadline next_expiry_tick; // When next timer expires
+      TimerJobQueue timer_job_queue;
    };
    static constinit InternalSchedulerState iss;
 
@@ -460,6 +535,26 @@ namespace cortos
          iss.next_wake_tick.disarm();
       }
 
+      // Expire timers
+      while (true) {
+         auto* top_timer = iss.timers.top();
+         if (!top_timer || now.is_before(top_timer->deadline)) break;
+         (void)iss.timers.pop_min();
+         top_timer->armed = false;
+         if (top_timer->cb) {
+            iss.timer_job_queue.push(std::move(top_timer->cb));
+            LOG_SCHED("schedule() @TIMER(%u) expired on @ALARM(%u)", ptr_suffix(top_timer->owner), top_timer->deadline.value());
+            if (iss.timer_tcb->state == TaskControlBlock::State::Blocked) set_task_ready(iss.timer_tcb);
+         }
+      }
+
+      // Update when the next timer will expire
+      if (auto* top_timer = iss.timers.top()) {
+         iss.next_expiry_tick.store(top_timer->deadline);
+      } else {
+         iss.next_expiry_tick.disarm();
+      }
+
       // Round robin rotation
       if (iss.next_slice_tick.due(now) &&
           iss.current_task &&
@@ -522,6 +617,21 @@ namespace cortos
       LOG_THREAD("@ID(%u) Terminated", tcb->id);
       port_yield(); // Switch away and never come back
       __builtin_unreachable();
+   }
+
+   alignas(CORTOS_STACK_ALIGN) static std::array<std::byte, 4096> timer_stack{}; // TODO: size stack
+   static void timer_entry()
+   {
+      while (true) {
+         while (auto job = iss.timer_job_queue.pop()) {
+            (*job)();
+         }
+         {
+            Scheduler::Lock guard;
+            iss.timer_tcb->state = TaskControlBlock::State::Blocked;
+         }
+         Scheduler::yield();
+      }
    }
 
    alignas(CORTOS_STACK_ALIGN) static std::array<std::byte, 4096> idle_stack{}; // TODO: size stack
