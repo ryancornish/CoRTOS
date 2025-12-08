@@ -28,6 +28,7 @@ namespace cortos
    static constexpr uint32_t UINT32_BITS = std::numeric_limits<uint32_t>::digits;
    static constexpr uint8_t IDLE_THREAD_ID = 1; // Reserved
    static constexpr Thread::Priority IDLE_PRIORITY(Config::MAX_PRIORITIES - 1);
+   static constexpr Thread::Priority TIMER_PRIORITY(Config::TIMER_THREAD_PRIORITY);
 
    static constexpr std::size_t align_down(std::size_t size, std::size_t align) { return size & ~(align - 1); }
    static constexpr std::size_t align_up(std::size_t size, std::size_t align)   { return (size + (align - 1)) & ~(align - 1); }
@@ -208,7 +209,7 @@ namespace cortos
          id(id), base_priority(priority), stack(stack), entry(std::move(entry)) {}
    };
 
-   // TaskQueue implementation.
+   // --- Start Section: TaskQueue implementation ---
    [[nodiscard]] std::size_t TaskQueue::size() const noexcept
    {
       std::size_t n = 0;
@@ -258,6 +259,7 @@ namespace cortos
       remove(best);
       return best;
    }
+   // --- End Section: TaskQueue implementation ---
 
    // Carves a user-provided buffer region into:
    // +----------------------+ <-- buffer's end (high address)
@@ -372,12 +374,15 @@ namespace cortos
 
    struct TimerImpl
    {
-      Timer::Mode mode{Timer::Mode::OneShot};
       Timer::Callback cb;
+      Timer::Mode mode;
+      Timer* owner;
+      bool armed{false};
       Tick deadline;
       uint16_t heap_index{std::numeric_limits<uint16_t>::max()};
-      Timer* owner{nullptr};
-      bool armed{false};
+      TimerImpl(Timer::Callback&& cb, Timer::Mode mode, Timer* owner)
+         : cb(std::move(cb)), mode(mode), owner(owner) {}
+      TimerImpl(TimerImpl&&) = default;
    };
    static_assert(sizeof(TimerImpl) == sizeof(Timer::ImplStorage),   "Adjust forward size declaration in header to match");
    static_assert(alignof(TimerImpl) == alignof(Timer::ImplStorage), "Adjust forward align declaration in header to match");
@@ -619,16 +624,25 @@ namespace cortos
       __builtin_unreachable();
    }
 
+   // --- Start Section: Kernel-owned threads ---
    alignas(CORTOS_STACK_ALIGN) static std::array<std::byte, 4096> timer_stack{}; // TODO: size stack
    static void timer_entry()
    {
       while (true) {
-         while (auto job = iss.timer_job_queue.pop()) {
-            (*job)();
-         }
-         {
-            Scheduler::Lock guard;
-            iss.timer_tcb->state = TaskControlBlock::State::Blocked;
+         while (true) {
+            Timer::Callback job;
+            {
+               Scheduler::Lock guard;
+
+               auto opt_job = iss.timer_job_queue.pop();
+               if (!opt_job) {
+                  // No more jobs *as of now*. Park this thread until scheduler wakes it.
+                  iss.current_task->state = TaskControlBlock::State::Blocked;
+                  break;
+               }
+               job = std::move(*opt_job);
+            }
+            job();
          }
          Scheduler::yield();
       }
@@ -636,28 +650,48 @@ namespace cortos
 
    alignas(CORTOS_STACK_ALIGN) static std::array<std::byte, 4096> idle_stack{}; // TODO: size stack
    static void idle_entry() { while(true) port_idle(); }
+   // --- End Section: Kernel-owned threads ---
 
+   // --- Start Section: Scheduler public methods ---
    void Scheduler::init(uint32_t tick_hz)
    {
       LOG_SCHED("Scheduler::init(%u hz)", tick_hz);
-
       port_init(tick_hz);
+
       // Create the idle thread
-      StackLayout slayout(idle_stack, 0);
-      iss.idle_tcb = ::new (slayout.tcb) TaskControlBlock(
+      StackLayout idle_slayout(idle_stack, 0);
+      iss.idle_tcb = ::new (idle_slayout.tcb) TaskControlBlock(
          IDLE_THREAD_ID,
          IDLE_PRIORITY,
-         slayout.user_stack,
+         idle_slayout.user_stack,
          idle_entry
       );
 
       port_context_init(iss.idle_tcb->context(),
-                        slayout.user_stack.data(),
-                        slayout.user_stack.size(),
+                        idle_slayout.user_stack.data(),
+                        idle_slayout.user_stack.size(),
                         thread_launcher,
                         iss.idle_tcb);
       // Note: we intentionally do NOT call set_task_ready(idle_tcb).
       // Idle is never in ready_matrix.
+
+      // Create the timer thread
+      StackLayout timer_slayout(timer_stack, 0);
+      auto id = iss.next_thread_id.fetch_add(1, std::memory_order_relaxed);
+      iss.timer_tcb = ::new (timer_slayout.tcb) TaskControlBlock(
+         id,
+         TIMER_PRIORITY,
+         timer_slayout.user_stack,
+         timer_entry
+      );
+
+      port_context_init(iss.timer_tcb->context(),
+                        timer_slayout.user_stack.data(),
+                        timer_slayout.user_stack.size(),
+                        thread_launcher,
+                        iss.timer_tcb);
+
+      set_task_ready(iss.timer_tcb);
    }
 
    void Scheduler::start()
@@ -727,7 +761,9 @@ namespace cortos
 
    void Scheduler::preempt_disable() { port_preempt_disable(); iss.preempt_disabled.store(true, std::memory_order_release); }
    void Scheduler::preempt_enable()  { iss.preempt_disabled.store(false, std::memory_order_release); port_preempt_enable(); }
+   // --- End Section: Scheduler public methods ---
 
+   // --- Start Section: Thread public methods ---
    Thread::Thread(Entry&& entry, std::span<std::byte> stack, Priority priority)
    {
       assert(priority < IDLE_PRIORITY);
@@ -788,7 +824,9 @@ namespace cortos
       auto tls_size = 0; // TODO
       return tcb_size + tls_size;
    }
+   // --- End Section: Thread public methods ---
 
+   // --- Start Section: Mutex implementation ---
    struct MutexImpl
    {
       // Implicitly initialized to nullptr when opaque is constinit'ed
@@ -979,7 +1017,9 @@ namespace cortos
       // Old owner may have no more (or lower-prio) waiters across its remaining mutexes
       recompute_effective_priority(old_owner);
    }
+   // --- End Section: Mutex implementation ---
 
+   // --- Start Section: Semaphore implementation ---
    struct SemaphoreImpl
    {
       TaskQueue wait_queue;
@@ -1085,7 +1125,9 @@ namespace cortos
       }
       cortos_request_reschedule();
    }
+   // --- End Section: Semaphore implementation ---
 
+   // --- Start Section: ConditionVar implementation ---
    struct ConditionVarImpl
    {
       TaskQueue wait_queue;
@@ -1229,6 +1271,7 @@ namespace cortos
 
       cortos_request_reschedule();
    }
+   // --- Start Section: ConditionVar implementation ---
 
    void WaitTarget::remove(TaskControlBlock* tcb) noexcept
    {
@@ -1245,17 +1288,130 @@ namespace cortos
       clear();
    }
 
+   // -- Start Section: Timer implementation ---
+   Timer::Timer()
+   {
+      ::new (self.get()) TimerImpl(nullptr, Mode::OneShot, this);
+   }
 
-/*------------- port hooks into the kernel ------------*/
+   Timer::Timer(Callback&& cb, Mode mode)
+   {
+      ::new (self.get()) TimerImpl(std::move(cb), mode, this);
+   }
+
+   Timer::Timer(Timer&& other) noexcept
+   {
+      Scheduler::Lock guard;
+      assert(!other.self->armed && "Moving a running Timer is not supported");
+
+      ::new (self.get()) TimerImpl(std::move(*other.self.get()));
+      self->heap_index = std::numeric_limits<uint16_t>::max();
+   }
+
+   Timer& Timer::operator=(Timer&& other) noexcept
+   {
+      if (this == &other) return *this;
+
+      Scheduler::Lock guard;
+
+      // Cancel this timer if it is currently armed
+      if (self->armed) {
+         iss.timers.remove(self.get());
+         self->armed      = false;
+         self->heap_index = std::numeric_limits<uint16_t>::max();
+
+         if (auto* top = iss.timers.top()) {
+            iss.next_expiry_tick.store(top->deadline);
+         } else {
+            iss.next_expiry_tick.disarm();
+         }
+      }
+
+      assert(!other.self->armed && "Moving a running Timer is not supported");
+      self->mode     = other.self->mode;
+      self->cb       = std::move(other.self->cb);
+      self->deadline = other.self->deadline;
+      self->owner    = this;
+
+      return *this;
+   }
+
+   bool Timer::is_running()  const noexcept { return self->armed; }
+   bool Timer::is_oneshot()  const noexcept { return self->mode == Mode::OneShot;  }
+   bool Timer::is_periodic() const noexcept { return self->mode == Mode::Periodic; }
+
+   void Timer::start_after(Tick::Delta delay) { start_at(Scheduler::tick_now() + delay); }
+
+   void Timer::start_at(Tick deadline)
+   {
+      Scheduler::Lock guard;
+
+      if (!self->cb) {
+         LOG_SCHED("Timer::start_at() called on @TIMER(%p) with empty callback", ptr_suffix(this));
+         return;
+      }
+
+      if (self->armed) iss.timers.remove(self.get()); // Remove and re-add
+      self->deadline   = deadline;
+      self->armed      = true;
+      iss.timers.push(self.get());
+
+      if (auto* top = iss.timers.top()) {
+         iss.next_expiry_tick.store(top->deadline);
+      } else {
+         iss.next_expiry_tick.disarm();
+      }
+
+      LOG_SCHED("Timer::start_at() armed @TIMER(%p) for @ALARM(%u)", ptr_suffix(this), deadline.value());
+   }
+
+   void Timer::restart() { start_after(0); }
+
+   void Timer::stop()
+   {
+      Scheduler::Lock guard;
+
+      if (!self->armed) return; // Can we actually get into this state??
+
+      iss.timers.remove(self.get());
+      self->armed      = false;
+      self->heap_index = std::numeric_limits<uint16_t>::max();
+
+      if (auto* top = iss.timers.top()) {
+         iss.next_expiry_tick.store(top->deadline);
+      } else {
+         iss.next_expiry_tick.disarm();
+      }
+      LOG_SCHED("Timer::stop() disarmed @TIMER(%p)", ptr_suffix(this));
+   }
+
+   void Timer::set_callback(Callback&& cb)
+   {
+      Scheduler::Lock guard;
+      assert(!self->armed && "Timer::set_callback() only valid when timer is not running");
+      self->cb = std::move(cb);
+   }
+
+   void Timer::set_mode(Mode mode)
+   {
+      Scheduler::Lock guard;
+      assert(!self->armed && "Timer::set_mode() only valid when timer is not running");
+      self->mode = mode;
+   }
+
+   void Timer::set_period(Tick::Delta /*ticks*/)
+   {
+      // TODO
+   }
+   // -- End Section: Timer implementation ---
+
+   // --- Start Section: Port hooks into the kernel ---
    extern "C" void cortos_on_tick(void)
    {
       LOG_PORT("cortos_on_tick()");
-
       auto const now = Scheduler::tick_now();
-      if (iss.next_wake_tick.due(now) || iss.next_slice_tick.due(now)) {
-
-         LOG_PORT("cortos_on_tick() -> %s%s", iss.next_wake_tick.due(now) ? "wake_tick due " : "", iss.next_slice_tick.due(now) ? "slice_tick due" : "");
-
+      if (iss.next_wake_tick.due(now) || iss.next_slice_tick.due(now) || iss.next_expiry_tick.due(now)) {
+         LOG_PORT("cortos_on_tick() -> %s%s%s", iss.next_wake_tick.due(now) ? "wake_tick due "   : "", iss.next_slice_tick.due(now)  ? "slice_tick due "  : "", iss.next_expiry_tick.due(now) ? "expiry_tick due " : "");
          cortos_request_reschedule();
       }
    }
@@ -1268,7 +1424,7 @@ namespace cortos
       // Under simulation we should return to the scheduler loop in user context
       // On bare metal, we should pend a software interrupt and return from this ISR
    }
-/*-----------------------------------------------------*/
+   // --- End Section: Port hooks into the kernel ---
 
 } // namespace cortos
 
