@@ -39,6 +39,10 @@ namespace cortos
       static_assert(MAX_PRIORITIES <= std::numeric_limits<uint32_t>::digits, "Unsupported configuration");
    };
 
+   template<std::size_t InlineStorageSize, Config::JobHeapPolicy HeapPolicy> class JobModel;
+   // User configured Job model instantiated:
+   using Job       = JobModel<Config::JOB_INLINE_STORAGE_SIZE, Config::JOB_HEAP_POLICY>;
+   using NoHeapJob = JobModel<16, Config::JobHeapPolicy::NoHeap>; // Kernel's thread entry and timers use this variant
 
    class Tick
    {
@@ -137,16 +141,13 @@ namespace cortos
       };
    };
 
-   // Forward declare this because Threads like to use Jobs to launch!
-   template<std::size_t InlineStorageSize, Config::JobHeapPolicy HeapPolicy> class JobModel;
-
    class Thread
    {
       struct TaskControlBlock* tcb;
 
    public:
       using Id = std::uint32_t;
-      using Entry = JobModel<16, Config::JobHeapPolicy::NoHeap>;
+      using Entry = NoHeapJob;
 
       struct Priority
       {
@@ -180,6 +181,42 @@ namespace cortos
       constexpr T const& operator* () const noexcept { return *get(); }
       constexpr T*       operator->()       noexcept { return  get(); }
       constexpr T const* operator->() const noexcept { return  get(); }
+   };
+
+   class Timer
+   {
+   public:
+      using ImplStorage = OpaqueImpl<struct TimerImpl, 64, 16>;
+      using Callback = NoHeapJob;
+      enum class Mode { OneShot, Periodic };
+
+      // Cannot be constexpr for now as internal TimerImpl cannot not be trivially constructed
+      Timer();
+      explicit Timer(Callback&& cb, Mode mode = Mode::OneShot);
+
+      Timer(Timer&&) noexcept;
+      Timer& operator=(Timer&&) noexcept;
+      Timer(const Timer&)            = delete;
+      Timer& operator=(const Timer&) = delete;
+      ~Timer() { stop(); }
+
+      // ---- Configuration (only valid while !is_running()) ----
+      void set_callback(Callback&& cb);
+      void set_mode(Mode mode);
+      void set_period(Tick::Delta ticks);   // for Mode::Periodic
+
+      // ---- Control ----
+      void start_after(Tick::Delta delay);
+      void start_at(Tick deadline);
+      void restart();  // uses last deadline/period if any
+      void stop();     // no more future callbacks
+
+      [[nodiscard]] bool is_running()  const noexcept;
+      [[nodiscard]] bool is_oneshot()  const noexcept;
+      [[nodiscard]] bool is_periodic() const noexcept;
+
+   private:
+      ImplStorage self;
    };
 
    class Mutex
@@ -427,9 +464,6 @@ namespace cortos
       .destroy = &VTableImpl::destroy
    };
 
-   // User configured Job model instantiated:
-   using Job = JobModel<Config::JOB_INLINE_STORAGE_SIZE, Config::JOB_HEAP_POLICY>;
-
    class JobQueue
    {
       std::span<Job> buffer;
@@ -461,42 +495,6 @@ namespace cortos
       [[nodiscard]] std::optional<Job> try_take() noexcept;
    };
 
-   // TODO: reorder this
-   class Timer
-   {
-   public:
-      using ImplStorage = OpaqueImpl<struct TimerImpl, 64, 16>;
-      using Callback = JobModel<16, Config::JobHeapPolicy::NoHeap>;
-      enum class Mode { OneShot, Periodic };
-
-      // Cannot be constexpr for now as internal TimerImpl cannot nto be trivially constructed
-      Timer();
-      explicit Timer(Callback&& cb, Mode mode = Mode::OneShot);
-
-      Timer(Timer&&) noexcept;
-      Timer& operator=(Timer&&) noexcept;
-      Timer(const Timer&)            = delete;
-      Timer& operator=(const Timer&) = delete;
-      ~Timer() { stop(); }
-
-      // ---- Configuration (only valid while !is_running()) ----
-      void set_callback(Callback&& cb);
-      void set_mode(Mode mode);
-      void set_period(Tick::Delta ticks);   // for Mode::Periodic
-
-      // ---- Control ----
-      void start_after(Tick::Delta delay);
-      void start_at(Tick deadline);
-      void restart();  // uses last deadline/period if any
-      void stop();     // no more future callbacks
-
-      [[nodiscard]] bool is_running()  const noexcept;
-      [[nodiscard]] bool is_oneshot()  const noexcept;
-      [[nodiscard]] bool is_periodic() const noexcept;
-
-   private:
-      ImplStorage self;
-   };
 
 
 } // namespace cortos
