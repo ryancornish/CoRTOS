@@ -34,7 +34,7 @@ namespace cortos
       static constexpr JobHeapPolicy JOB_HEAP_POLICY         = JobHeapPolicy::CanUseHeap;
       static constexpr   std::size_t JOB_INLINE_STORAGE_SIZE = 16;
 
-      static constexpr uint32_t TIMER_THREAD_PRIORITY = 1;
+      static constexpr uint32_t TIMER_THREAD_PRIORITY = 0;
 
       static_assert(MAX_PRIORITIES <= std::numeric_limits<uint32_t>::digits, "Unsupported configuration");
    };

@@ -637,11 +637,13 @@ namespace cortos
                auto opt_job = iss.timer_job_queue.pop();
                if (!opt_job) {
                   // No more jobs *as of now*. Park this thread until scheduler wakes it.
+                  LOG_THREAD("timer_entry() marking self as blocked");
                   iss.current_task->state = TaskControlBlock::State::Blocked;
                   break;
                }
                job = std::move(*opt_job);
             }
+            LOG_THREAD("timer_entry() executing timer cb");
             job();
          }
          Scheduler::yield();
