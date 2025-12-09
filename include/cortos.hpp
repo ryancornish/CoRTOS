@@ -35,6 +35,8 @@ namespace cortos
       static constexpr   std::size_t JOB_INLINE_STORAGE_SIZE = 16;
 
       static constexpr uint32_t TIMER_THREAD_PRIORITY = 0;
+      // Extensions
+      static constexpr bool ENABLE_EXTENSION_JOB_QUEUE = true;
 
       static_assert(MAX_PRIORITIES <= std::numeric_limits<uint32_t>::digits, "Unsupported configuration");
    };
@@ -464,37 +466,43 @@ namespace cortos
       .destroy = &VTableImpl::destroy
    };
 
-   class JobQueue
+
+   namespace extension::jobqueue
    {
-      std::span<Job> buffer;
-      std::size_t    head {0};
-      std::size_t    tail {0};
-      std::size_t    count{0};
+      template <bool Enabled> class JobQueue;
+      template <>
+      class JobQueue<true>
+      {
+         std::span<Job> buffer;
+         std::size_t    head {0};
+         std::size_t    tail {0};
+         std::size_t    count{0};
 
-      Mutex     mutex;    // Protects buffer/head/tail/count
-      Semaphore items{0}; // # of jobs in queue (initially 0)
-   public:
-      constexpr explicit JobQueue(std::span<Job> storage) noexcept : buffer(storage) {};
+         Mutex     mutex;    // Protects buffer/head/tail/count
+         Semaphore items{0}; // # of jobs in queue (initially 0)
+      public:
+         constexpr explicit JobQueue(std::span<Job> storage) noexcept : buffer(storage) {};
 
-      JobQueue(const JobQueue&)            = delete;
-      JobQueue& operator=(const JobQueue&) = delete;
+         JobQueue(const JobQueue&)            = delete;
+         JobQueue& operator=(const JobQueue&) = delete;
 
-      [[nodiscard]] std::size_t capacity() const noexcept { return buffer.size(); }
-      [[nodiscard]] std::size_t size()     const noexcept { return count; } // Not strictly atomic (for cheaper access)
+         [[nodiscard]] std::size_t capacity() const noexcept { return buffer.size(); }
+         [[nodiscard]] std::size_t size()     const noexcept { return count; } // Not strictly atomic (for cheaper access)
 
-      // Enqueue:
-      //  - push(): hard-fails if full (crash/assert)
-      //  - try_push(): returns false if full
-      void push(Job&& job);
-      [[nodiscard]] bool try_push(Job&& job) noexcept;
+         // Enqueue:
+         //  - push(): hard-fails if full (crash/assert)
+         //  - try_push(): returns false if full
+         void push(Job&& job);
+         [[nodiscard]] bool try_push(Job&& job) noexcept;
 
-      // Dequeue:
-      //  - take(): blocks until a job is available
-      //  - try_take(): returns false/empty optional or Job
-      Job take();
-      [[nodiscard]] std::optional<Job> try_take() noexcept;
-   };
-
+         // Dequeue:
+         //  - take(): blocks until a job is available
+         //  - try_take(): returns false/empty optional or Job
+         Job take();
+         [[nodiscard]] std::optional<Job> try_take() noexcept;
+      };
+   } // namespace extension::jobqueue
+   using JobQueue = extension::jobqueue::JobQueue<Config::ENABLE_EXTENSION_JOB_QUEUE>;
 
 
 } // namespace cortos

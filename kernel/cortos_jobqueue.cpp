@@ -2,9 +2,12 @@
  *
  */
 #include "cortos.hpp"
+#include <type_traits>
 
 namespace cortos
 {
+   static_assert(std::is_same_v<JobQueue, extension::jobqueue::JobQueue<true>>, "This TU should not be compiled if the extension is disabled");
+
 
    // JobQueue Implementation
    void JobQueue::push(Job&& job)
