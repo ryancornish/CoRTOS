@@ -714,14 +714,9 @@ namespace cortos
       port_set_thread_pointer(iss.current_task); // I think this is correct?
       port_start_first(iss.current_task->context());
 
-      if constexpr (CORTOS_SIMULATION) {
-         while (true) {
-            schedule();
-            struct timespec req{.tv_sec = 0, .tv_nsec = 1'000'000};
-            nanosleep(&req, nullptr);
-         }
+      if constexpr (!CORTOS_SIMULATION) {
+         __builtin_unreachable();
       }
-      __builtin_unreachable();
    }
 
    void Scheduler::yield()
@@ -1427,6 +1422,10 @@ namespace cortos
       // On bare metal, we should pend a software interrupt and return from this ISR
    }
    // --- End Section: Port hooks into the kernel ---
+
+#if CORTOS_SIMULATION
+namespace sim { void schedule_under_sim() { schedule(); } }
+#endif
 
 } // namespace cortos
 

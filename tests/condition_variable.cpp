@@ -1,4 +1,5 @@
 #include "cortos.hpp"
+#include "cortos_simulation.hpp"
 #include "port_traits.h"
 
 #include <array>
@@ -185,6 +186,8 @@ int main()
 
    LOG_TEST("[MAIN] starting scheduler");
    cortos::Scheduler::start();
+
+   cortos::sim::run_forever(2);
 
    // Not reached
    return 0;

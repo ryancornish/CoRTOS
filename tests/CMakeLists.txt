@@ -1,3 +1,6 @@
+add_library(cortos_simulation STATIC cortos_simulation.cpp)
+target_link_libraries(cortos_simulation PUBLIC cortos_kernel)
+
 
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/two_thread_equal_prio.cpp")
   add_executable(two_thread_equal_prio two_thread_equal_prio.cpp)
@@ -44,7 +47,7 @@ endif()
 
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/condition_variable.cpp")
   add_executable(condition_variable condition_variable.cpp)
-  target_link_libraries(condition_variable PRIVATE cortos_kernel)
+  target_link_libraries(condition_variable PRIVATE cortos_simulation)
   target_include_directories(condition_variable PRIVATE ${CMAKE_SOURCE_DIR}/include)
 endif()
 

@@ -159,25 +159,34 @@ void port_idle()
 }
 
 
-void port_init(uint32_t tick_hz)
+void port_init(uint32_t)
 {
-   static std::array<std::uint8_t, 8 * 1024> altstack;
-   stack_t ss = { .ss_sp = altstack.data(), .ss_flags = 0, .ss_size = altstack.size() };
-   sigaltstack(&ss, nullptr);
+   // static std::array<std::uint8_t, 8 * 1024> altstack;
+   // stack_t ss = { .ss_sp = altstack.data(), .ss_flags = 0, .ss_size = altstack.size() };
+   // sigaltstack(&ss, nullptr);
 
-   struct sigaction sa{};
-   sa.sa_handler = [](int){
-      global_tick.fetch_add(1, std::memory_order_relaxed);
+   // struct sigaction sa{};
+   // sa.sa_handler = [](int){
+   //    global_tick.fetch_add(1, std::memory_order_relaxed);
+   //    cortos_on_tick();
+   // };
+   // sigemptyset(&sa.sa_mask);
+   // sa.sa_flags = SA_ONSTACK | SA_RESTART;
+   // sigaction(SIGALRM, &sa, nullptr);
+
+   // itimerval it{};
+   // int usec = 1'000'000 / static_cast<int>(tick_hz);
+   // it.it_interval.tv_sec  = usec / 1'000'000;
+   // it.it_interval.tv_usec = usec % 1'000'000;
+   // it.it_value            = it.it_interval;
+   // setitimer(ITIMER_REAL, &it, nullptr);
+}
+
+namespace cortos::sim
+{
+   void advance_tick(int ticks)
+   {
+      global_tick.fetch_add(ticks, std::memory_order_relaxed);
       cortos_on_tick();
-   };
-   sigemptyset(&sa.sa_mask);
-   sa.sa_flags = SA_ONSTACK | SA_RESTART;
-   sigaction(SIGALRM, &sa, nullptr);
-
-   itimerval it{};
-   int usec = 1'000'000 / static_cast<int>(tick_hz);
-   it.it_interval.tv_sec  = usec / 1'000'000;
-   it.it_interval.tv_usec = usec % 1'000'000;
-   it.it_value            = it.it_interval;
-   setitimer(ITIMER_REAL, &it, nullptr);
+   }
 }
