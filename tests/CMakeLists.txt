@@ -53,3 +53,10 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/timers.cpp")
   target_link_libraries(timers PRIVATE cortos_kernel)
   target_include_directories(timers PRIVATE ${CMAKE_SOURCE_DIR}/include)
 endif()
+
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/test1.cpp")
+  add_executable(test1 test1.cpp)
+
+  target_link_libraries(test1 PRIVATE cortos_kernel gtest gtest_main)
+  add_test(NAME test1 COMMAND test1)
+endif()

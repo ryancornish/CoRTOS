@@ -20,4 +20,8 @@ add_subdirectory(port/${CORTOS_PORT})
 
 # Kernel & tests
 add_subdirectory(kernel)
+#add_subdirectory(tests)
+add_subdirectory(external/googletest)
+
+enable_testing()
 add_subdirectory(tests)
