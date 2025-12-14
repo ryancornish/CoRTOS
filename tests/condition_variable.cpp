@@ -6,6 +6,7 @@
 #include <atomic>
 #include <cstdint>
 #include <cstdio>
+#include <gtest/gtest.h>
 
 #define DEBUG_PRINT_ENABLE 1
 #include "DEBUG_PRINT.hpp"
@@ -163,32 +164,46 @@ alignas(CORTOS_STACK_ALIGN) static constinit std::array<std::byte, STACK_BYTES> 
 alignas(CORTOS_STACK_ALIGN) static constinit std::array<std::byte, STACK_BYTES> mid_stack{};
 alignas(CORTOS_STACK_ALIGN) static constinit std::array<std::byte, STACK_BYTES> low_stack{};
 
-int main()
+
+class ConditionVarTestFixture : public ::testing::Test
 {
-   cortos::Scheduler::init(10);
+protected:
+   void SetUp() override
+   {
+      // Reset globals between tests
+      blocked_count.store(0, std::memory_order_relaxed);
+      wake_seq.store(0, std::memory_order_relaxed);
+      order_high = order_mid = order_low = -1;
 
-   // Priorities: 0 is highest.
-   cortos::Thread controller_thread(cortos::Thread::Entry(controller),
-                                 controller_stack,
-                                 cortos::Thread::Priority(0));
+      // If you have a sim-reset helper, call it; otherwise just init the scheduler
+      cortos::Scheduler::init(10);
+   }
 
-   cortos::Thread high_thread(cortos::Thread::Entry(worker_high),
-                           high_stack,
-                           cortos::Thread::Priority(1));
+   void TearDown() override
+   {
+      // nothing yet; if you add a sim shutdown, do it here
+   }
+};
 
-   cortos::Thread mid_thread(cortos::Thread::Entry(worker_mid),
-                          mid_stack,
-                          cortos::Thread::Priority(2));
+TEST_F(ConditionVarTestFixture, WaitersWakeInPriorityOrder)
+{
+   // Create threads
+   cortos::Thread ctrl_thread(cortos::Thread::Entry(controller), controller_stack, cortos::Thread::Priority(0));
 
-   cortos::Thread low_thread(cortos::Thread::Entry(worker_low),
-                          low_stack,
-                          cortos::Thread::Priority(3));
+   cortos::Thread high_thread(cortos::Thread::Entry(worker_high), high_stack, cortos::Thread::Priority(1));
 
-   LOG_TEST("[MAIN] starting scheduler");
+   cortos::Thread mid_thread(cortos::Thread::Entry(worker_mid), mid_stack, cortos::Thread::Priority(2));
+
+   cortos::Thread low_thread(cortos::Thread::Entry(worker_low), low_stack, cortos::Thread::Priority(3));
+
+   LOG_TEST("[TEST] starting scheduler");
    cortos::Scheduler::start();
 
-   cortos::sim::run_forever(2);
 
-   // Not reached
-   return 0;
+   cortos::sim::run_for(50);
+
+   EXPECT_EQ(order_high, 0) << "High-priority waiter should wake first";
+   EXPECT_EQ(order_mid,  1) << "Mid-priority waiter should wake second";
+   EXPECT_EQ(order_low,  2) << "Low-priority waiter should wake third";
 }
+

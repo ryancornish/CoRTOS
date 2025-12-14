@@ -47,8 +47,9 @@ endif()
 
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/condition_variable.cpp")
   add_executable(condition_variable condition_variable.cpp)
-  target_link_libraries(condition_variable PRIVATE cortos_simulation)
+  target_link_libraries(condition_variable PRIVATE cortos_simulation gtest gtest_main)
   target_include_directories(condition_variable PRIVATE ${CMAKE_SOURCE_DIR}/include)
+  add_test(NAME condition_variable COMMAND condition_variable)
 endif()
 
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/timers.cpp")

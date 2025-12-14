@@ -1424,22 +1424,27 @@ namespace cortos
    // --- End Section: Port hooks into the kernel ---
 
 #if CORTOS_SIMULATION
-namespace sim { void schedule_under_sim() { schedule(); } }
+   namespace sim
+   {
+      void schedule_under_sim()  { schedule(); }
+      bool system_is_quiescent() { return iss.ready_matrix.empty() && !iss.next_wake_tick.armed() && !iss.next_expiry_tick.armed(); }
+   }
+#endif
+#if DEBUG_PRINT_ENABLE
+   namespace debug
+   {
+      static void print_ready_matrix()
+      {
+         std::string s("|");
+         for (unsigned p = 0; p < Config::MAX_PRIORITIES; ++p) {
+            if (iss.ready_matrix.empty_at(p)) s.append(" 0|");
+            else s.append(std::format("{: >2}|", iss.ready_matrix.size_at(p)));
+         }
+                  LOG_SCHED("ready_matrix table:  HIGH                                       MEDIUM                                          LOW  \n"
+      "|---------------------     priority_level: | 0| 1| 2| 3| 4| 5| 6| 7| 8| 9|10|11|12|13|14|15|16|17|18|19|20|21|22|23|24|25|26|27|28|29|30|31|\n"
+      "|---------------------        ready_count: %s", s.c_str());
+      }
+   }
 #endif
 
 } // namespace cortos
-
-#if DEBUG_PRINT_ENABLE
-static void LOG_SCHED_READY_MATRIX()
-{
-   std::string s("|");
-   for (unsigned p = 0; p < cortos::Config::MAX_PRIORITIES; ++p) {
-      if (cortos::iss.ready_matrix.empty_at(p)) s.append(" 0|");
-      else s.append(std::format("{: >2}|", cortos::iss.ready_matrix.size_at(p)));
-   }
-             LOG_SCHED("ready_matrix table:  HIGH                                       MEDIUM                                          LOW  \n"
-"|---------------------     priority_level: | 0| 1| 2| 3| 4| 5| 6| 7| 8| 9|10|11|12|13|14|15|16|17|18|19|20|21|22|23|24|25|26|27|28|29|30|31|\n"
-"|---------------------        ready_count: %s", s.c_str());
-}
-#endif
-

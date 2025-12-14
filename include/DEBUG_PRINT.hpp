@@ -9,7 +9,7 @@
 
 extern "C" uint32_t port_tick_now(void);
 
-namespace debug
+namespace cortos::debug
 {
    enum class Channel
    {
@@ -71,19 +71,23 @@ namespace debug
          default: return "???";
       }
    }
+
+   // Forward declare the potentially-there matrix printer
+   [[maybe_unused]] static void print_ready_matrix();
+
 #endif
 
 }
 
 // Convenience macros
 #if DEBUG_PRINT_ENABLE
-#  define LOG_SCHED(fmt, ...)  ::debug::print(::debug::Channel::Scheduler, fmt, ##__VA_ARGS__)
-#  define LOG_PORT(fmt, ...)   ::debug::print(::debug::Channel::Port,      fmt, ##__VA_ARGS__)
-#  define LOG_THREAD(fmt, ...) ::debug::print(::debug::Channel::Thread,    fmt, ##__VA_ARGS__)
-#  define LOG_SYNC(fmt, ...)   ::debug::print(::debug::Channel::Sync,      fmt, ##__VA_ARGS__)
-#  define LOG_TEST(fmt, ...)   ::debug::print(::debug::Channel::Test,      fmt, ##__VA_ARGS__)
-#  define STATE_TO_STR(state)  ::debug::state_to_str(std::to_underlying(state))
-[[maybe_unused]] static void LOG_SCHED_READY_MATRIX();
+#  define LOG_SCHED(fmt, ...)       cortos::debug::print(cortos::debug::Channel::Scheduler, fmt, ##__VA_ARGS__)
+#  define LOG_PORT(fmt, ...)        cortos::debug::print(cortos::debug::Channel::Port,      fmt, ##__VA_ARGS__)
+#  define LOG_THREAD(fmt, ...)      cortos::debug::print(cortos::debug::Channel::Thread,    fmt, ##__VA_ARGS__)
+#  define LOG_SYNC(fmt, ...)        cortos::debug::print(cortos::debug::Channel::Sync,      fmt, ##__VA_ARGS__)
+#  define LOG_TEST(fmt, ...)        cortos::debug::print(cortos::debug::Channel::Test,      fmt, ##__VA_ARGS__)
+#  define LOG_SCHED_READY_MATRIX()  cortos::debug::print_ready_matrix();
+#  define STATE_TO_STR(state)       cortos::debug::state_to_str(std::to_underlying(state))
    inline void* ptr_suffix(void* ptr) { return (void*)((uintptr_t)ptr % 10000); }
 #  define TRUE_FALSE(what) what ? "TRUE" : "FALSE"
 #else
