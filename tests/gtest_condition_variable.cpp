@@ -143,16 +143,6 @@ static void controller()
 
    cortos::Scheduler::sleep_for(5);
 
-   bool pass = order_high == 0 && order_mid == 1 && order_low == 2;
-
-   if (pass) {
-      LOG_TEST("[CTRL] TEST PASS: condvar woke waiters in priority order.");
-   } else {
-      LOG_TEST("[CTRL] TEST FAIL!\n");
-      LOG_TEST("       Expected wake order: HIGH=0 MID=1 LOW=2");
-      LOG_TEST("         Actual wake order: HIGH=%d MID=%d LOW=%d", order_high, order_mid, order_low);
-   }
-
    LOG_TEST("[CTRL] ended");
 }
 
@@ -199,7 +189,8 @@ TEST_F(ConditionVarTestFixture, WaitersWakeInPriorityOrder)
    cortos::Scheduler::start();
 
 
-   cortos::sim::run_for(50);
+   //cortos::sim::run_for(50);
+   cortos::sim::run_until_quiescent();
 
    EXPECT_EQ(order_high, 0) << "High-priority waiter should wake first";
    EXPECT_EQ(order_mid,  1) << "Mid-priority waiter should wake second";

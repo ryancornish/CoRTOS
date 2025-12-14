@@ -45,12 +45,12 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/semaphore.cpp")
   target_include_directories(semaphore PRIVATE ${CMAKE_SOURCE_DIR}/include)
 endif()
 
-if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/condition_variable.cpp")
-  add_executable(condition_variable condition_variable.cpp)
-  target_link_libraries(condition_variable PRIVATE cortos_simulation gtest gtest_main)
-  target_include_directories(condition_variable PRIVATE ${CMAKE_SOURCE_DIR}/include)
-  add_test(NAME condition_variable COMMAND condition_variable)
-endif()
+
+add_executable(gtest_condition_variable gtest_condition_variable.cpp)
+target_link_libraries(gtest_condition_variable PRIVATE cortos_simulation gtest gtest_main)
+target_include_directories(gtest_condition_variable PRIVATE ${CMAKE_SOURCE_DIR}/include)
+add_test(NAME gtest_condition_variable COMMAND gtest_condition_variable)
+
 
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/timers.cpp")
   add_executable(timers timers.cpp)
