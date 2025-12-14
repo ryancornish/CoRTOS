@@ -52,11 +52,10 @@ target_include_directories(gtest_condition_variable PRIVATE ${CMAKE_SOURCE_DIR}/
 add_test(NAME gtest_condition_variable COMMAND gtest_condition_variable)
 
 
-if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/timers.cpp")
-  add_executable(timers timers.cpp)
-  target_link_libraries(timers PRIVATE cortos_kernel)
-  target_include_directories(timers PRIVATE ${CMAKE_SOURCE_DIR}/include)
-endif()
+add_executable(gtest_timers gtest_timers.cpp)
+target_link_libraries(gtest_timers PRIVATE cortos_simulation gtest gtest_main)
+target_include_directories(gtest_timers PRIVATE ${CMAKE_SOURCE_DIR}/include)
+add_test(NAME gtest_timers COMMAND gtest_timers)
 
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/test1.cpp")
   add_executable(test1 test1.cpp)

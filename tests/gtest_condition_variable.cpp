@@ -4,7 +4,6 @@
 
 #include <array>
 #include <atomic>
-#include <cstdint>
 #include <cstdio>
 #include <gtest/gtest.h>
 
