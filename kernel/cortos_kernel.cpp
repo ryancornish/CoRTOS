@@ -186,6 +186,7 @@ namespace cortos
       uint16_t sleep_index{UINT16_MAX}; // UINT16_MAX == not in the SleepMinHeap
       Tick wake_tick{0};
 
+      bool cancel_requested{false};
       // User-defined properties
       uint32_t id;
       uint8_t const base_priority;
@@ -620,15 +621,15 @@ namespace cortos
          cortos_request_reschedule();
       }
       LOG_THREAD("@ID(%u) Terminated", tcb->id);
-      port_yield(); // Switch away and never come back
-      __builtin_unreachable();
+      port_thread_exit(); // Switch away and never come back
+      if constexpr (!CORTOS_SIMULATION) __builtin_unreachable();
    }
 
    // --- Start Section: Kernel-owned threads ---
    alignas(CORTOS_STACK_ALIGN) static std::array<std::byte, 4096> timer_stack{}; // TODO: size stack
    static void timer_entry()
    {
-      while (true) {
+      while (!iss.current_task->cancel_requested) {
          while (true) {
             Timer::Callback job;
             {
@@ -651,7 +652,12 @@ namespace cortos
    }
 
    alignas(CORTOS_STACK_ALIGN) static std::array<std::byte, 4096> idle_stack{}; // TODO: size stack
-   static void idle_entry() { while(true) port_idle(); }
+   static void idle_entry()
+   {
+      while(!iss.current_task->cancel_requested) {
+         port_idle();
+      }
+   }
    // --- End Section: Kernel-owned threads ---
 
    // --- Start Section: Scheduler public methods ---
@@ -719,6 +725,19 @@ namespace cortos
       }
    }
 
+   void Scheduler::kill_timer_thread()
+   {
+      Scheduler::Lock guard;
+      iss.timer_tcb->cancel_requested = true;
+      iss.timer_job_queue.push([]{}); // Trigger the timer thread to run
+   }
+
+   void Scheduler::kill_idle_thread()
+   {
+      Scheduler::Lock guard;
+      iss.idle_tcb->cancel_requested = true;
+   }
+
    void Scheduler::yield()
    {
       LOG_SCHED("yield() by @ID(%u)", iss.current_task->id);
@@ -780,6 +799,7 @@ namespace cortos
    Thread::~Thread()
    {
       if (!tcb) return;
+      assert(tcb->state == TaskControlBlock::State::Terminated && "Destroying an active thread!");
       LOG_THREAD("Thread::~Thread() destroy @ID(%u)", tcb->id);
       port_context_destroy(tcb->context());
       tcb->~TaskControlBlock();

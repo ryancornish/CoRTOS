@@ -170,18 +170,17 @@ class ConditionVarTestFixture : public ::testing::Test
 protected:
    void SetUp() override
    {
-      // Reset globals between tests
       blocked_count.store(0, std::memory_order_relaxed);
       wake_seq.store(0, std::memory_order_relaxed);
       order_high = order_mid = order_low = -1;
 
-      // If you have a sim-reset helper, call it; otherwise just init the scheduler
       cortos::Scheduler::init(10);
    }
 
    void TearDown() override
    {
-      // nothing yet; if you add a sim shutdown, do it here
+      cortos::Scheduler::kill_idle_thread();
+      cortos::Scheduler::kill_timer_thread();
    }
 };
 

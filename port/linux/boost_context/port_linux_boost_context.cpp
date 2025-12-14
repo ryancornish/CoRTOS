@@ -82,30 +82,36 @@ void port_context_init(port_context_t* context,
    context->thread = boost::context::fiber(std::allocator_arg, boost_prealloc, stack_allocator,
       [context](boost::context::fiber&& sched_in) mutable -> boost::context::fiber
       {
-         // First entry, save the scheduler fiber handle
+         // Store scheduler continuation so port_yield() can jump back.
          context->sched = std::move(sched_in);
 
-         while (true) {
+         try {
             tls_current = context;
             context->entry(context->arg); // Enter user code
             tls_current = nullptr;
-
-            // Park back on scheduler until resumed again
-            context->sched = std::move(context->sched).resume();
-            // When resumed, we loop and re-enter user code
+         } catch (boost::context::detail::forced_unwind const& x) {
+            LOG_PORT("boost::context threw force_unwind");
+            tls_current = nullptr;
+            throw x;
          }
-      });
+         return std::move(context->sched);
+      }
+   );
+
 }
 
 void port_context_destroy(port_context_t* context)
 {
-   // If the thread fiber still exists, try to unwind cooperatively
+   LOG_PORT("port_context_destroy()");
+   // If this fires, you're destroying a thread that hasn't completed its fiber.
+   // That is a lifecycle bug in the test harness or kernel (missing join / run-to-quiescence).
    if (context->thread) {
-      // Ask the fiber to finish by giving it a chance to run a tiny trampoline
-      context->thread = std::move(context->thread).resume_with(
-         [](boost::context::fiber&& /*fb*/){ return boost::context::fiber{}; } // Return an empty fiber -> done
-      );
+      LOG_PORT("port_context_destroy(): attempted to destroy a live fiber (thread not completed)");
+      std::abort();
    }
+
+   // sched handle is owned by the fiber while running. After completion it should be empty too.
+   context->sched = boost::context::fiber{};
    context->~port_context();
 }
 
@@ -116,10 +122,17 @@ void* port_get_thread_pointer(void)     { return global_thread_pointer; }
 // Switch into 'to' (thread). Returns when the thread yields
 void port_switch(port_context_t* /*from*/, port_context_t* to)
 {
+   assert(to->thread && "No context to switch to?");
    tls_current = to;
    // Enter/resume the thread fiber. Returns when thread yields back
    to->thread = std::move(to->thread).resume();
    tls_current = nullptr;
+}
+
+void port_thread_exit(void)
+{
+   // Threads on the boost backend are cleaned up when they exit the outer boost lambda entry... so do nothing!
+   return;
 }
 
 // Start the very first thread
@@ -140,11 +153,11 @@ void port_yield()
       cortos_request_reschedule();
       return;
    }
-
    auto* current = tls_current;
    tls_current = nullptr;
    // Yield to the stored scheduler fiber. The returned fiber
    // is the updated scheduler handle for this thread
+   assert(current->sched && "No sched context to switch to?");
    current->sched = std::move(current->sched).resume();
 }
 

@@ -28,6 +28,7 @@ void port_start_first(port_context_t* first);
 
 void port_yield(void); // Thread asks to reschedule
 void port_switch(port_context_t* from, port_context_t* to);
+void port_thread_exit(void);
 
 // ISR/Preempt model
 void port_isr_enter(void);

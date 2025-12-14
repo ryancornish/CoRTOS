@@ -129,6 +129,8 @@ namespace cortos
    {
       static void init(uint32_t tick_hz);
       static void start();
+      static void kill_timer_thread();
+      static void kill_idle_thread();
       static void yield();
       static class Tick tick_now();
       static void sleep_for(uint32_t ticks);  // cooperative sleep (sim)
