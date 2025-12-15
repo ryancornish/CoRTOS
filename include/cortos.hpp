@@ -47,6 +47,36 @@ namespace cortos
    using Job       = JobModel<Config::JOB_INLINE_STORAGE_SIZE, Config::JOB_HEAP_POLICY>;
    using NoHeapJob = JobModel<16, Config::JobHeapPolicy::NoHeap>; // Kernel's thread entry and timers use this variant
 
+   template<typename T> struct LinkedListNode
+   {
+      T* next = nullptr;
+      T* prev = nullptr;
+      [[nodiscard]] bool is_linked() const noexcept { return next || prev; }
+   };
+
+   template<typename T> struct LinkedList
+   {
+      T* head = nullptr;
+      T* tail = nullptr;
+
+      void link(LinkedListNode<T>& node) noexcept
+      {
+         node.prev = tail;
+         node.next = nullptr;
+         if (tail) tail->next = &node; else head = &node;
+         tail = &node;
+      }
+
+      void unlink(LinkedListNode<T>& node) noexcept
+      {
+         if (!node.is_linked()) return;
+         if (node.prev) node.prev->next = node.next; else head = node.next;
+         if (node.next) node.next->prev = node.prev; else tail = node.prev;
+         node.next = node.prev = nullptr;
+      };
+   };
+
+   struct TaskControlBlock;
    // A Waitable is something you can block a thread on. E.g. Semaphore, Mutex
    class Waitable
    {
@@ -61,17 +91,23 @@ namespace cortos
       Waitable(Waitable const&) = delete;
       Waitable& operator=(Waitable const&) = delete;
 
-      void signal_one();
-      void signal_all();
+      [[nodiscard]] bool empty() const noexcept { return head == nullptr; }
+      void signal_one(bool acquired = true) noexcept;
+      void signal_all(bool acquired = true) noexcept;
+
+   protected:
+      virtual void on_add(TaskControlBlock* tcb) noexcept {}
+      virtual void on_remove(TaskControlBlock* tcb) noexcept {}
 
    private:
       friend struct Scheduler;
 
-      struct WaitNode* head = nullptr;
-      struct WaitNode* tail = nullptr;
+      LinkedList<struct WaitNode> wait_node_list;
 
-      void add_waiter(struct WaitNode& n);
-      void remove_waiter(struct WaitNode& n);
+      void add(WaitNode& n) noexcept;
+      void remove(WaitNode& n) noexcept;
+      WaitNode* pick_best_node() noexcept;
+      static void remove_all_armed_wait_nodes(TaskControlBlock* tcb) noexcept
    };
 
    class Tick

@@ -132,27 +132,14 @@ namespace cortos
       }
    };
 
-   struct WaitTarget
-   {
-      std::variant<std::monostate, MutexImpl*, SemaphoreImpl*, ConditionVarImpl*> sync_prim;
-      bool acquired{false};
-      template<typename T> WaitTarget& operator=(T t) noexcept { sync_prim = t; acquired = false; return *this; }
-      void clear() noexcept { sync_prim = std::monostate{}; acquired = false; }
-      constexpr operator bool() const noexcept { return !std::holds_alternative<std::monostate>(sync_prim); }
-      void remove(TaskControlBlock* tcb) noexcept;
-   };
-
-   template<typename T> struct LinkedListNode { T* next; T* prev; };
 
    // A WaitNode is the registration record that tracks 'this thread is waiting on this waitable'
    // A thread can wait on multiple waitables
-   struct WaitNode
+   struct WaitNode : LinkedListNode<WaitNode>
    {
       TaskControlBlock* tcb{nullptr};
       Waitable*         owner{nullptr};
-      LinkedListNode<WaitNode> node{.next=nullptr,.prev=nullptr};
-      uint16_t slot{}; // Index within tcb->wait.nodes[]
-      bool     linked{false};
+      uint16_t          slot{}; // Index within tcb->wait.nodes[]
    };
 
    struct WaitState
@@ -215,7 +202,7 @@ namespace cortos
 
       WaitState wait_state{};
       std::array<WaitNode, Config::MAX_WAIT_OBJECTS> wait_nodes{};
-      uint32_t wait_mask{0};
+      uint16_t wait_armed_count{0};  // how many slots are in use for the current wait
 
       // List of mutexes currently held by me (used for priority inheritance)
       MutexImpl* held_mutex_head{nullptr};
@@ -230,9 +217,9 @@ namespace cortos
       TaskControlBlock(uint32_t id, Thread::Priority priority, std::span<std::byte> stack, Thread::Entry&& entry) :
          id(id), base_priority(priority), stack(stack), entry(std::move(entry))
       {
-         for (int i = 0; auto& wn : wait_nodes) {
-            wn.tcb = this;
-            wn.slot = i++;
+         for (int i = 0; auto& wait_node : wait_nodes) {
+            wait_node.tcb = this;
+            wait_node.slot = i++;
          }
       }
    };
@@ -650,6 +637,89 @@ namespace cortos
       LOG_THREAD("@ID(%u) Terminated", tcb->id);
       port_thread_exit(); // Switch away and never come back
       if constexpr (!CORTOS_SIMULATION) __builtin_unreachable();
+   }
+
+
+   void Waitable::add(WaitNode& wait_node) noexcept
+   {
+      assert(!wait_node.is_linked());
+      assert(wait_node.owner == this);
+      wait_node_list.link(wait_node);
+      on_add(wait_node.tcb);
+   }
+
+   void Waitable::remove(WaitNode& wait_node) noexcept
+   {
+      if (!wait_node.is_linked()) return;
+      on_remove(wait_node.tcb);
+      wait_node_list.unlink(wait_node);
+   }
+
+   // O(N): pick highest priority waiter (lowest numeric value).
+   // Tie-break: FIFO by list order.
+   WaitNode* Waitable::pick_best_node() noexcept
+   {
+      auto* best = wait_node_list.head;
+      if (!best) return nullptr;
+      auto best_pri = best->tcb->priority;
+
+      for (auto* it = best->next; it; it = it->next) {
+         auto pri = it->tcb->priority;
+         if (pri < best_pri) {
+            best = it;
+            best_pri = pri;
+         }
+      }
+      return best;
+   }
+
+   void Waitable::signal_one(bool acquired) noexcept
+   {
+      auto* wait_node = pick_best_node();
+      if (!wait_node) return;
+
+      // unlink from this waitable first
+      remove(*wait_node);
+
+      TaskControlBlock* tcb = wait_node->tcb;
+
+      // If the thread is no longer blocked in a wait_for_any, ignore.
+      // (defensive; you can tighten invariants later)
+      if (tcb->state != TaskControlBlock::State::Blocked) return;
+
+      // If already triggered by another waitable, ignore.
+      if (tcb->wait_state.triggered) return;
+
+      tcb->wait_state.triggered = true;
+      tcb->wait_state.winner    = static_cast<int>(wait_node->slot);
+      tcb->wait_state.acquired  = acquired;
+
+      set_task_ready(tcb);
+      cortos_request_reschedule();
+   }
+
+   void Waitable::signal_all(bool acquired) noexcept
+   {
+      // Wake in priority order
+      while (!empty()) {
+         // Each call re-scans list should try optimise later
+         signal_one(acquired);
+      }
+   }
+
+   void Waitable::remove_all_armed_wait_nodes(TaskControlBlock* tcb) noexcept
+   {
+      for (uint16_t i = 0; i < tcb->wait_armed_count; ++i) {
+         auto& node = tcb->wait_nodes[i];
+         if (node.is_linked()) {
+            assert(node.owner);
+            node.owner->remove(node);
+         } else {
+            // Even if not linked, clear owner to be tidy
+            node.owner = nullptr;
+         }
+      }
+      tcb->wait_armed_count = 0;
    }
 
    // --- Start Section: Kernel-owned threads ---
