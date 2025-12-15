@@ -24,6 +24,7 @@ namespace cortos
       static constexpr uint32_t MAX_THREADS    = 64;
       static constexpr uint32_t MAX_TIMERS     = 64;
       static constexpr uint32_t TIME_SLICE     = 10; // In ticks
+      static constexpr uint32_t MAX_WAIT_OBJECTS = 8; // Per-thread wait slots
 
       enum class JobHeapPolicy
       {
@@ -45,6 +46,33 @@ namespace cortos
    // User configured Job model instantiated:
    using Job       = JobModel<Config::JOB_INLINE_STORAGE_SIZE, Config::JOB_HEAP_POLICY>;
    using NoHeapJob = JobModel<16, Config::JobHeapPolicy::NoHeap>; // Kernel's thread entry and timers use this variant
+
+   // A Waitable is something you can block a thread on. E.g. Semaphore, Mutex
+   class Waitable
+   {
+   public:
+      struct Result
+      {
+         Waitable* signaled  = nullptr;
+         bool      timed_out = false;
+      };
+
+      Waitable() = default;
+      Waitable(Waitable const&) = delete;
+      Waitable& operator=(Waitable const&) = delete;
+
+      void signal_one();
+      void signal_all();
+
+   private:
+      friend struct Scheduler;
+
+      struct WaitNode* head = nullptr;
+      struct WaitNode* tail = nullptr;
+
+      void add_waiter(struct WaitNode& n);
+      void remove_waiter(struct WaitNode& n);
+   };
 
    class Tick
    {
@@ -131,6 +159,7 @@ namespace cortos
       static void start();
       static void kill_timer_thread();
       static void kill_idle_thread();
+      static Waitable::Result wait_for_any(std::span<Waitable*> ws);
       static void yield();
       static class Tick tick_now();
       static void sleep_for(uint32_t ticks);  // cooperative sleep (sim)
@@ -253,14 +282,13 @@ namespace cortos
       ImplStorage self;
    };
 
-   class Semaphore
+   class Semaphore : public Waitable
    {
    public:
-      using ImplStorage = OpaqueImpl<struct SemaphoreImpl, 16, 8>;
       explicit constexpr Semaphore(unsigned initial_count) noexcept : counter(initial_count) {};
       ~Semaphore() = default;
-      constexpr Semaphore(Semaphore&&)            = default;
-      constexpr Semaphore& operator=(Semaphore&&) = default;
+      //constexpr Semaphore(Semaphore&&)            = default;
+      //constexpr Semaphore& operator=(Semaphore&&) = default;
       Semaphore(Semaphore const&)            = delete;
       Semaphore& operator=(Semaphore const&) = delete;
 

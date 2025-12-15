@@ -144,6 +144,25 @@ namespace cortos
 
    template<typename T> struct LinkedListNode { T* next; T* prev; };
 
+   // A WaitNode is the registration record that tracks 'this thread is waiting on this waitable'
+   // A thread can wait on multiple waitables
+   struct WaitNode
+   {
+      TaskControlBlock* tcb{nullptr};
+      Waitable*         owner{nullptr};
+      LinkedListNode<WaitNode> node{.next=nullptr,.prev=nullptr};
+      uint16_t slot{}; // Index within tcb->wait.nodes[]
+      bool     linked{false};
+   };
+
+   struct WaitState
+   {
+      // Result latched by whichever event wins
+      std::atomic_bool triggered{false};
+      int              winner{-1};      // Slot index that triggered
+      bool             acquired{false}; // E.g. token granted, mutex ownership granted
+   };
+
    // Intrusive doubly-linked-list of Task Control Blocks.
    // Used for:
    // - Task Round-Robin ready queues within the ReadyMatrix.
@@ -194,8 +213,10 @@ namespace cortos
       std::span<std::byte> stack;
       Thread::Entry entry;
 
-      // What (if any) sync primitive object I am waiting on
-      WaitTarget wait_target;
+      WaitState wait_state{};
+      std::array<WaitNode, Config::MAX_WAIT_OBJECTS> wait_nodes{};
+      uint32_t wait_mask{0};
+
       // List of mutexes currently held by me (used for priority inheritance)
       MutexImpl* held_mutex_head{nullptr};
       // List of threads wanting to join with me
@@ -207,7 +228,13 @@ namespace cortos
       constexpr port_context_t const* context() const noexcept { return context_storage.get(); }
 
       TaskControlBlock(uint32_t id, Thread::Priority priority, std::span<std::byte> stack, Thread::Entry&& entry) :
-         id(id), base_priority(priority), stack(stack), entry(std::move(entry)) {}
+         id(id), base_priority(priority), stack(stack), entry(std::move(entry))
+      {
+         for (int i = 0; auto& wn : wait_nodes) {
+            wn.tcb = this;
+            wn.slot = i++;
+         }
+      }
    };
 
    // --- Start Section: TaskQueue implementation ---
