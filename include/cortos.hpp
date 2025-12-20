@@ -54,26 +54,27 @@ namespace cortos
       [[nodiscard]] bool is_linked() const noexcept { return next || prev; }
    };
 
-   template<typename T> struct LinkedList
+   template<typename T>
+   struct LinkedList
    {
       T* head = nullptr;
       T* tail = nullptr;
 
-      void link(LinkedListNode<T>& node) noexcept
+      void link(T& node) noexcept
       {
+         assert(node.next == nullptr && node.prev == nullptr);
          node.prev = tail;
          node.next = nullptr;
          if (tail) tail->next = &node; else head = &node;
          tail = &node;
       }
 
-      void unlink(LinkedListNode<T>& node) noexcept
+      void unlink(T& node) noexcept
       {
-         if (!node.is_linked()) return;
          if (node.prev) node.prev->next = node.next; else head = node.next;
          if (node.next) node.next->prev = node.prev; else tail = node.prev;
          node.next = node.prev = nullptr;
-      };
+      }
    };
 
    struct TaskControlBlock;
@@ -83,31 +84,45 @@ namespace cortos
    public:
       struct Result
       {
-         Waitable* signaled  = nullptr;
-         bool      timed_out = false;
+         int index = 0;
+         bool acquired = false;
       };
 
       Waitable() = default;
       Waitable(Waitable const&) = delete;
       Waitable& operator=(Waitable const&) = delete;
+      Waitable(Waitable&&) = default;
+      Waitable& operator=(Waitable&&) = default;
 
-      [[nodiscard]] bool empty() const noexcept { return head == nullptr; }
+      [[nodiscard]] bool empty() const noexcept;
       void signal_one(bool acquired = true) noexcept;
       void signal_all(bool acquired = true) noexcept;
 
    protected:
-      virtual void on_add(TaskControlBlock* tcb) noexcept {}
-      virtual void on_remove(TaskControlBlock* tcb) noexcept {}
+      // A WaitNode is the registration record that tracks 'this thread is waiting on this waitable'
+      struct WaitNode
+      {
+         LinkedListNode<WaitNode> w_node{.next = nullptr, .prev = nullptr};
+         TaskControlBlock* tcb{nullptr};
+         Waitable*         owner{nullptr};
+         uint16_t          slot{}; // Index within tcb->wait.nodes[]
+      };
+
+      virtual void on_add(TaskControlBlock*) noexcept {}
+      virtual void on_remove(TaskControlBlock*) noexcept {}
+      struct WaitNode* pick_best_node() noexcept;
+      template<typename Fn>
+      void for_each_waiter(Fn&& fn) noexcept { for (auto* n = wait_node_list.head; n; n = n->next) fn(n->tcb); }
 
    private:
       friend struct Scheduler;
+      friend struct TaskControlBlock;
 
-      LinkedList<struct WaitNode> wait_node_list;
+      LinkedList<WaitNode> wait_node_list;
 
       void add(WaitNode& n) noexcept;
       void remove(WaitNode& n) noexcept;
-      WaitNode* pick_best_node() noexcept;
-      static void remove_all_armed_wait_nodes(TaskControlBlock* tcb) noexcept
+      static void remove_all_armed_wait_nodes(TaskControlBlock* tcb) noexcept;
    };
 
    class Tick
@@ -195,7 +210,8 @@ namespace cortos
       static void start();
       static void kill_timer_thread();
       static void kill_idle_thread();
-      static Waitable::Result wait_for_any(std::span<Waitable*> ws);
+      static Waitable::Result wait_for_any(std::span<Waitable* const> ws) noexcept;
+      static Waitable::Result wait_for(Waitable* ws) noexcept { return wait_for_any(std::initializer_list<Waitable*>{ws}); }
       static void yield();
       static class Tick tick_now();
       static void sleep_for(uint32_t ticks);  // cooperative sleep (sim)
@@ -288,56 +304,51 @@ namespace cortos
       ImplStorage self;
    };
 
-   class Mutex
+   class Mutex : Waitable
    {
    public:
-      using ImplStorage = OpaqueImpl<struct MutexImpl, 40, 8>;
-      constexpr Mutex() = default;
-      ~Mutex()          = default;
+      constexpr Mutex()                   = default;
+      ~Mutex()                            = default;
       constexpr Mutex(Mutex&&)            = default;
       constexpr Mutex& operator=(Mutex&&) = default;
-      Mutex(Mutex const&)            = delete;
-      Mutex& operator=(Mutex const&) = delete;
+      Mutex(Mutex const&)                 = delete;
+      Mutex& operator=(Mutex const&)      = delete;
 
-      [[nodiscard]] bool is_locked() const noexcept;
-      void lock();
-      [[nodiscard]] bool try_lock();
-      [[nodiscard]] bool try_lock_for(Tick::Delta timeout);
-      [[nodiscard]] bool try_lock_until(Tick deadline);
-      void unlock();
-
-      struct Lock
-      {
-         Mutex& m;
-         explicit Lock(Mutex& mutex) : m(mutex)  { m.lock(); }
-         ~Lock() { m.unlock(); }
-      };
+      void lock() noexcept;
+      void unlock() noexcept;
 
    private:
-      friend class ConditionVar;
-      ImplStorage self;
+      TaskControlBlock* owner{nullptr};
+      Mutex* held_next{nullptr};
+
+      bool try_lock_under_guard() noexcept;
+      void unlock_under_guard() noexcept;
+      void on_add(TaskControlBlock* tcb) noexcept override;
+      void on_remove(TaskControlBlock* /*tcb*/) noexcept override;
+
    };
 
-   class Semaphore : public Waitable
+
+   class Semaphore : Waitable
    {
    public:
       explicit constexpr Semaphore(unsigned initial_count) noexcept : counter(initial_count) {};
       ~Semaphore() = default;
-      //constexpr Semaphore(Semaphore&&)            = default;
-      //constexpr Semaphore& operator=(Semaphore&&) = default;
+      constexpr Semaphore(Semaphore&&)            = default;
+      constexpr Semaphore& operator=(Semaphore&&) = default;
       Semaphore(Semaphore const&)            = delete;
       Semaphore& operator=(Semaphore const&) = delete;
 
       [[nodiscard]] unsigned peek_count() const noexcept { return counter; };
       void acquire() noexcept;
       [[nodiscard]] bool try_acquire() noexcept;
-      [[nodiscard]] bool try_acquire_for(Tick::Delta timeout) noexcept;
-      [[nodiscard]] bool try_acquire_until(Tick deadline) noexcept;
+      //[[nodiscard]] bool try_acquire_for(Tick::Delta timeout) noexcept;
+      //[[nodiscard]] bool try_acquire_until(Tick deadline) noexcept;
       void release(unsigned n = 1) noexcept;
 
    private:
       unsigned counter;
-      ImplStorage self;
+      bool try_acquire_under_guard() noexcept;
    };
 
    class ConditionVar

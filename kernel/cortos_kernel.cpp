@@ -135,19 +135,13 @@ namespace cortos
 
    // A WaitNode is the registration record that tracks 'this thread is waiting on this waitable'
    // A thread can wait on multiple waitables
-   struct WaitNode : LinkedListNode<WaitNode>
-   {
-      TaskControlBlock* tcb{nullptr};
-      Waitable*         owner{nullptr};
-      uint16_t          slot{}; // Index within tcb->wait.nodes[]
-   };
 
    struct WaitState
    {
       // Result latched by whichever event wins
-      std::atomic_bool triggered{false};
-      int              winner{-1};      // Slot index that triggered
-      bool             acquired{false}; // E.g. token granted, mutex ownership granted
+      bool triggered{false};
+      int  winner{-1};      // Slot index that triggered
+      bool acquired{false}; // E.g. token granted, mutex ownership granted
    };
 
    // Intrusive doubly-linked-list of Task Control Blocks.
@@ -201,7 +195,7 @@ namespace cortos
       Thread::Entry entry;
 
       WaitState wait_state{};
-      std::array<WaitNode, Config::MAX_WAIT_OBJECTS> wait_nodes{};
+      std::array<Waitable::WaitNode, Config::MAX_WAIT_OBJECTS> wait_nodes{};
       uint16_t wait_armed_count{0};  // how many slots are in use for the current wait
 
       // List of mutexes currently held by me (used for priority inheritance)
@@ -639,6 +633,7 @@ namespace cortos
       if constexpr (!CORTOS_SIMULATION) __builtin_unreachable();
    }
 
+   bool Waitable::empty() const noexcept { return wait_node_list.head == nullptr; }
 
    void Waitable::add(WaitNode& wait_node) noexcept
    {
@@ -657,7 +652,7 @@ namespace cortos
 
    // O(N): pick highest priority waiter (lowest numeric value).
    // Tie-break: FIFO by list order.
-   WaitNode* Waitable::pick_best_node() noexcept
+   Waitable::WaitNode* Waitable::pick_best_node() noexcept
    {
       auto* best = wait_node_list.head;
       if (!best) return nullptr;
@@ -835,6 +830,53 @@ namespace cortos
       iss.idle_tcb->cancel_requested = true;
    }
 
+   Waitable::Result Scheduler::wait_for_any(std::span<Waitable* const> waitables) noexcept
+   {
+      assert(iss.current_task);
+      auto* tcb = iss.current_task;
+
+      assert(waitables.size() <= Config::MAX_WAIT_OBJECTS);
+      assert(tcb->state == TaskControlBlock::State::Running);
+
+      {
+         Scheduler::Lock guard;
+
+         tcb->wait_state.triggered = false;
+         tcb->wait_state.winner    = -1;
+         tcb->wait_state.acquired  = false;
+         tcb->wait_armed_count = static_cast<uint16_t>(waitables.size());
+
+         // Link nodes (slots correspond 1:1 with span indices)
+         for (uint16_t i = 0; i < waitables.size(); ++i) {
+            Waitable* w = waitables[i];
+            assert(w);
+
+            auto& node = tcb->wait_nodes[i];
+            assert(!node.is_linked());
+
+            node.owner = w;
+            w->add(node);
+         }
+         tcb->state = TaskControlBlock::State::Blocked;
+         cortos_request_reschedule();
+      }
+      port_yield();
+
+      // Resumed: winner should have been latched.
+      {
+         Scheduler::Lock guard;
+
+         assert(tcb->wait_state.triggered);
+         int  winner = tcb->wait_state.winner;
+         bool acq    = tcb->wait_state.acquired;
+
+         Waitable::remove_all_armed_wait_nodes(tcb);
+
+         return { winner, acq };
+      }
+   }
+
+
    void Scheduler::yield()
    {
       LOG_SCHED("yield() by @ID(%u)", iss.current_task->id);
@@ -941,71 +983,13 @@ namespace cortos
    // --- End Section: Thread public methods ---
 
    // --- Start Section: Mutex implementation ---
-   struct MutexImpl
-   {
-      // Implicitly initialized to nullptr when opaque is constinit'ed
-      TaskControlBlock* owner;
-      TaskQueue wait_queue;
-
-      // List of mutexes held by owner
-      LinkedListNode<MutexImpl> ml_node;
-
-      constexpr MutexImpl() = default;
-
-      // Assumes preemption is already disabled
-      void link_to_owner(TaskControlBlock* new_owner) noexcept
-      {
-         if (owner == new_owner) return;
-
-         // Unlink from previous owner, if any
-         if (owner) {
-            if (ml_node.prev) {
-               ml_node.prev->ml_node.next = ml_node.next;
-            } else {
-               owner->held_mutex_head = ml_node.next;
-            }
-            if (ml_node.next) ml_node.next->ml_node.prev = ml_node.prev;
-         }
-
-         owner = new_owner;
-         ml_node.next = ml_node.prev = nullptr;
-
-         // Link into new owner's list
-         if (owner) {
-            ml_node.next = owner->held_mutex_head;
-            if (ml_node.next) ml_node.next->ml_node.prev = this;
-            owner->held_mutex_head = this;
-         }
-      }
-
-      // Assumes preemption is already disabled
-      bool try_lock_under_guard()
-      {
-         auto* current = iss.current_task;
-         assert(current && "Mutex::try_lock_under_guard() with no current task");
-         assert(current != owner && "Recursive mutex lock attempt");
-
-         if (owner != nullptr) {
-            LOG_SYNC("Mutex::try_lock_under_guard() @ID(%u) failed to acquire @MUTEX(%p) - owned by @ID(%u)", current->id, ptr_suffix(this), owner->id);
-            return false;
-         }
-         link_to_owner(current);
-         LOG_SYNC("Mutex::try_lock_under_guard() @ID(%u) ACQUIRED @MUTEX(%p)", current->id, ptr_suffix(this));
-         return true;
-      }
-   };
-   static_assert(std::is_trivially_constructible_v<MutexImpl>, "Reinterpreting opaque block is now UB");
-   static_assert(std::is_standard_layout_v<MutexImpl>,         "Reinterpreting opaque block is now UB");
-   static_assert(sizeof(MutexImpl) == sizeof(Mutex::ImplStorage),   "Adjust forward size declaration in header to match");
-   static_assert(alignof(MutexImpl) == alignof(Mutex::ImplStorage), "Adjust forward align declaration in header to match");
-
    static void recompute_effective_priority(TaskControlBlock* tcb)
    {
       auto new_priority = tcb->base_priority;
       LOG_SCHED("recompute_effective_priority() @ID(%u) base=%u", tcb->id, new_priority);
 
       // For each mutex this thread currently owns...
-      for (MutexImpl* mutex = tcb->held_mutex_head; mutex; mutex = mutex->ml_node.next) {
+      for (Mutex* mutex = tcb->held_mutex_head; mutex; mutex = mutex->ml_node.next) {
          LOG_SCHED("  scanning held @MUTEX(%p) for waiters", ptr_suffix(mutex));
          // ...scan waiters and inherit the highest priority
          for (TaskControlBlock* waiter = mutex->wait_queue.front(); waiter; waiter = waiter->tq_node.next) {
@@ -1017,7 +1001,7 @@ namespace cortos
       set_effective_priority(tcb, new_priority);
    }
 
-   static void propagate_priority_to_owner(MutexImpl* mutex, TaskControlBlock* blocking_tcb)
+   static void propagate_priority_to_owner(Mutex* mutex, TaskControlBlock* blocking_tcb)
    {
       auto* owner = mutex->owner;
       if (!owner) {
@@ -1033,7 +1017,7 @@ namespace cortos
       set_effective_priority(owner, blocking_tcb->priority);
 
       // If owner itself is blocked on another mutex, propagate further
-      if (auto** mutex_ptr = std::get_if<MutexImpl*>(&owner->wait_target.sync_prim)) {
+      if (auto** mutex_ptr = std::get_if<Mutex*>(&owner->wait_target.sync_prim)) {
          if (*mutex_ptr && (*mutex_ptr)->owner && (*mutex_ptr)->owner != owner) {
             LOG_SYNC("  owner @ID(%u) is blocked on @MUTEX(%p): propagating further", owner->id, ptr_suffix(*mutex_ptr));
             propagate_priority_to_owner(*mutex_ptr, blocking_tcb);
@@ -1041,201 +1025,132 @@ namespace cortos
       }
    }
 
-   [[nodiscard]] bool Mutex::is_locked() const noexcept { return self->owner != nullptr; }
-
-   void Mutex::lock()
+   void Mutex::lock() noexcept
    {
       {
          Scheduler::Lock guard;
-         if (self->try_lock_under_guard()) return;
+         if (try_lock_under_guard()) return;
          LOG_SYNC("Mutex::lock() @ID(%u) BLOCKED on @MUTEX(%p)", iss.current_task->id, ptr_suffix(this));
-
-         iss.current_task->wait_target = self.get();
-         iss.current_task->state = TaskControlBlock::State::Blocked;
-         self->wait_queue.push_back(iss.current_task);
-
-         // Priority inheritance: boost owner and possibly chain
-         propagate_priority_to_owner(self.get(), iss.current_task);
-         cortos_request_reschedule();
       }
-      port_yield(); // Actually block
+
+      // Block on mutex waitable. When signaled, you own it.
+      while (true) {
+         (void)Scheduler::wait_for(this);
+
+         Scheduler::Lock guard;
+         // The unlocker should have transferred ownership to us.
+         if (owner == iss.current_task) return;
+
+         // Defensive: if not, keep waiting.
+      }
    }
 
-   bool Mutex::try_lock()
+   void Mutex::unlock() noexcept
    {
       Scheduler::Lock guard;
-      return self->try_lock_under_guard();
+      unlock_under_guard();
+      cortos_request_reschedule();
    }
 
-   bool Mutex::try_lock_for(Tick::Delta timeout)
+   bool Mutex::try_lock_under_guard() noexcept
    {
-      return try_lock_until(Scheduler::tick_now() + timeout);
-   }
+      auto* cur = iss.current_task;
+      assert(cur);
 
-   bool Mutex::try_lock_until(Tick deadline)
-   {
-      Tick::Delta remaining;
-      {
-         Scheduler::Lock guard;
-
-         if (self->try_lock_under_guard()) return true;
-         LOG_SYNC("Mutex::lock() @ID(%u) BLOCKED on @MUTEX(%p)", iss.current_task->id, ptr_suffix(this));
-
-         auto const now = Scheduler::tick_now();
-         if (now.has_reached(deadline)) return false;
-
-         iss.current_task->wait_target = self.get();
-         iss.current_task->state = TaskControlBlock::State::Blocked; // Will soon be overridden as sleeping
-         self->wait_queue.push_back(iss.current_task);
-         propagate_priority_to_owner(self.get(), iss.current_task);
-         remaining = deadline - now;
+      if (owner == nullptr) {
+         owner = cur;
+         return true;
       }
-      Scheduler::sleep_for(remaining);
-      {
-         Scheduler::Lock guard;
-         bool acquired = iss.current_task->wait_target.acquired;
-         iss.current_task->wait_target.clear();
-         assert(!acquired || self->owner == iss.current_task); // If the wait target has been acquired, then we MUST be the owner!
-         return acquired;
-      }
+      assert(owner != cur && "recursive lock not supported");
+      return false;
    }
 
-   void Mutex::unlock()
+   void Mutex::unlock_under_guard() noexcept
    {
-      Scheduler::Lock guard;
+      auto* cur = iss.current_task;
+      assert(cur && owner == cur);
 
-      assert(iss.current_task && "Mutex::unlock() with no current task");
-      assert(self->owner == iss.current_task && "Mutex::unlock() by non-owner");
-
-      LOG_SYNC("Mutex::unlock() by @ID(%u)", iss.current_task->id);
-
-      if (self->wait_queue.empty()) {
-         self->link_to_owner(nullptr);
-         recompute_effective_priority(iss.current_task);
+      if (empty()) {
+         owner = nullptr;
+         recompute_effective_priority(cur);
          return;
       }
 
-      TaskControlBlock* next_owner = self->wait_queue.pop_highest_priority();
-      assert(next_owner);
-      iss.sleepers.remove(next_owner); // noop if it wasn't in the heap
-      next_owner->wait_target.acquired = true;
+      // Select best waiter
+      WaitNode* best = pick_best_node();
+      assert(best);
 
-      LOG_SYNC("Mutex::unlock() waking waiter @ID(%u) on @MUTEX(%p)", next_owner->id, ptr_suffix(this));
+      owner = best->tcb;
+      signal_one(/*acquired=*/true);
+      recompute_effective_priority(cur);
+   }
 
-      self->link_to_owner(next_owner);
+   void Mutex::on_add(TaskControlBlock* tcb) noexcept
+   {
+      propagate_priority_to_owner(this, tcb);
+   }
 
-      next_owner->state = TaskControlBlock::State::Ready;
-      auto* old_owner = iss.current_task;
-      set_task_ready(next_owner);
-
-      // Old owner may have no more (or lower-prio) waiters across its remaining mutexes
-      recompute_effective_priority(old_owner);
+   void Mutex::on_remove(TaskControlBlock* /*tcb*/) noexcept
+   {
+      recompute_effective_priority(owner);
    }
    // --- End Section: Mutex implementation ---
 
    // --- Start Section: Semaphore implementation ---
-   struct SemaphoreImpl
+   bool Semaphore::try_acquire_under_guard() noexcept
    {
-      TaskQueue wait_queue;
-      // Assumes preemption is already disabled
-      bool try_acquire_under_guard(unsigned& counter)
-      {
-         assert(iss.current_task && "Semaphore::try_acquire_under_guard() with no current task");
-         if (counter == 0) {
-            LOG_SYNC("Semaphore::try_acquire_under_guard() @ID(%u) failed to acquire. @COUNT(%u)", iss.current_task->id, counter);
-            return false;
-         }
-         --counter;
-         LOG_SYNC("try_acquire_under_guard() @ID(%u) ACQUIRED. @COUNT(%u)", iss.current_task->id, counter);
-         return true;
+      assert(iss.current_task && "Semaphore::try_acquire_under_guard() with no current task");
+      if (counter == 0) {
+         LOG_SYNC("Semaphore::try_acquire_under_guard() @ID(%u) failed to acquire. @COUNT(%u)", iss.current_task->id, counter);
+         return false;
       }
-   };
-   static_assert(std::is_trivially_constructible_v<SemaphoreImpl>, "Reinterpreting opaque block is now UB");
-   static_assert(std::is_standard_layout_v<SemaphoreImpl>,         "Reinterpreting opaque block is now UB");
-   static_assert(sizeof(SemaphoreImpl) == sizeof(Semaphore::ImplStorage),   "Adjust forward size declaration in header to match");
-   static_assert(alignof(SemaphoreImpl) == alignof(Semaphore::ImplStorage), "Adjust forward align declaration in header to match");
+      --counter;
+      LOG_SYNC("try_acquire_under_guard() @ID(%u) ACQUIRED. @COUNT(%u)", iss.current_task->id, counter);
+      return true;
+   }
 
    void Semaphore::acquire() noexcept
    {
       {
          Scheduler::Lock guard;
-
-         if (self->try_acquire_under_guard(counter)) return;
-         LOG_SYNC("Semaphore::acquire() @ID(%u) BLOCKED on @SEM(%p)", iss.current_task->id, ptr_suffix(this));
-
-         iss.current_task->wait_target = self.get();
-         iss.current_task->state = TaskControlBlock::State::Blocked;
-         self->wait_queue.push_back(iss.current_task);
-
-         cortos_request_reschedule();
+         if (try_acquire_under_guard()) return;
       }
-      // Actually block
-      port_yield();
+      LOG_SYNC("Semaphore::acquire() @ID(%u) BLOCKED on @SEM(%p)", iss.current_task->id, ptr_suffix(this));
 
-      LOG_SYNC("Semaphore::acquire() resumed @ID(%u) with token. @COUNTER(%u)", iss.current_task->id, counter);
+      // Wait for producer to signal.
+      // When signaled, we should consume a token.
+      while (true) {
+         auto res = Scheduler::wait_for(this);
+
+         assert(res.index == 0);
+         (void)res;
+
+         Scheduler::Lock guard;
+         // Producer may have posted multiple times
+         if (try_acquire_under_guard()) return;
+
+         // Otherwise spurious wake - loop and wait again.
+      }
    }
 
-   [[nodiscard]] bool Semaphore::try_acquire() noexcept
+   bool Semaphore::try_acquire() noexcept
    {
       Scheduler::Lock guard;
-      return (self->try_acquire_under_guard(counter));
-   }
-
-   [[nodiscard]] bool Semaphore::try_acquire_for(Tick::Delta timeout) noexcept
-   {
-      return try_acquire_until(Scheduler::tick_now() + timeout);
-   }
-
-   [[nodiscard]] bool Semaphore::try_acquire_until(Tick deadline) noexcept
-   {
-      Tick::Delta remaining;
-      {
-         Scheduler::Lock guard;
-
-         if (self->try_acquire_under_guard(counter)) return true;
-
-         auto const now = Scheduler::tick_now();
-         if (now.has_reached(deadline)) return false;
-         LOG_SYNC("Semaphore::try_acquire_until() @ID(%u) BLOCKED on @SEM(%p) until @ALARM(%u)", iss.current_task->id, ptr_suffix(this), deadline.value());
-
-         iss.current_task->wait_target = self.get();
-         iss.current_task->state = TaskControlBlock::State::Blocked; // Will soon be overridden as sleeping
-         self->wait_queue.push_back(iss.current_task);
-         remaining = deadline - now;
-      }
-      Scheduler::sleep_for(remaining);
-      {
-         Scheduler::Lock guard;
-         bool acquired = iss.current_task->wait_target.acquired;
-         iss.current_task->wait_target.clear();
-         return acquired;
-      }
+      return try_acquire_under_guard();
    }
 
    void Semaphore::release(unsigned n) noexcept
    {
-      if (n == 0U) return;
-
+      if (n == 0) return;
       Scheduler::Lock guard;
-
       LOG_SYNC("Semaphore::release(%u) on @SEM(%p)", n, ptr_suffix(this));
 
-      while (n-- > 0U) {
-         // If there is a waiter, wake it and give it the token.
-         auto* waiter = self->wait_queue.pop_highest_priority();
-         if (waiter) {
-            iss.sleepers.remove(waiter); // noop if it wasn't in the heap
-            waiter->wait_target.acquired = true;
+      counter += n;
 
-            LOG_SYNC("Semaphore::release() waking waiter @ID(%u) on @SEM(%p)", waiter->id, ptr_suffix(this));
-
-            waiter->state = TaskControlBlock::State::Ready;
-            set_task_ready(waiter);
-         } else {
-            // No waiters, increment the count.
-            ++counter;
-            LOG_SYNC("Semaphore::release() incremented @COUNTER(%u -> %u)", counter - 1, counter);
-         }
+      // Wake up to n waiters (or fewer if none)
+      while (n-- > 0 && !empty()) {
+         LOG_SYNC("Semaphore::release() waking waiter on @SEM(%p)", ptr_suffix(this));
+         signal_one(/*acquired=*/true);
       }
       cortos_request_reschedule();
    }
@@ -1386,21 +1301,6 @@ namespace cortos
       cortos_request_reschedule();
    }
    // --- Start Section: ConditionVar implementation ---
-
-   void WaitTarget::remove(TaskControlBlock* tcb) noexcept
-   {
-      std::visit([tcb](auto& sync_prim) {
-         using SyncPrim = std::remove_reference_t<decltype(sync_prim)>;
-         if constexpr (std::is_same_v<SyncPrim, MutexImpl*>) {
-            sync_prim->wait_queue.remove(tcb);
-            if (sync_prim->owner) recompute_effective_priority(sync_prim->owner);
-         } else if constexpr (std::is_same_v<SyncPrim, SemaphoreImpl*> ||
-                              std::is_same_v<SyncPrim, ConditionVarImpl*>) {
-            sync_prim->wait_queue.remove(tcb);
-         }
-      }, sync_prim);
-      clear();
-   }
 
    // -- Start Section: Timer implementation ---
    Timer::Timer()
