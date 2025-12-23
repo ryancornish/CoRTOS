@@ -8,6 +8,7 @@
 #ifndef CORTOS_HPP
 #define CORTOS_HPP
 
+#include <cassert>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
@@ -47,34 +48,59 @@ namespace cortos
    using Job       = JobModel<Config::JOB_INLINE_STORAGE_SIZE, Config::JOB_HEAP_POLICY>;
    using NoHeapJob = JobModel<16, Config::JobHeapPolicy::NoHeap>; // Kernel's thread entry and timers use this variant
 
-   template<typename T> struct LinkedListNode
+   template<typename T> concept IsLinkedListNode = requires(T t) { t.next; t.prev; };
+   template<IsLinkedListNode T> struct LinkedList
    {
-      T* next = nullptr;
-      T* prev = nullptr;
-      [[nodiscard]] bool is_linked() const noexcept { return next || prev; }
-   };
+      struct Iterator
+      {
+         // Requirements for std::forward_iterator
+         using iterator_concept = std::forward_iterator_tag;
+         using difference_type   = std::ptrdiff_t;
+         using value_type        = T;
+         T* current = nullptr;
+         Iterator() = default;
+         explicit constexpr Iterator(T* node) : current(node) {}
+         T& operator*() const { return current->value; }
+         Iterator& operator++()   { current = current->next; return *this; }
+         Iterator operator++(int) { Iterator tmp = *this; ++(*this); return tmp; }
+         bool operator==(const Iterator& rhs) const { return current == rhs.current; }
+      };
 
-   template<typename T>
-   struct LinkedList
-   {
       T* head = nullptr;
       T* tail = nullptr;
 
-      void link(T& node) noexcept
+      void link(T& obj) noexcept
       {
-         assert(node.next == nullptr && node.prev == nullptr);
-         node.prev = tail;
-         node.next = nullptr;
-         if (tail) tail->next = &node; else head = &node;
-         tail = &node;
+         assert(obj.next == nullptr && obj.prev == nullptr);
+
+         obj.prev = tail;
+         obj.next = nullptr;
+
+         if (tail) {
+            tail->next = &obj;
+         } else {
+            head = &obj;
+         }
+         tail = &obj;
       }
 
-      void unlink(T& node) noexcept
+      void unlink(T& obj) noexcept
       {
-         if (node.prev) node.prev->next = node.next; else head = node.next;
-         if (node.next) node.next->prev = node.prev; else tail = node.prev;
-         node.next = node.prev = nullptr;
+         if (obj.prev) {
+            obj.prev->next = obj.next;
+         } else {
+            head = obj.next;
+         }
+         if (obj.next) {
+            obj.next->prev = obj.prev;
+         } else {
+            tail = obj.prev;
+         }
+         obj.next = obj.prev = nullptr;
       }
+
+      auto begin() { return Iterator{head}; }
+      auto end()   { return Iterator{nullptr}; }
    };
 
    struct TaskControlBlock;
@@ -89,6 +115,7 @@ namespace cortos
       };
 
       Waitable() = default;
+      ~Waitable() = default;
       Waitable(Waitable const&) = delete;
       Waitable& operator=(Waitable const&) = delete;
       Waitable(Waitable&&) = default;
@@ -102,17 +129,24 @@ namespace cortos
       // A WaitNode is the registration record that tracks 'this thread is waiting on this waitable'
       struct WaitNode
       {
-         LinkedListNode<WaitNode> w_node{.next = nullptr, .prev = nullptr};
+         WaitNode* next = nullptr;
+         WaitNode* prev = nullptr;
          TaskControlBlock* tcb{nullptr};
          Waitable*         owner{nullptr};
          uint16_t          slot{}; // Index within tcb->wait.nodes[]
+         [[nodiscard]] bool is_linked() const { return next || prev; }
       };
 
       virtual void on_add(TaskControlBlock*) noexcept {}
       virtual void on_remove(TaskControlBlock*) noexcept {}
       struct WaitNode* pick_best_node() noexcept;
       template<typename Fn>
-      void for_each_waiter(Fn&& fn) noexcept { for (auto* n = wait_node_list.head; n; n = n->next) fn(n->tcb); }
+      void for_each_waiter(Fn&& fn) noexcept
+      {
+         for (auto& wait_node : wait_node_list) {
+            fn(wait_node.tcb);
+         }
+      }
 
    private:
       friend struct Scheduler;
@@ -319,10 +353,13 @@ namespace cortos
 
    private:
       TaskControlBlock* owner{nullptr};
-      Mutex* held_next{nullptr};
+      Mutex* next{nullptr};
+      Mutex* prev{nullptr};
 
       bool try_lock_under_guard() noexcept;
       void unlock_under_guard() noexcept;
+      void link_into_owner_list(TaskControlBlock* new_owner) noexcept;
+      void unlink_from_owner_list(TaskControlBlock* old_owner) noexcept;
       void on_add(TaskControlBlock* tcb) noexcept override;
       void on_remove(TaskControlBlock* /*tcb*/) noexcept override;
 

@@ -167,8 +167,6 @@ namespace cortos
       // FIFO among tcb's with equal priority. Used by sync primitive wait lists, not RR queue
       TaskControlBlock* pop_highest_priority() noexcept;
    };
-   static_assert(std::is_trivially_constructible_v<TaskQueue>, "Must be usable within OpaqueImpl structs");
-   static_assert(std::is_standard_layout_v<TaskQueue>,         "Must be usable within OpaqueImpl structs");
 
    // Per-Thread metadata.
    // Is constructed-in-place within the user defined stack.
@@ -181,7 +179,8 @@ namespace cortos
       // Intrusive link for a TaskQueue
       // Note: Because there is only one link here, the following invariant _must_ hold at all times:
       // This TaskControlBlock object may only be a member of at-most ONE TaskQueue at any given moment!
-      LinkedListNode<TaskControlBlock> tq_node{.next = nullptr, .prev = nullptr};
+      TaskControlBlock* next{nullptr};
+      TaskControlBlock* prev{nullptr};
       // Intrusive link for the SleepMinHeap
       uint16_t sleep_index{UINT16_MAX}; // UINT16_MAX == not in the SleepMinHeap
       Tick wake_tick{0};
@@ -199,7 +198,7 @@ namespace cortos
       uint16_t wait_armed_count{0};  // how many slots are in use for the current wait
 
       // List of mutexes currently held by me (used for priority inheritance)
-      MutexImpl* held_mutex_head{nullptr};
+      Mutex* held_mutex_list;
       // List of threads wanting to join with me
       TaskQueue join_waiters{};
 
@@ -222,16 +221,16 @@ namespace cortos
    [[nodiscard]] std::size_t TaskQueue::size() const noexcept
    {
       std::size_t n = 0;
-      for (auto* tcb = head; tcb; tcb = tcb->tq_node.next) ++n;
+      for (auto* tcb = head; tcb; tcb = tcb->next) ++n;
       return n;
    }
 
    void TaskQueue::push_back(TaskControlBlock* tcb) noexcept
    {
-      assert(tcb->tq_node.next == nullptr && tcb->tq_node.prev == nullptr && "TCB already linked");
-      tcb->tq_node.next = nullptr;
-      tcb->tq_node.prev = tail;
-      if (tail) tail->tq_node.next = tcb; else head = tcb;
+      assert(tcb->next == nullptr && tcb->prev == nullptr && "TCB already linked");
+      tcb->next = nullptr;
+      tcb->prev = tail;
+      if (tail) tail->next = tcb; else head = tcb;
       tail = tcb;
    }
 
@@ -239,17 +238,17 @@ namespace cortos
    {
       if (!head) return nullptr;
       auto* tcb = head;
-      head = tcb->tq_node.next;
-      if (head) head->tq_node.prev = nullptr; else tail = nullptr;
-      tcb->tq_node.next = tcb->tq_node.prev = nullptr;
+      head = tcb->next;
+      if (head) head->prev = nullptr; else tail = nullptr;
+      tcb->next = tcb->prev = nullptr;
       return tcb;
    }
 
    void TaskQueue::remove(TaskControlBlock* tcb) noexcept
    {
-      if (tcb->tq_node.prev) tcb->tq_node.prev->tq_node.next = tcb->tq_node.next; else head = tcb->tq_node.next;
-      if (tcb->tq_node.next) tcb->tq_node.next->tq_node.prev = tcb->tq_node.prev; else tail = tcb->tq_node.prev;
-      tcb->tq_node.next = tcb->tq_node.prev = nullptr;
+      if (tcb->prev) tcb->prev->next = tcb->next; else head = tcb->next;
+      if (tcb->next) tcb->next->prev = tcb->prev; else tail = tcb->prev;
+      tcb->next = tcb->prev = nullptr;
    }
 
    TaskControlBlock* TaskQueue::pop_highest_priority() noexcept
@@ -259,7 +258,7 @@ namespace cortos
       TaskControlBlock* best     = head;
       uint8_t           best_pri = head->priority;
 
-      for (auto* tcb = head->tq_node.next; tcb; tcb = tcb->tq_node.next) {
+      for (auto* tcb = head->next; tcb; tcb = tcb->next) {
          if (tcb->priority < best_pri) {
             best     = tcb;
             best_pri = tcb->priority;
@@ -989,10 +988,10 @@ namespace cortos
       LOG_SCHED("recompute_effective_priority() @ID(%u) base=%u", tcb->id, new_priority);
 
       // For each mutex this thread currently owns...
-      for (Mutex* mutex = tcb->held_mutex_head; mutex; mutex = mutex->ml_node.next) {
+      for (Mutex* mutex = tcb->held_mutex_head; mutex; mutex = mutex->next) {
          LOG_SCHED("  scanning held @MUTEX(%p) for waiters", ptr_suffix(mutex));
          // ...scan waiters and inherit the highest priority
-         for (TaskControlBlock* waiter = mutex->wait_queue.front(); waiter; waiter = waiter->tq_node.next) {
+         for (TaskControlBlock* waiter = mutex->wait_queue.front(); waiter; waiter = waiter->next) {
             LOG_SCHED("    waiter @ID(%u) @PRIO(%u)", waiter->id, waiter->priority);
             new_priority = std::min(waiter->priority, new_priority);
          }
