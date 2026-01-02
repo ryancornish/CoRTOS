@@ -23,8 +23,8 @@ option(CORTOS_BUILD_EXAMPLES "Build examples" ON)
 option(CORTOS_ENABLE_ASSERTIONS "Enable runtime assertions" ON)
 
 # Port selection
-set(CORTOS_PORT "linux" CACHE STRING "Port to build (linux, cortex-m, riscv)")
-set_property(CACHE CORTOS_PORT PROPERTY STRINGS linux cortex-m riscv)
+set(CORTOS_PORT "linux_boost" CACHE STRING "Port to build (linux_boost, cortex-m, riscv)")
+set_property(CACHE CORTOS_PORT PROPERTY STRINGS linux_boost cortex-m riscv)
 
 # Public include directories (visible to all targets)
 include_directories(

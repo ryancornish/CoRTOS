@@ -1,0 +1,378 @@
+/**
+ * @file port_linux_boost.cpp
+ * @brief Linux simulation port using Boost.Context
+ *
+ * This port uses Boost.Context for fast cooperative context switching.
+ * It simulates embedded behavior (stack-based context switching) while
+ * running on Linux for development and testing.
+ *
+ * SMP support: Each pthread represents a "core". Use cortos_port_get_core_id()
+ * to determine which simulated core is running.
+ */
+
+#include "cortos/port.h"
+
+#include <boost/context/fiber.hpp>
+#include <boost/context/preallocated.hpp>
+#include <boost/context/stack_context.hpp>
+
+#include <atomic>
+#include <cassert>
+#include <cstdint>
+#include <pthread.h>
+#include <time.h>
+
+/* ============================================================================
+ * Port Context Structure
+ * ========================================================================= */
+
+struct port_context
+{
+   boost::context::fiber thread;  // Thread fiber (owned by scheduler when idle)
+   boost::context::fiber sched;   // Scheduler fiber (owned by thread when running)
+   void*        stack_top;
+   size_t       stack_size;
+   port_entry_t entry;
+   void*        arg;
+};
+
+/* ============================================================================
+ * Thread-Local State
+ * ========================================================================= */
+
+// Current thread context (used by port_yield)
+static thread_local port_context* tls_current_context = nullptr;
+
+// TLS pointer (simulates hardware TLS register)
+static thread_local void* tls_thread_pointer = nullptr;
+
+// Simulated core ID (set when pthread is created for SMP simulation)
+static thread_local uint32_t tls_core_id = 0;
+
+// Global core count (can be set via environment variable)
+static std::atomic<uint32_t> g_core_count{1};
+
+/* ============================================================================
+ * Spinlock Implementation
+ * ========================================================================= */
+
+struct cortos_spinlock
+{
+   std::atomic_flag flag;
+};
+
+/* ============================================================================
+ * Core Identification
+ * ========================================================================= */
+
+extern "C" uint32_t cortos_port_get_core_id(void)
+{
+   return tls_core_id;
+}
+
+extern "C" uint32_t cortos_port_get_core_count(void)
+{
+   return g_core_count.load(std::memory_order_relaxed);
+}
+
+/* ============================================================================
+ * Context Switching
+ * ========================================================================= */
+
+// No-op stack allocator for preallocated memory
+struct preallocated_stack_noop
+{
+   using traits_type = boost::context::stack_traits;
+   boost::context::stack_context allocate(size_t) { std::abort(); }
+   void deallocate(boost::context::stack_context&) noexcept {}
+};
+
+extern "C" void port_context_init(port_context_t* context,
+                                  void* stack_base,
+                                  size_t stack_size,
+                                  port_entry_t entry,
+                                  void* arg)
+{
+   // Construct port_context_t in place
+   ::new (context) port_context
+   {
+      .thread     = {},
+      .sched      = {},
+      .stack_top  = static_cast<uint8_t*>(stack_base) + stack_size,
+      .stack_size = stack_size,
+      .entry      = entry,
+      .arg        = arg,
+   };
+
+   // Build a fiber bound to the user-provided stack
+   boost::context::stack_context boost_stack_context =
+   {
+      .size = context->stack_size,
+      .sp   = context->stack_top,
+   };
+
+   boost::context::preallocated boost_prealloc(
+      boost_stack_context.sp,
+      boost_stack_context.size,
+      boost_stack_context
+   );
+
+   preallocated_stack_noop stack_allocator;
+
+   context->thread = boost::context::fiber(
+      std::allocator_arg,
+      boost_prealloc,
+      stack_allocator,
+      [context](boost::context::fiber&& sched_in) mutable -> boost::context::fiber
+      {
+         // Store scheduler continuation so port_yield() can jump back
+         context->sched = std::move(sched_in);
+
+         try {
+            tls_current_context = context;
+            context->entry(context->arg); // Enter user code
+            tls_current_context = nullptr;
+         } catch (boost::context::detail::forced_unwind const& x) {
+            tls_current_context = nullptr;
+            throw x;
+         }
+
+         return std::move(context->sched);
+      }
+   );
+}
+
+extern "C" void port_context_destroy(port_context_t* context)
+{
+   // Verify fiber has completed
+   if (context->thread) {
+      // Bug: destroying a live thread
+      std::abort();
+   }
+
+   context->sched = boost::context::fiber{};
+   context->~port_context();
+}
+
+extern "C" void port_switch(port_context_t* /*from*/, port_context_t* to)
+{
+   assert(to->thread && "No context to switch to");
+
+   tls_current_context = to;
+   to->thread = std::move(to->thread).resume();
+   tls_current_context = nullptr;
+}
+
+extern "C" void port_start_first(port_context_t* first)
+{
+   tls_current_context = first;
+   first->thread = std::move(first->thread).resume();
+   tls_current_context = nullptr;
+}
+
+extern "C" void port_yield(void)
+{
+   if (!tls_current_context) {
+      // No current context - nothing to yield from
+      return;
+   }
+
+   auto* current = tls_current_context;
+   tls_current_context = nullptr;
+
+   assert(current->sched && "No scheduler context to switch to");
+   current->sched = std::move(current->sched).resume();
+}
+
+extern "C" void port_thread_exit(void)
+{
+   // Boost.Context cleans up automatically when fiber exits
+   // Just ensure we don't return
+   while (true) {
+      port_yield();
+   }
+}
+
+/* ============================================================================
+ * Critical Sections (Simulated)
+ * ========================================================================= */
+
+static thread_local uint32_t interrupt_disable_depth = 0;
+
+extern "C" void cortos_port_disable_interrupts(void)
+{
+   interrupt_disable_depth++;
+}
+
+extern "C" void cortos_port_enable_interrupts(void)
+{
+   if (interrupt_disable_depth > 0) {
+      interrupt_disable_depth--;
+   }
+}
+
+extern "C" bool cortos_port_interrupts_enabled(void)
+{
+   return interrupt_disable_depth == 0;
+}
+
+/* ============================================================================
+ * Atomic Operations (C++11 atomics)
+ * ========================================================================= */
+
+extern "C" bool cortos_port_atomic_compare_exchange_32(volatile uint32_t* ptr,
+                                                       uint32_t expected,
+                                                       uint32_t desired)
+{
+   auto* atomic_ptr = reinterpret_cast<std::atomic<uint32_t>*>(const_cast<uint32_t*>(ptr));
+   return atomic_ptr->compare_exchange_strong(
+      expected,
+      desired,
+      std::memory_order_acq_rel,
+      std::memory_order_acquire
+   );
+}
+
+extern "C" uint32_t cortos_port_atomic_fetch_add_32(volatile uint32_t* ptr,
+                                                    uint32_t value)
+{
+   auto* atomic_ptr = reinterpret_cast<std::atomic<uint32_t>*>(const_cast<uint32_t*>(ptr));
+   return atomic_ptr->fetch_add(value, std::memory_order_acq_rel);
+}
+
+extern "C" uint32_t cortos_port_atomic_load_32(volatile uint32_t* ptr)
+{
+   auto* atomic_ptr = reinterpret_cast<std::atomic<uint32_t>*>(const_cast<uint32_t*>(ptr));
+   return atomic_ptr->load(std::memory_order_acquire);
+}
+
+extern "C" void cortos_port_atomic_store_32(volatile uint32_t* ptr,
+                                            uint32_t value)
+{
+   auto* atomic_ptr = reinterpret_cast<std::atomic<uint32_t>*>(const_cast<uint32_t*>(ptr));
+   atomic_ptr->store(value, std::memory_order_release);
+}
+
+extern "C" void cortos_port_memory_barrier(void)
+{
+   std::atomic_thread_fence(std::memory_order_seq_cst);
+}
+
+/* ============================================================================
+ * Spinlocks
+ * ========================================================================= */
+
+extern "C" void cortos_port_spinlock_init(cortos_spinlock_t* lock)
+{
+   lock->flag.clear(std::memory_order_relaxed);
+}
+
+extern "C" void cortos_port_spinlock_lock(cortos_spinlock_t* lock)
+{
+   while (lock->flag.test_and_set(std::memory_order_acquire)) {
+      // Busy-wait with CPU yield hint
+#if defined(__x86_64__) || defined(__i386__)
+      __builtin_ia32_pause();
+#elif defined(__aarch64__) || defined(__arm__)
+      __asm__ __volatile__("yield");
+#endif
+   }
+}
+
+extern "C" void cortos_port_spinlock_unlock(cortos_spinlock_t* lock)
+{
+   lock->flag.clear(std::memory_order_release);
+}
+
+extern "C" bool cortos_port_spinlock_trylock(cortos_spinlock_t* lock)
+{
+   return !lock->flag.test_and_set(std::memory_order_acquire);
+}
+
+/* ============================================================================
+ * Inter-Processor Interrupts (SMP Simulation)
+ * ========================================================================= */
+
+extern "C" void cortos_port_send_reschedule_ipi(uint32_t core_id)
+{
+   // TODO: For SMP simulation, signal the pthread representing core_id
+   // For now, this is a no-op
+   (void)core_id;
+}
+
+/* ============================================================================
+ * Thread-Local Storage
+ * ========================================================================= */
+
+extern "C" void cortos_port_set_tls_pointer(void* tls_base)
+{
+   tls_thread_pointer = tls_base;
+}
+
+extern "C" void* cortos_port_get_tls_pointer(void)
+{
+   return tls_thread_pointer;
+}
+
+/* ============================================================================
+ * Platform Initialization
+ * ========================================================================= */
+
+extern "C" void cortos_port_init(uint32_t tick_hz)
+{
+   // Set core count from environment variable if present
+   const char* core_count_env = std::getenv("CORTOS_SIM_CORES");
+   if (core_count_env) {
+      uint32_t cores = static_cast<uint32_t>(std::atoi(core_count_env));
+      if (cores > 0) {
+         g_core_count.store(cores, std::memory_order_relaxed);
+      }
+   }
+
+   (void)tick_hz; // Unused in boost.context port
+}
+
+/* ============================================================================
+ * Idle Hook
+ * ========================================================================= */
+
+extern "C" void cortos_port_idle(void)
+{
+   // Sleep 1ms to simulate power saving, then yield
+   struct timespec req = {.tv_sec = 0, .tv_nsec = 1'000'000};
+   nanosleep(&req, nullptr);
+   port_yield();
+}
+
+/* ============================================================================
+ * Debug / Diagnostics
+ * ========================================================================= */
+
+extern "C" void cortos_port_breakpoint(void)
+{
+#if defined(__x86_64__) || defined(__i386__)
+   __asm__ __volatile__("int3");
+#elif defined(__aarch64__) || defined(__arm__)
+   __builtin_trap();
+#else
+   raise(SIGTRAP);
+#endif
+}
+
+extern "C" void* cortos_port_get_stack_pointer(void)
+{
+   void* sp;
+#if defined(__x86_64__)
+   __asm__ __volatile__("mov %%rsp, %0" : "=r"(sp));
+#elif defined(__i386__)
+   __asm__ __volatile__("mov %%esp, %0" : "=r"(sp));
+#elif defined(__aarch64__)
+   __asm__ __volatile__("mov %0, sp" : "=r"(sp));
+#elif defined(__arm__)
+   __asm__ __volatile__("mov %0, sp" : "=r"(sp));
+#else
+   int dummy;
+   sp = &dummy;
+#endif
+   return sp;
+}
