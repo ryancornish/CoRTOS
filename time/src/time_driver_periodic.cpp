@@ -29,16 +29,10 @@ public:
    * @brief Construct a periodic tick driver
    * @param tick_frequency_hz Tick frequency (e.g., 1000 for 1ms ticks)
    */
-   explicit PeriodicTickDriver(uint32_t tick_frequency_hz)
-      : tick_frequency_hz(tick_frequency_hz)
+   explicit PeriodicTickDriver(std::function<void()>&& on_timer_tick, uint32_t tick_frequency_hz)
+      : ITimeDriver(std::move(on_timer_tick)), tick_frequency_hz(tick_frequency_hz)
    {
       assert(tick_frequency_hz > 0 && "Tick frequency must be positive");
-   }
-
-   void init(std::function<void()>&& on_timer_tick) override
-   {
-      on_timer_tick_cb = std::move(on_timer_tick);
-      tick_count.store(0, std::memory_order_relaxed);
    }
 
    [[nodiscard]] TimePoint now() const override
@@ -46,7 +40,7 @@ public:
       return TimePoint{tick_count.load(std::memory_order_acquire)};
    }
 
-      // In periodic mode, we don't configure the timer - it fires at fixed intervals
+   // In periodic mode, we don't configure the timer - it fires at fixed intervals
    // The kernel will check on each tick if any threads need waking
    void schedule_wakeup(TimePoint /*wakeup_time*/) override {}
 
@@ -81,7 +75,7 @@ public:
    void on_tick_interrupt()
    {
       tick_count.fetch_add(1, std::memory_order_release);
-      if (on_timer_tick_cb) on_timer_tick_cb();
+      if (on_timer_tick) on_timer_tick();
    }
 
    [[nodiscard]] uint32_t get_tick_frequency_hz() const { return tick_frequency_hz; }
@@ -89,15 +83,9 @@ public:
 private:
    uint32_t tick_frequency_hz;
    std::atomic<uint64_t> tick_count{0};
-   std::function<void()> on_timer_tick_cb; // TODO: Use non-heap function alternative?
    bool started{false};
 };
 
-/* ============================================================================
-* Global TimeDriver Instance Management
-* ========================================================================= */
-static ITimeDriver* g_time_driver = nullptr;
-ITimeDriver* get_time_driver() { return g_time_driver; }
-void set_time_driver(ITimeDriver* driver) { g_time_driver = driver; }
+ITimeDriver* ITimeDriver::instance = nullptr;
 
 } // namespace cortos

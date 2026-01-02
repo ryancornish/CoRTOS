@@ -114,12 +114,12 @@ constexpr Duration operator-(TimePoint a, TimePoint b)
 class ITimeDriver
 {
 public:
-   ITimeDriver()          = default;
+   explicit ITimeDriver(std::function<void()>&& on_timer_tick) : on_timer_tick(std::move(on_timer_tick)) {}
    virtual ~ITimeDriver() = default;
-   ITimeDriver(ITimeDriver const&)            = default;
-   ITimeDriver& operator=(ITimeDriver const&) = default;
-   ITimeDriver(ITimeDriver&&)            = default;
-   ITimeDriver& operator=(ITimeDriver&&) = default;
+   ITimeDriver(ITimeDriver const&)            = delete;
+   ITimeDriver& operator=(ITimeDriver const&) = delete;
+   ITimeDriver(ITimeDriver&&)            = delete;
+   ITimeDriver& operator=(ITimeDriver&&) = delete;
 
    /**
    * @brief Initialize the time driver
@@ -128,7 +128,6 @@ public:
    * The TimeDriver will call this callback from interrupt context when
    * a timer interrupt occurs. The callback should wake threads and reschedule.
    */
-   virtual void init(std::function<void()>&& on_timer_tick) = 0; // TODO: use no-heap function alternative?
 
    /**
    * @brief Get the current time
@@ -172,25 +171,17 @@ public:
    * Should only be called once, after init().
    */
    virtual void start() = 0;
+
+   // Singleton access
+   static ITimeDriver& get_instance()            { return *instance;  }
+   static void set_instance(ITimeDriver* driver) { instance = driver; }
+
+protected:
+   std::function<void()> on_timer_tick;
+
+private:
+   static ITimeDriver* instance;
 };
-
-/* ============================================================================
-* Convenience Functions
-* ========================================================================= */
-
-/**
-* @brief Get the global TimeDriver instance
-*
-* The kernel uses this to access time. Must be set by the application
-* during system initialization.
-*/
-ITimeDriver* get_time_driver(); // TODO: Make it an ITimerDriver static?
-
-/**
-* @brief Set the global TimeDriver instance
-* @param driver Pointer to the TimeDriver to use
-*/
-void set_time_driver(ITimeDriver* driver); // TODO: Make it an ITimerDriver static?
 
 } // namespace cortos
 

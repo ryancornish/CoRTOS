@@ -36,8 +36,8 @@ public:
    * @param mode RealTime or Virtual
    * @param tick_frequency_hz Simulated tick frequency (e.g., 1000 = 1kHz)
    */
-   explicit SimulationTimeDriver(Mode mode = Mode::RealTime, uint32_t tick_frequency_hz = 1'000)
-      : mode(mode), tick_frequency_hz(tick_frequency_hz)
+   explicit SimulationTimeDriver(std::function<void()>&& on_timer_tick, Mode mode = Mode::RealTime, uint32_t tick_frequency_hz = 1'000)
+      : ITimeDriver(std::move(on_timer_tick)), mode(mode), tick_frequency_hz(tick_frequency_hz)
    {
       assert(tick_frequency_hz > 0 && "Tick frequency must be positive");
 
@@ -50,12 +50,6 @@ public:
    SimulationTimeDriver& operator=(SimulationTimeDriver const&) = delete;
    SimulationTimeDriver(SimulationTimeDriver&&)            = delete;
    SimulationTimeDriver& operator=(SimulationTimeDriver&&) = delete;
-
-   void init(std::function<void()>&& on_timer_tick) override
-   {
-      on_timer_tick_cb = std::move(on_timer_tick);
-      virtual_time.store(0, std::memory_order_relaxed);
-   }
 
    [[nodiscard]] TimePoint now() const override
    {
@@ -129,7 +123,7 @@ public:
 
       uint64_t wakeup = next_wakeup.load(std::memory_order_acquire);
       if (old_time < wakeup && new_time >= wakeup) {
-         if (on_timer_tick_cb) on_timer_tick_cb();
+         if (on_timer_tick) on_timer_tick();
       }
    }
 
@@ -147,7 +141,7 @@ public:
       }
    }
 
-   ~SimulationTimeDriver()
+   ~SimulationTimeDriver() override
    {
       if (timer_thread.joinable()) {
          timer_thread.join();
@@ -166,7 +160,7 @@ private:
             // Wakeup time reached
             next_wakeup.store(TimePoint::max().value, std::memory_order_release);
 
-            if (on_timer_tick_cb) on_timer_tick_cb();
+            if (on_timer_tick) on_timer_tick();
          }
 
          // Sleep for a short interval (simulate tick period)
@@ -179,9 +173,10 @@ private:
    std::chrono::steady_clock::time_point start_time;
    std::atomic<uint64_t> virtual_time{0};
    std::atomic<uint64_t> next_wakeup{TimePoint::max().value};
-   std::function<void()> on_timer_tick_cb;
    bool started{false};
    std::thread timer_thread;
 };
+
+ITimeDriver* ITimeDriver::instance = nullptr;
 
 } // namespace cortos
