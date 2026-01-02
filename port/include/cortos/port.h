@@ -69,12 +69,10 @@ void cortos_port_switch_context(void** old_sp, void* new_sp);
 * This function sets up the stack so that when cortos_port_switch_context()
 * is called with this stack pointer, the thread starts executing at entry(arg).
 */
-void* cortos_port_initialize_stack(
-   void* stack_base,
-   size_t stack_size,
-   void (*entry)(void*),
-   void* arg
-);
+void* cortos_port_initialize_stack(void* stack_base,
+                                   size_t stack_size,
+                                   void (*entry)(void*),
+                                   void* arg);
 
 /* ============================================================================
 * Critical Sections (Interrupt Control)
