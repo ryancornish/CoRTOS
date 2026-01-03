@@ -12,6 +12,8 @@
 #ifndef CORTOS_PORT_H
 #define CORTOS_PORT_H
 
+#include "port_traits.h"
+
 #include <stddef.h>
 #include <stdint.h>
 #include <stdbool.h>
@@ -29,12 +31,12 @@ extern "C" {
  *
  * Each port defines the actual structure. The kernel treats this as opaque.
  */
-typedef struct port_context port_context_t;
+typedef struct cortos_port_context cortos_port_context_t;
 
 /**
  * @brief Thread entry point signature
  */
-typedef void (*port_entry_t)(void* arg);
+typedef void (*cortos_port_entry_t)(void* arg);
 
 /* ============================================================================
  * Core Identification (SMP Support)
@@ -70,11 +72,11 @@ uint32_t cortos_port_get_core_count(void);
  * This function sets up the context so that when port_switch() is called
  * with this context, the thread starts executing at entry(arg).
  */
-void port_context_init(port_context_t* context,
-                       void* stack_base,
-                       size_t stack_size,
-                       port_entry_t entry,
-                       void* arg);
+void cortos_port_context_init(cortos_port_context_t* context,
+                              void* stack_base,
+                              size_t stack_size,
+                              cortos_port_entry_t entry,
+                              void* arg);
 
 /**
  * @brief Destroy a thread context
@@ -82,7 +84,7 @@ void port_context_init(port_context_t* context,
  *
  * Called when a thread exits. Allows the port to clean up any resources.
  */
-void port_context_destroy(port_context_t* context);
+void cortos_port_context_destroy(cortos_port_context_t* context);
 
 /**
  * @brief Switch from one context to another
@@ -92,7 +94,7 @@ void port_context_destroy(port_context_t* context);
  * Saves the current CPU state into 'from' and loads the state from 'to'.
  * Execution resumes in 'to' context.
  */
-void port_switch(port_context_t* from, port_context_t* to);
+void cortos_port_switch(cortos_port_context_t* from, cortos_port_context_t* to);
 
 /**
  * @brief Start executing the first thread
@@ -101,7 +103,7 @@ void port_switch(port_context_t* from, port_context_t* to);
  * This is called once at scheduler startup to begin execution.
  * Unlike port_switch(), there's no "from" context to save.
  */
-void port_start_first(port_context_t* first);
+void cortos_port_start_first(cortos_port_context_t* first);
 
 /**
  * @brief Yield from current thread back to scheduler
@@ -109,7 +111,7 @@ void port_start_first(port_context_t* first);
  * Called by a running thread to voluntarily give up the CPU.
  * The scheduler will decide which thread to run next.
  */
-void port_yield(void);
+void cortos_port_yield(void);
 
 /**
  * @brief Thread exit handler
@@ -117,7 +119,7 @@ void port_yield(void);
  * Called when a thread's entry function returns.
  * Should never return.
  */
-void port_thread_exit(void) __attribute__((noreturn));
+void cortos_port_thread_exit(void) __attribute__((noreturn));
 
 /* ============================================================================
  * Critical Sections (Interrupt Control)
@@ -141,83 +143,7 @@ void cortos_port_enable_interrupts(void);
  */
 bool cortos_port_interrupts_enabled(void);
 
-/* ============================================================================
- * Atomic Operations (SMP Support)
- * ========================================================================= */
-
-/**
- * @brief Atomic compare-and-swap (32-bit)
- * @param ptr Pointer to value
- * @param expected Expected current value
- * @param desired Value to write if *ptr == expected
- * @return true if swap occurred, false otherwise
- */
-bool cortos_port_atomic_compare_exchange_32(
-    volatile uint32_t* ptr,
-    uint32_t expected,
-    uint32_t desired
-);
-
-/**
- * @brief Atomic fetch-and-add (32-bit)
- * @param ptr Pointer to value
- * @param value Value to add
- * @return Previous value of *ptr
- */
-uint32_t cortos_port_atomic_fetch_add_32(volatile uint32_t* ptr, uint32_t value);
-
-/**
- * @brief Atomic load (32-bit)
- * @param ptr Pointer to value
- * @return Current value of *ptr
- */
-uint32_t cortos_port_atomic_load_32(volatile uint32_t* ptr);
-
-/**
- * @brief Atomic store (32-bit)
- * @param ptr Pointer to value
- * @param value Value to store
- */
-void cortos_port_atomic_store_32(volatile uint32_t* ptr, uint32_t value);
-
-/**
- * @brief Memory barrier (full fence)
- */
-void cortos_port_memory_barrier(void);
-
-/* ============================================================================
- * Spinlocks (SMP Support)
- * ========================================================================= */
-
-/**
- * @brief Spinlock type (opaque, platform-specific)
- */
-typedef struct cortos_spinlock cortos_spinlock_t;
-
-/**
- * @brief Initialize a spinlock
- * @param lock Pointer to spinlock
- */
-void cortos_port_spinlock_init(cortos_spinlock_t* lock);
-
-/**
- * @brief Acquire a spinlock
- * @param lock Pointer to spinlock
- */
-void cortos_port_spinlock_lock(cortos_spinlock_t* lock);
-
-/**
- * @brief Release a spinlock
- * @param lock Pointer to spinlock
- */
-void cortos_port_spinlock_unlock(cortos_spinlock_t* lock);
-
-/**
- * @brief Try to acquire a spinlock without blocking
- * @param lock Pointer to spinlock
- * @return true if acquired, false if already locked
- */
-bool cortos_port_spinlock_trylock(cortos_spinlock_t* lock);
+void cortos_port_cpu_relax(void);
 
 /* ============================================================================
  * Inter-Processor Interrupts (SMP Support)

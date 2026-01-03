@@ -2,29 +2,41 @@
 set(CORTOS_TIME_DRIVER "simulation" CACHE STRING "TimeDriver implementation (periodic, simulation)")
 set_property(CACHE CORTOS_TIME_DRIVER PROPERTY STRINGS periodic simulation)
 
-# Select the appropriate implementation
-if(CORTOS_TIME_DRIVER STREQUAL "periodic")
-   set(TIME_DRIVER_SRC src/time_driver_periodic.cpp)
-elseif(CORTOS_TIME_DRIVER STREQUAL "simulation")
-   set(TIME_DRIVER_SRC src/time_driver_simulation.cpp)
-else()
-   message(FATAL_ERROR "Unknown time driver: ${CORTOS_TIME_DRIVER}")
-endif()
-
+# Always compile the base interface
 add_library(cortos_time STATIC
-   ${TIME_DRIVER_SRC}
+   base/time_driver.cpp
 )
 
+# Base include directory (interface only)
 target_include_directories(cortos_time PUBLIC
-   ${CMAKE_SOURCE_DIR}/time/include
+   ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
 
 target_compile_features(cortos_time PUBLIC cxx_std_23)
 
-# Simulation time driver uses std::thread
-if(CORTOS_TIME_DRIVER STREQUAL "simulation")
+# Select the appropriate driver implementation
+if(CORTOS_TIME_DRIVER STREQUAL "periodic")
+   target_sources(cortos_time PRIVATE
+      periodic/time_driver_periodic.cpp
+   )
+   target_include_directories(cortos_time PUBLIC
+      ${CMAKE_CURRENT_SOURCE_DIR}/periodic/include
+   )
+
+elseif(CORTOS_TIME_DRIVER STREQUAL "simulation")
+   target_sources(cortos_time PRIVATE
+      simulation/time_driver_simulation.cpp
+   )
+   target_include_directories(cortos_time PUBLIC
+      ${CMAKE_CURRENT_SOURCE_DIR}/simulation/include
+   )
+
+   # Simulation time driver uses std::thread
    find_package(Threads REQUIRED)
    target_link_libraries(cortos_time PUBLIC Threads::Threads)
+
+else()
+   message(FATAL_ERROR "Unknown time driver: ${CORTOS_TIME_DRIVER}")
 endif()
 
 # Alias

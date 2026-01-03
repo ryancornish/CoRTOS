@@ -11,6 +11,7 @@
  */
 
 #include "cortos/port.h"
+#include "port_traits.h"
 
 #include <boost/context/fiber.hpp>
 #include <boost/context/preallocated.hpp>
@@ -26,22 +27,30 @@
  * Port Context Structure
  * ========================================================================= */
 
-struct port_context
+struct cortos_port_context
 {
    boost::context::fiber thread;  // Thread fiber (owned by scheduler when idle)
    boost::context::fiber sched;   // Scheduler fiber (owned by thread when running)
-   void*        stack_top;
-   size_t       stack_size;
-   port_entry_t entry;
-   void*        arg;
+   void*                 stack_top;
+   size_t                stack_size;
+   cortos_port_entry_t   entry;
+   void*                 arg;
 };
+
+// Verify that port_traits.h constants are correct
+static_assert(sizeof(cortos_port_context) == CORTOS_PORT_CONTEXT_SIZE,
+              "CORTOS_PORT_CONTEXT_SIZE mismatch - adjust in port_traits.h");
+static_assert(alignof(cortos_port_context) == CORTOS_PORT_CONTEXT_ALIGN,
+              "CORTOS_PORT_CONTEXT_ALIGN mismatch - adjust in port_traits.h");
+static_assert((CORTOS_STACK_ALIGN & (CORTOS_STACK_ALIGN - 1)) == 0,
+              "CORTOS_STACK_ALIGN must be a power of two");
 
 /* ============================================================================
  * Thread-Local State
  * ========================================================================= */
 
 // Current thread context (used by port_yield)
-static thread_local port_context* tls_current_context = nullptr;
+static thread_local cortos_port_context* tls_current_context = nullptr;
 
 // TLS pointer (simulates hardware TLS register)
 static thread_local void* tls_thread_pointer = nullptr;
@@ -51,15 +60,6 @@ static thread_local uint32_t tls_core_id = 0;
 
 // Global core count (can be set via environment variable)
 static std::atomic<uint32_t> g_core_count{1};
-
-/* ============================================================================
- * Spinlock Implementation
- * ========================================================================= */
-
-struct cortos_spinlock
-{
-   std::atomic_flag flag;
-};
 
 /* ============================================================================
  * Core Identification
@@ -87,14 +87,14 @@ struct preallocated_stack_noop
    void deallocate(boost::context::stack_context&) noexcept {}
 };
 
-extern "C" void port_context_init(port_context_t* context,
+extern "C" void cortos_port_context_init(cortos_port_context_t* context,
                                   void* stack_base,
                                   size_t stack_size,
-                                  port_entry_t entry,
+                                  cortos_port_entry_t entry,
                                   void* arg)
 {
-   // Construct port_context_t in place
-   ::new (context) port_context
+   // Construct cortos_port_context_t in place
+   ::new (context) cortos_port_context
    {
       .thread     = {},
       .sched      = {},
@@ -142,7 +142,7 @@ extern "C" void port_context_init(port_context_t* context,
    );
 }
 
-extern "C" void port_context_destroy(port_context_t* context)
+extern "C" void cortos_port_context_destroy(cortos_port_context_t* context)
 {
    // Verify fiber has completed
    if (context->thread) {
@@ -151,10 +151,10 @@ extern "C" void port_context_destroy(port_context_t* context)
    }
 
    context->sched = boost::context::fiber{};
-   context->~port_context();
+   context->~cortos_port_context();
 }
 
-extern "C" void port_switch(port_context_t* /*from*/, port_context_t* to)
+extern "C" void cortos_port_switch(cortos_port_context_t* /*from*/, cortos_port_context_t* to)
 {
    assert(to->thread && "No context to switch to");
 
@@ -163,19 +163,17 @@ extern "C" void port_switch(port_context_t* /*from*/, port_context_t* to)
    tls_current_context = nullptr;
 }
 
-extern "C" void port_start_first(port_context_t* first)
+extern "C" void cortos_port_start_first(cortos_port_context_t* first)
 {
    tls_current_context = first;
    first->thread = std::move(first->thread).resume();
    tls_current_context = nullptr;
 }
 
-extern "C" void port_yield(void)
+extern "C" void cortos_port_yield(void)
 {
-   if (!tls_current_context) {
-      // No current context - nothing to yield from
-      return;
-   }
+   // No current context - nothing to yield from
+   if (!tls_current_context) return;
 
    auto* current = tls_current_context;
    tls_current_context = nullptr;
@@ -189,7 +187,7 @@ extern "C" void port_thread_exit(void)
    // Boost.Context cleans up automatically when fiber exits
    // Just ensure we don't return
    while (true) {
-      port_yield();
+      cortos_port_yield();
    }
 }
 
@@ -217,76 +215,17 @@ extern "C" bool cortos_port_interrupts_enabled(void)
 }
 
 /* ============================================================================
- * Atomic Operations (C++11 atomics)
+ * CPU Hints
  * ========================================================================= */
 
-extern "C" bool cortos_port_atomic_compare_exchange_32(volatile uint32_t* ptr,
-                                                       uint32_t expected,
-                                                       uint32_t desired)
+extern "C" void cortos_port_cpu_relax(void)
 {
-   auto* atomic_ptr = reinterpret_cast<std::atomic<uint32_t>*>(const_cast<uint32_t*>(ptr));
-   return atomic_ptr->compare_exchange_strong(
-      expected,
-      desired,
-      std::memory_order_acq_rel,
-      std::memory_order_acquire
-   );
-}
-
-extern "C" uint32_t cortos_port_atomic_fetch_add_32(volatile uint32_t* ptr,
-                                                    uint32_t value)
-{
-   auto* atomic_ptr = reinterpret_cast<std::atomic<uint32_t>*>(const_cast<uint32_t*>(ptr));
-   return atomic_ptr->fetch_add(value, std::memory_order_acq_rel);
-}
-
-extern "C" uint32_t cortos_port_atomic_load_32(volatile uint32_t* ptr)
-{
-   auto* atomic_ptr = reinterpret_cast<std::atomic<uint32_t>*>(const_cast<uint32_t*>(ptr));
-   return atomic_ptr->load(std::memory_order_acquire);
-}
-
-extern "C" void cortos_port_atomic_store_32(volatile uint32_t* ptr,
-                                            uint32_t value)
-{
-   auto* atomic_ptr = reinterpret_cast<std::atomic<uint32_t>*>(const_cast<uint32_t*>(ptr));
-   atomic_ptr->store(value, std::memory_order_release);
-}
-
-extern "C" void cortos_port_memory_barrier(void)
-{
-   std::atomic_thread_fence(std::memory_order_seq_cst);
-}
-
-/* ============================================================================
- * Spinlocks
- * ========================================================================= */
-
-extern "C" void cortos_port_spinlock_init(cortos_spinlock_t* lock)
-{
-   lock->flag.clear(std::memory_order_relaxed);
-}
-
-extern "C" void cortos_port_spinlock_lock(cortos_spinlock_t* lock)
-{
-   while (lock->flag.test_and_set(std::memory_order_acquire)) {
-      // Busy-wait with CPU yield hint
+   // CPU yield hint for busy-wait loops
 #if defined(__x86_64__) || defined(__i386__)
-      __builtin_ia32_pause();
+   __builtin_ia32_pause();
 #elif defined(__aarch64__) || defined(__arm__)
-      __asm__ __volatile__("yield");
+   __asm__ __volatile__("yield");
 #endif
-   }
-}
-
-extern "C" void cortos_port_spinlock_unlock(cortos_spinlock_t* lock)
-{
-   lock->flag.clear(std::memory_order_release);
-}
-
-extern "C" bool cortos_port_spinlock_trylock(cortos_spinlock_t* lock)
-{
-   return !lock->flag.test_and_set(std::memory_order_acquire);
 }
 
 /* ============================================================================
@@ -323,7 +262,7 @@ extern "C" void cortos_port_init(uint32_t tick_hz)
    // Set core count from environment variable if present
    const char* core_count_env = std::getenv("CORTOS_SIM_CORES");
    if (core_count_env) {
-      uint32_t cores = static_cast<uint32_t>(std::atoi(core_count_env));
+      auto cores = static_cast<uint32_t>(std::atoi(core_count_env));
       if (cores > 0) {
          g_core_count.store(cores, std::memory_order_relaxed);
       }
@@ -341,7 +280,7 @@ extern "C" void cortos_port_idle(void)
    // Sleep 1ms to simulate power saving, then yield
    struct timespec req = {.tv_sec = 0, .tv_nsec = 1'000'000};
    nanosleep(&req, nullptr);
-   port_yield();
+   cortos_port_yield();
 }
 
 /* ============================================================================
