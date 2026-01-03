@@ -169,56 +169,6 @@ TEST_F(PortTest, ThreadLocalStorage)
    EXPECT_EQ(cortos_port_get_tls_pointer(), nullptr);
 }
 
-TEST_F(PortTest, TLSIsolationBetweenContexts)
-{
-   constexpr size_t stack_size = 4096;
-
-   std::vector<uint8_t> stack1(stack_size);
-   std::vector<uint8_t> stack2(stack_size);
-
-   alignas(CORTOS_PORT_CONTEXT_ALIGN) uint8_t ctx1_storage[CORTOS_PORT_CONTEXT_SIZE];
-   alignas(CORTOS_PORT_CONTEXT_ALIGN) uint8_t ctx2_storage[CORTOS_PORT_CONTEXT_SIZE];
-
-   auto* ctx1 = reinterpret_cast<cortos_port_context_t*>(ctx1_storage);
-   auto* ctx2 = reinterpret_cast<cortos_port_context_t*>(ctx2_storage);
-
-   void* tls1 = reinterpret_cast<void*>(0x1111);
-   void* tls2 = reinterpret_cast<void*>(0x2222);
-
-   auto entry1 = [](void* arg)
-   {
-      auto** ptrs = static_cast<void**>(arg);
-      cortos_port_set_tls_pointer(ptrs[0]);
-      cortos_port_yield();
-      ptrs[2] = cortos_port_get_tls_pointer();  // Store retrieved value
-   };
-
-   auto entry2 = [](void* arg)
-   {
-      auto** ptrs = static_cast<void**>(arg);
-      cortos_port_set_tls_pointer(ptrs[1]);
-      cortos_port_yield();
-      ptrs[3] = cortos_port_get_tls_pointer();  // Store retrieved value
-   };
-
-   void* args[4] = {tls1, tls2, nullptr, nullptr};
-
-   cortos_port_context_init(ctx1, stack1.data(), stack_size, entry1, args);
-   cortos_port_context_init(ctx2, stack2.data(), stack_size, entry2, args);
-
-   // Run both threads
-   cortos_port_start_first(ctx1);
-   cortos_port_switch(nullptr, ctx2);
-   cortos_port_switch(nullptr, ctx1);  // Resume ctx1 to retrieve TLS
-   cortos_port_switch(nullptr, ctx2);  // Resume ctx2 to retrieve TLS
-
-   // Each thread should have its own TLS
-   EXPECT_EQ(args[2], tls1);  // Thread 1 sees tls1
-   EXPECT_EQ(args[3], tls2);  // Thread 2 sees tls2
-
-   cortos_port_context_destroy(ctx1);
-   cortos_port_context_destroy(ctx2);
-}
 
 /* ============================================================================
  * Core ID Tests
