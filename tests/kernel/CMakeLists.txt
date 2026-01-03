@@ -1,4 +1,14 @@
 # Kernel unit tests
-# add_cortos_test(test_scheduler test_scheduler.cpp)
-# add_cortos_test(test_waitable test_waitable.cpp)
-# add_cortos_test(test_thread test_thread.cpp)
+
+# Function tests (type-erased callable)
+add_cortos_test(test_function test_function.cpp)
+target_link_libraries(test_function PRIVATE
+   cortos::kernel
+)
+
+# Spinlock tests
+# add_cortos_test(test_spinlock test_spinlock.cpp)
+# target_link_libraries(test_spinlock PRIVATE
+#    cortos::kernel
+#    Threads::Threads  # For std::thread in tests
+# )
