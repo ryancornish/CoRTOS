@@ -10,11 +10,9 @@ namespace cortos
 {
 
 template<TimeMode Mode>
-SimulationTimeDriver<Mode>::SimulationTimeDriver(std::function<void()>&& on_timer_tick, uint32_t tick_frequency_hz)
-   : ITimeDriver(std::move(on_timer_tick)), tick_frequency_hz(tick_frequency_hz)
+SimulationTimeDriver<Mode>::SimulationTimeDriver(uint32_t tick_frequency_hz, Callback on_timer_tick, void* arg)
+   : ITimeDriver(on_timer_tick, arg), tick_frequency_hz(tick_frequency_hz)
 {
-   assert(tick_frequency_hz > 0 && "Tick frequency must be positive");
-
    if constexpr (Mode == TimeMode::RealTime) {
       start_time = std::chrono::steady_clock::now();
    }
@@ -100,11 +98,9 @@ void SimulationTimeDriver<Mode>::advance_time(uint64_t delta_ticks) requires (Mo
    uint64_t new_time = old_time + delta_ticks;
 
    uint64_t wakeup = next_wakeup.load(std::memory_order_acquire);
-   if (old_time < wakeup && new_time >= wakeup)
-   {
-      if (on_timer_tick)
-      {
-         on_timer_tick();
+   if (old_time < wakeup && new_time >= wakeup) {
+      if (on_timer_tick) {
+         on_timer_tick(arg);
       }
    }
 }
@@ -131,7 +127,7 @@ void SimulationTimeDriver<Mode>::run_timer_loop()
          next_wakeup.store(TimePoint::max().value, std::memory_order_release);
 
          if (on_timer_tick) {
-            on_timer_tick();
+            on_timer_tick(arg);
          }
       }
 

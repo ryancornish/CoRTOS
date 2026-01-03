@@ -29,7 +29,14 @@ TEST_F(PeriodicTimeDriverTest, TimeAdvancesOnTick)
 {
    int callback_count = 0;
 
-   PeriodicTickDriver driver([&callback_count]() { callback_count++; }, 1'000);
+   PeriodicTickDriver driver(
+      1'000,
+      [](void* cb_count)
+      {
+         auto* callback_count = static_cast<int*>(cb_count);
+         (*callback_count)++;
+      }, &callback_count
+   );
 
    driver.start();
 
@@ -46,7 +53,7 @@ TEST_F(PeriodicTimeDriverTest, TimeAdvancesOnTick)
 
 TEST_F(PeriodicTimeDriverTest, DurationConversion)
 {
-   PeriodicTickDriver driver(nullptr, 1'000);  // 1kHz
+   PeriodicTickDriver driver(1'000, nullptr);  // 1kHz
 
    Duration d1 = driver.from_milliseconds(10);
    EXPECT_EQ(d1.value, 10);
@@ -57,7 +64,7 @@ TEST_F(PeriodicTimeDriverTest, DurationConversion)
 
 TEST_F(PeriodicTimeDriverTest, ScheduleWakeupIsNoop)
 {
-   PeriodicTickDriver driver(nullptr, 1'000);
+   PeriodicTickDriver driver(1'000, nullptr);
 
    driver.start();
 
@@ -70,7 +77,7 @@ TEST_F(PeriodicTimeDriverTest, ScheduleWakeupIsNoop)
 
 TEST_F(PeriodicTimeDriverTest, TickFrequency)
 {
-   PeriodicTickDriver driver(nullptr, 2'000);  // 2kHz
+   PeriodicTickDriver driver(2'000, nullptr);  // 2kHz
 
    EXPECT_EQ(driver.get_tick_frequency_hz(), 2'000);
 
@@ -81,7 +88,7 @@ TEST_F(PeriodicTimeDriverTest, TickFrequency)
 
 TEST_F(PeriodicTimeDriverTest, SingletonAccess)
 {
-   PeriodicTickDriver driver(nullptr, 1000);
+   PeriodicTickDriver driver(1'000, nullptr);
 
    ITimeDriver::set_instance(&driver);
 

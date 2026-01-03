@@ -9,15 +9,8 @@
 namespace cortos
 {
 
-PeriodicTickDriver::PeriodicTickDriver(
-   std::function<void()>&& on_timer_tick,
-   uint32_t tick_frequency_hz
-)
-   : ITimeDriver(std::move(on_timer_tick))
-   , tick_frequency_hz(tick_frequency_hz)
-{
-   assert(tick_frequency_hz > 0 && "Tick frequency must be positive");
-}
+PeriodicTickDriver::PeriodicTickDriver(uint32_t tick_frequency_hz, Callback on_timer_tick, void* arg)
+   : ITimeDriver(on_timer_tick, arg), tick_frequency_hz(tick_frequency_hz) {}
 
 TimePoint PeriodicTickDriver::now() const
 {
@@ -37,7 +30,7 @@ void PeriodicTickDriver::cancel_wakeup()
 
 Duration PeriodicTickDriver::from_milliseconds(uint32_t ms) const
 {
-   uint64_t ticks = (static_cast<uint64_t>(ms) * tick_frequency_hz) / 1000;
+   uint64_t ticks = (static_cast<uint64_t>(ms) * tick_frequency_hz) / 1'000;
    return Duration{ticks};
 }
 
@@ -59,9 +52,8 @@ void PeriodicTickDriver::on_tick_interrupt()
 {
    tick_count.fetch_add(1, std::memory_order_release);
 
-   if (on_timer_tick)
-   {
-      on_timer_tick();
+   if (on_timer_tick) {
+      on_timer_tick(arg);
    }
 }
 

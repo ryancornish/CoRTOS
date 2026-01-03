@@ -35,10 +35,11 @@ class SimulationTimeDriver : public ITimeDriver
 public:
    /**
     * @brief Construct a simulation time driver
-    * @param on_timer_tick Callback invoked when timer fires
     * @param tick_frequency_hz Simulated tick frequency (e.g., 1000 = 1kHz)
+    * @param on_timer_tick Callback invoked when timer fires
+    * @param arg Callback arbitrary argument
     */
-   explicit SimulationTimeDriver(std::function<void()>&& on_timer_tick, uint32_t tick_frequency_hz = 1'000);
+   explicit SimulationTimeDriver(uint32_t tick_frequency_hz, Callback on_timer_tick, void* arg = nullptr);
 
    ~SimulationTimeDriver() override;
 

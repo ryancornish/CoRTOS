@@ -24,7 +24,6 @@
 #define CORTOS_TIME_DRIVER_HPP
 
 #include <cstdint>
-#include <functional>
 #include <limits>
 
 namespace cortos
@@ -114,7 +113,8 @@ constexpr Duration operator-(TimePoint a, TimePoint b)
 class ITimeDriver
 {
 public:
-   explicit ITimeDriver(std::function<void()>&& on_timer_tick) : on_timer_tick(std::move(on_timer_tick)) {}
+   using Callback = void (*)(void*);
+
    virtual ~ITimeDriver() = default;
    ITimeDriver(ITimeDriver const&)            = delete;
    ITimeDriver& operator=(ITimeDriver const&) = delete;
@@ -177,7 +177,9 @@ public:
    static void set_instance(ITimeDriver* driver) { instance = driver; }
 
 protected:
-   std::function<void()> on_timer_tick;
+   explicit ITimeDriver(Callback on_timer_tick, void* arg = nullptr) : on_timer_tick(on_timer_tick), arg(arg) {}
+   Callback on_timer_tick;
+   void* arg;
 
 private:
    static ITimeDriver* instance;

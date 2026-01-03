@@ -29,7 +29,14 @@ TEST_F(SimulationTimeDriverTest, TimeAdvances)
 {
    int callback_count = 0;
 
-   SimulationTimeDriver<TimeMode::Virtual> driver([&callback_count]() { callback_count++; }, 1'000);
+   SimulationTimeDriver<TimeMode::Virtual> driver(
+      1'000,
+      [](void* cb_count)
+      {
+         auto* callback_count = static_cast<int*>(cb_count);
+         (*callback_count)++;
+      }, &callback_count
+   );
 
    driver.start();
 
@@ -46,7 +53,14 @@ TEST_F(SimulationTimeDriverTest, WakeupCallback)
 {
    int callback_count = 0;
 
-   SimulationTimeDriver<TimeMode::Virtual> driver([&callback_count]() { callback_count++; }, 1'000);
+   SimulationTimeDriver<TimeMode::Virtual> driver(
+      1'000,
+      [](void* cb_count)
+      {
+         auto* callback_count = static_cast<int*>(cb_count);
+         (*callback_count)++;
+      }, &callback_count
+   );
 
    driver.start();
 
@@ -70,9 +84,14 @@ TEST_F(SimulationTimeDriverTest, AdvanceTo)
 {
    int callback_count = 0;
 
-   SimulationTimeDriver<TimeMode::Virtual> driver([&callback_count]() { callback_count++; }, 1'000);
-
-   SimulationTimeDriver<TimeMode::RealTime> driver2([&callback_count]() { callback_count++; }, 1'000);
+   SimulationTimeDriver<TimeMode::Virtual> driver(
+      1'000,
+      [](void* cb_count)
+      {
+         auto* callback_count = static_cast<int*>(cb_count);
+         (*callback_count)++;
+      }, &callback_count
+   );
 
    driver.start();
    driver.schedule_wakeup(TimePoint{500});
@@ -88,7 +107,14 @@ TEST_F(SimulationTimeDriverTest, CancelWakeup)
 {
    int callback_count = 0;
 
-   SimulationTimeDriver<TimeMode::Virtual> driver([&callback_count]() { callback_count++; }, 1'000);
+   SimulationTimeDriver<TimeMode::Virtual> driver(
+      1'000,
+      [](void* cb_count)
+      {
+         auto* callback_count = static_cast<int*>(cb_count);
+         (*callback_count)++;
+      }, &callback_count
+   );
 
    driver.start();
    driver.schedule_wakeup(TimePoint{100});
@@ -105,7 +131,7 @@ TEST_F(SimulationTimeDriverTest, CancelWakeup)
 TEST_F(SimulationTimeDriverTest, DurationConversion)
 {
    // 1kHz = 1 tick per ms
-   SimulationTimeDriver<TimeMode::Virtual> driver(nullptr, 1'000);
+   SimulationTimeDriver<TimeMode::Virtual> driver(1'000, nullptr);
 
    Duration d1 = driver.from_milliseconds(10);
    EXPECT_EQ(d1.value, 10);  // 10ms = 10 ticks at 1kHz
@@ -117,7 +143,7 @@ TEST_F(SimulationTimeDriverTest, DurationConversion)
 TEST_F(SimulationTimeDriverTest, HighFrequency)
 {
    // 1MHz = 1 tick per us
-   SimulationTimeDriver<TimeMode::Virtual> driver(nullptr, 1'000'000);
+   SimulationTimeDriver<TimeMode::Virtual> driver(1'000'000, nullptr);
 
    Duration d1 = driver.from_milliseconds(1);
    EXPECT_EQ(d1.value, 1000);  // 1ms = 1000 ticks at 1MHz
@@ -128,7 +154,7 @@ TEST_F(SimulationTimeDriverTest, HighFrequency)
 
 TEST_F(SimulationTimeDriverTest, SingletonAccess)
 {
-   SimulationTimeDriver<TimeMode::Virtual> driver(nullptr, 1000);
+   SimulationTimeDriver<TimeMode::Virtual> driver(1000, nullptr);
 
    ITimeDriver::set_instance(&driver);
 

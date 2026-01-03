@@ -27,13 +27,11 @@ class PeriodicTickDriver : public ITimeDriver
 public:
    /**
     * @brief Construct a periodic tick driver
-    * @param on_timer_tick Callback invoked when timer fires
     * @param tick_frequency_hz Tick frequency (e.g., 1000 for 1ms ticks)
+    * @param on_timer_tick Callback invoked when timer fires
+    * @param arg Callback arbitrary argument
     */
-   explicit PeriodicTickDriver(
-      std::function<void()>&& on_timer_tick,
-      uint32_t tick_frequency_hz
-   );
+   explicit PeriodicTickDriver(uint32_t tick_frequency_hz, Callback on_timer_tick, void* arg = nullptr);
 
    ~PeriodicTickDriver() override = default;
 
