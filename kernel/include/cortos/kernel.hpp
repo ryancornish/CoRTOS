@@ -11,6 +11,7 @@
 #include <array>
 #include <atomic>
 #include <cstddef>
+#include <span>
 
 namespace cortos
 {
@@ -267,6 +268,295 @@ Function<Ret(Args...), InlineSize, Policy>::VTableImpl<F, Heap>::table{
    .move    = &VTableImpl::move,
    .destroy = &VTableImpl::destroy
 };
+
+/**
+ * @brief Base class for objects that can block threads
+ *
+ * Waitable is inherited by synchronization primitives (Mutex, Semaphore, etc.)
+ * and time-aware objects (Timer). It provides hooks for custom behavior when
+ * threads block/wake on the object.
+ *
+ * Threads do NOT call methods on Waitable directly. Instead, use the free
+ * functions kernel::wait_for() and kernel::wait_for_any().
+ *
+ * Example (Timer in libcortos):
+ *   class Timer : public Waitable
+ *   {
+ *      TimePoint wakeup_time;
+ *      // TimeDriver calls wake_one() when time expires
+ *   };
+ *
+ *   Timer timer;
+ *   Mutex mutex;
+ *   auto result = kernel::wait_for_any({&mutex, &timer});
+ *   // Woken by whichever fired first
+ */
+class Waitable
+{
+   friend class Scheduler;
+
+public:
+   /**
+    * @brief Result of a wait operation
+    */
+   struct Result
+   {
+      int  index{-1};     ///< Index of waitable that triggered (-1 if none)
+      bool acquired{false}; ///< True if resource was acquired (e.g., mutex locked)
+   };
+
+protected:
+   /**
+    * @brief Called when a thread blocks on this waitable
+    * @param thread Thread that is blocking
+    *
+    * Override to implement custom behavior (e.g., priority inheritance).
+    * Called before thread is added to wait queue.
+    */
+   virtual void on_thread_blocked(class Thread* thread);
+
+   /**
+    * @brief Called when a thread is removed from wait queue
+    * @param thread Thread being removed (woken or cancelled)
+    *
+    * Override to implement cleanup (e.g., clear inherited priority).
+    * Called after thread is removed from wait queue.
+    */
+   virtual void on_thread_removed(class Thread* thread);
+
+   /**
+    * @brief Iterate over all waiting threads
+    * @tparam Fn Callable: void(Thread*)
+    *
+    * Useful for priority inheritance - find max priority of all waiters.
+    *
+    * Example:
+    *   Priority max_priority = Priority{0};
+    *   for_each_waiter([&](Thread* t) {
+    *      if (t->priority() > max_priority) {
+    *         max_priority = t->priority();
+    *      }
+    *   });
+    */
+   template<typename Fn>
+   void for_each_waiter(Fn&& fn);
+
+public:
+   Waitable();
+   virtual ~Waitable();
+
+   Waitable(Waitable const&)            = delete;
+   Waitable& operator=(Waitable const&) = delete;
+   Waitable(Waitable&&)            = delete;
+   Waitable& operator=(Waitable&&) = delete;
+
+   /**
+    * @brief Check if any threads are waiting
+    * @return true if wait queue is empty, false if threads are waiting
+    */
+   [[nodiscard]] bool empty() const noexcept;
+
+   /**
+    * @brief Signal one waiting thread (highest priority)
+    * @param acquired True if signalled thread acquired the resource (e.g., mutex lock)
+    *
+    * Moves the highest-priority waiting thread to the ready queue.
+    * If no threads are waiting, this is a no-op.
+    *
+    * The 'acquired' parameter is returned in Waitable::Result:
+    * - Mutex::unlock() -> wake_one(true)  // Woken thread now owns mutex
+    * - Semaphore::post() -> wake_one(false) // Woken thread is just notified
+    * - Timer::expire() -> wake_one(false)   // Woken thread didn't acquire anything
+    *
+    * Called by the owning primitive (e.g., Mutex::unlock(), Timer expiry).
+    */
+   void signal_one(bool acquired = true);
+
+   /**
+    * @brief Signal all waiting threads
+    * @param acquired True if signalled threads acquired the resource
+    *
+    * Moves all waiting threads to the ready queue.
+    * If no threads are waiting, this is a no-op.
+    */
+   void signal_all(bool acquired = true);
+
+private:
+   void* wait_queue;  // Opaque pointer to kernel wait queue (LinkedList<WaitNode>)
+
+   // Internal: add/remove wait nodes (called by scheduler)
+   void add_wait_node(void* node);
+   void remove_wait_node(void* node);
+   void* pick_best_waiter();  // Returns highest priority WaitNode
+};
+
+namespace kernel
+{
+   /**
+    * @brief Initialise the kernel
+    *
+    * Must be called before any threads are created or kernel functions used.
+    * Sets up scheduler data structures.
+    */
+   void initialise();
+
+   /**
+    * @brief Start the scheduler
+    *
+    * Never returns. Begins executing threads.
+    * At least one thread must exist before calling start().
+    */
+   [[noreturn]] void start();
+
+
+   /**
+    * @brief Get total number of CPU cores
+    * @return Number of cores (1 for single-core)
+    */
+   [[nodiscard]] std::uint32_t core_count() noexcept;
+
+   /**
+    * @brief Block current thread on a waitable
+    * @param waitable Object to wait on (Mutex, Semaphore, Timer, etc.)
+    * @return Result indicating which waitable triggered and if acquired
+    *
+    * Current thread is blocked until waitable.wake_one() or wake_all() is called.
+    * Scheduler switches to next ready thread.
+    *
+    * Example:
+    *   Mutex mutex;
+    *   auto result = kernel::wait_for(&mutex);
+    *   if (result.acquired) {
+    *      // Mutex was acquired
+    *   }
+    */
+   Waitable::Result wait_for(Waitable* waitable);
+
+   /**
+    * @brief Block current thread on multiple waitables
+    * @param waitables List of objects to wait on
+    * @return Result indicating which waitable triggered (index) and if acquired
+    *
+    * Current thread is blocked until ANY of the waitables is triggered.
+    * Commonly used for:
+    * - Mutex + Timer (lock with timeout)
+    * - Multiple events (wait for any event)
+    * - Cancellation (wait for work + cancel signal)
+    *
+    * Example:
+    *   Mutex mutex;
+    *   Timer timer;
+    *   auto result = kernel::wait_for_any({&mutex, &timer});
+    *   if (result.index == 0) {
+    *      // Mutex acquired
+    *   } else if (result.index == 1) {
+    *      // Timeout
+    *   }
+    */
+   Waitable::Result wait_for_any(std::span<Waitable* const> waitables);
+}  // namespace kernel
+
+
+/**
+ * @brief Core affinity mask
+ *
+ * Bit flags indicating which cores a thread can run on.
+ * Use bitwise OR to combine cores: Core0 | Core1
+ */
+struct CoreAffinity
+{
+   std::uint32_t mask;
+   constexpr explicit CoreAffinity(std::uint32_t m) : mask(m) {}
+   constexpr explicit operator std::uint32_t() const { return mask; }
+   constexpr CoreAffinity operator|(CoreAffinity rhs) const { return CoreAffinity{mask | rhs.mask}; }
+   constexpr CoreAffinity operator&(CoreAffinity rhs) const { return CoreAffinity{mask & rhs.mask}; }
+};
+// Predefined core masks
+static constexpr CoreAffinity Core0 = CoreAffinity{0x01};
+static constexpr CoreAffinity Core1 = CoreAffinity{0x02};
+static constexpr CoreAffinity Core2 = CoreAffinity{0x04};
+static constexpr CoreAffinity Core3 = CoreAffinity{0x08};
+static constexpr CoreAffinity AnyCore = CoreAffinity{0xFFFFFFFF};
+
+
+class Thread
+{
+public:
+   using Id = std::uint32_t;
+   using EntryFn = Function<void(), 32, HeapPolicy::NoHeap>;
+
+   struct Priority
+   {
+      std::uint8_t val;
+      constexpr Priority(std::uint8_t v) : val(v) {}     // Intentionally implicit
+      constexpr operator uint8_t() const { return val; } // Intentionally implicit
+   };
+
+   Thread(EntryFn&& entry, std::span<std::byte> stack, Priority priority, CoreAffinity affinity = AnyCore);
+   ~Thread();
+   Thread(Thread const&)            = delete;
+   Thread& operator=(Thread const&) = delete;
+
+   /**
+    * @brief Get thread ID
+    * @return Unique thread identifier
+    */
+   [[nodiscard]] Id get_id() const noexcept;
+
+   /**
+    * @brief Get thread priority
+    * @return Current effective priority (base + inherited)
+    */
+   [[nodiscard]] Priority priority() const noexcept;
+
+   /**
+    * @brief Wait for thread to exit
+    *
+    * Blocks until this thread terminates.
+    * Can only be called once per thread.
+    */
+   void join();
+
+
+   static std::size_t reserved_stack_size();
+
+private:
+   struct TaskControlBlock* tcb;
+};
+
+namespace this_thread
+{
+   /**
+    * @brief Get current thread
+    * @return Reference to the currently executing thread
+    *
+    * Only valid after kernel::start() has been called.
+    */
+   ::cortos::Thread& get();
+
+   /**
+    * @brief Get current thread ID
+    */
+   inline ::cortos::Thread::Id get_id() { return get().get_id(); };
+
+   /**
+    * @brief Get current CPU core ID
+    * @return Core ID (0-based)
+    */
+   [[nodiscard]] std::uint32_t get_current_core() noexcept;
+
+   /**
+    * @brief Exit current thread
+    *
+    * Marks current thread as Terminated. Thread never runs again.
+    * Scheduler switches to next ready thread.
+    *
+    * Note: If thread entry function returns, this is called automatically.
+    */
+   [[noreturn]] void thread_exit();
+}  // namespace this_thread
+
+
 
 
 /* ============================================================================
