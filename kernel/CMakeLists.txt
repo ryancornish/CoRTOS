@@ -8,10 +8,8 @@ target_include_directories(cortos_kernel PUBLIC
 
 target_compile_features(cortos_kernel PUBLIC cxx_std_23)
 
-# Kernel depends on port and time layers
 target_link_libraries(cortos_kernel PUBLIC
     cortos::port
-    cortos::time
 )
 
 # Alias

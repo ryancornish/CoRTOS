@@ -18,58 +18,74 @@
 
 #include "cortos/time_driver.hpp"
 #include <atomic>
+#include <array>
 
 namespace cortos
 {
 
-class PeriodicTickDriver : public ITimeDriver
+class PeriodicTickDriver final : public ITimeDriver
 {
 public:
-   /**
-    * @brief Construct a periodic tick driver
-    * @param tick_frequency_hz Tick frequency (e.g., 1000 for 1ms ticks)
-    * @param on_timer_tick Callback invoked when timer fires
-    * @param arg Callback arbitrary argument
-    */
-   explicit PeriodicTickDriver(uint32_t tick_frequency_hz, Callback on_timer_tick, void* arg = nullptr);
+   static constexpr uint32_t MAX_EVENTS = 16;
 
-   ~PeriodicTickDriver() override = default;
+   explicit PeriodicTickDriver(uint32_t tick_hz) noexcept : tick_hz(tick_hz) {}
 
-   PeriodicTickDriver(PeriodicTickDriver const&)            = delete;
-   PeriodicTickDriver& operator=(PeriodicTickDriver const&) = delete;
-   PeriodicTickDriver(PeriodicTickDriver&&)                 = delete;
-   PeriodicTickDriver& operator=(PeriodicTickDriver&&)      = delete;
+   [[nodiscard]] TimePoint now() const noexcept override;
 
-   // ITimeDriver interface
-   [[nodiscard]] TimePoint now() const override;
-   void schedule_wakeup(TimePoint wakeup_time) override;
-   void cancel_wakeup() override;
-   [[nodiscard]] Duration from_milliseconds(uint32_t ms) const override;
-   [[nodiscard]] Duration from_microseconds(uint32_t us) const override;
-   void start() override;
+   [[nodiscard]] Handle schedule_at(TimePoint tp, Callback cb, void* arg) noexcept override;
+   bool cancel(Handle h) noexcept override;
 
-   // Extended API for port/ISR integration
-
-   /**
-    * @brief Called from timer ISR context
-    *
-    * This is called by the port layer when the hardware timer fires.
-    */
-   void on_tick_interrupt();
-
-   /**
-    * @brief Get the configured tick frequency
-    * @return Tick frequency in Hz
-    */
-   [[nodiscard]] uint32_t get_tick_frequency_hz() const
+   [[nodiscard]] Duration from_milliseconds(uint32_t ms) const noexcept override
    {
-      return tick_frequency_hz;
+      // Duration is in port time units. For periodic this is typically ticks at tick_hz_.
+      // Round up to be safe for sleeps/timeouts.
+      uint64_t ticks = (uint64_t(ms) * tick_hz + 999) / 1000;
+      return Duration{ticks};
    }
 
+   [[nodiscard]] Duration from_microseconds(uint32_t us) const noexcept override
+   {
+      uint64_t ticks = (uint64_t(us) * tick_hz + 999'999) / 1'000'000;
+      return Duration{ticks};
+   }
+
+   void start() noexcept override;
+   void stop() noexcept override;
+
+   void on_timer_isr() noexcept override;
+
 private:
-   uint32_t tick_frequency_hz;
-   std::atomic<uint64_t> tick_count{0};
+   struct Slot
+   {
+      uint32_t id{0};          // 0 = free
+      uint64_t when{0};        // in port time units
+      Callback cb{nullptr};
+      void* arg{nullptr};
+   };
+
+   static void isr_trampoline(void* arg) noexcept
+   {
+      static_cast<PeriodicTickDriver*>(arg)->on_timer_isr();
+   }
+
+   // Finds and fires due callbacks. Must be ISR-safe.
+   void fire_due_isr(uint64_t now) noexcept;
+
+   // Critical section: IRQ save/restore (single-core safety).
+   // For SMP safety, the port’s timer IRQ should be routed to a single core
+   // OR these operations must be guarded by an SMP-safe lock (see note below).
+   struct IrqGuard
+   {
+      uint32_t s;
+      IrqGuard();
+      ~IrqGuard();
+   };
+
+   uint32_t tick_hz{0};
+   uint32_t next_id{1};
    bool started{false};
+
+   std::array<Slot, MAX_EVENTS> slots{};
 };
 
 } // namespace cortos

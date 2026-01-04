@@ -19,6 +19,8 @@
 #include <chrono>
 #include <atomic>
 #include <thread>
+#include <vector>
+#include <mutex>
 
 namespace cortos
 {
@@ -35,11 +37,10 @@ class SimulationTimeDriver : public ITimeDriver
 public:
    /**
     * @brief Construct a simulation time driver
+    * @param mode RealTime or Virtual
     * @param tick_frequency_hz Simulated tick frequency (e.g., 1000 = 1kHz)
-    * @param on_timer_tick Callback invoked when timer fires
-    * @param arg Callback arbitrary argument
     */
-   explicit SimulationTimeDriver(uint32_t tick_frequency_hz, Callback on_timer_tick, void* arg = nullptr);
+   explicit SimulationTimeDriver(uint32_t tick_frequency_hz);
 
    ~SimulationTimeDriver() override;
 
@@ -50,8 +51,8 @@ public:
 
    // ITimeDriver interface
    [[nodiscard]] TimePoint now() const override;
-   void schedule_wakeup(TimePoint wakeup_time) override;
-   void cancel_wakeup() override;
+   [[nodiscard]] Handle schedule_at(TimePoint tp, Callback cb, void* arg) noexcept override;
+   bool cancel(Handle h) noexcept override;
    [[nodiscard]] Duration from_milliseconds(uint32_t ms) const override;
    [[nodiscard]] Duration from_microseconds(uint32_t us) const override;
    void start() override;
@@ -61,24 +62,42 @@ public:
    /**
     * @brief Advance virtual time (Virtual mode only)
     * @param delta_ticks Number of ticks to advance
+    *
+    * Fires any callbacks scheduled before new time.
     */
    void advance_time(uint64_t delta_ticks) requires (Mode == TimeMode::Virtual);
 
    /**
     * @brief Advance to a specific time (Virtual mode only)
     * @param target_time Target time point
+    *
+    * Fires any callbacks scheduled before target time.
     */
    void advance_to(TimePoint target_time) requires (Mode == TimeMode::Virtual);
 
 private:
+   struct ScheduledCallback
+   {
+      uint32_t  id;
+      TimePoint when;
+      Callback  callback;
+      void*     arg;
+      bool      cancelled{false};
+   };
+
+   void run_timer_loop();
+   void check_and_fire_callbacks(TimePoint current_time);
+
    uint32_t tick_frequency_hz;
    std::chrono::steady_clock::time_point start_time;
    std::atomic<uint64_t> virtual_time{0};
-   std::atomic<uint64_t> next_wakeup{TimePoint::max().value};
    bool started{false};
    std::thread timer_thread;
 
-   void run_timer_loop();
+   // Scheduled callbacks
+   std::mutex callbacks_mutex;
+   std::vector<ScheduledCallback> scheduled_callbacks;
+   std::atomic<uint32_t> next_handle_id{1};
 };
 
 } // namespace cortos

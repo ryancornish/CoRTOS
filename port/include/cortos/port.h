@@ -38,6 +38,11 @@ typedef struct cortos_port_context cortos_port_context_t;
  */
 typedef void (*cortos_port_entry_t)(void* arg);
 
+/**
+ * @brief ISR signature
+ */
+typedef void (*cortos_port_isr_handler_t)(void* arg);
+
 /* ============================================================================
  * Core Identification (SMP Support)
  * ========================================================================= */
@@ -121,9 +126,15 @@ void cortos_port_yield(void);
  */
 void cortos_port_thread_exit(void) __attribute__((noreturn));
 
+void cortos_port_pend_reschedule(void);
+
 /* ============================================================================
  * Critical Sections (Interrupt Control)
  * ========================================================================= */
+
+uint32_t cortos_port_irq_save(void);
+
+void cortos_port_irq_restore(uint32_t state);
 
 /**
  * @brief Disable interrupts
@@ -209,6 +220,38 @@ void cortos_port_breakpoint(void);
  * @return Current stack pointer
  */
 void* cortos_port_get_stack_pointer(void);
+
+/* ============================================================================
+ * Time Driver Port
+ * ========================================================================= */
+
+/**
+ * @brief Monotonic time source
+ * Must be monotonic and ideally 64-bit in "native ticks" (driver decides units).
+ */
+uint64_t cortos_port_time_now(void);
+
+/**
+ * @brief One-shot alarm (tickless support)
+ * Arm a one-shot interrupt for the earliest deadline.
+ * Must be safe to call with interrupts disabled.
+ */
+void cortos_port_time_arm(uint64_t deadline);
+
+/**
+ * @brief Disable any pending one-shot.
+ */
+void cortos_port_time_disarm(void);
+
+/**
+ * @brief Interrupt enable/disable/acknowledge
+ */
+void     cortos_port_time_irq_enable(void);
+void     cortos_port_time_irq_disable(void);
+
+void cortos_port_time_register_isr_handler(cortos_port_isr_handler_t handler, void* arg);
+
+void cortos_port_send_time_ipi(uint32_t core_id); // optional
 
 #ifdef __cplusplus
 }

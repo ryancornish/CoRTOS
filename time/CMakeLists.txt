@@ -23,6 +23,11 @@ if(CORTOS_TIME_DRIVER STREQUAL "periodic")
       ${CMAKE_CURRENT_SOURCE_DIR}/periodic/include
    )
 
+   # Periodic driver needs port for interrupt control
+   target_link_libraries(cortos_time PUBLIC
+      cortos::port
+   )
+
 elseif(CORTOS_TIME_DRIVER STREQUAL "simulation")
    target_sources(cortos_time PRIVATE
       simulation/time_driver_simulation.cpp
@@ -31,7 +36,7 @@ elseif(CORTOS_TIME_DRIVER STREQUAL "simulation")
       ${CMAKE_CURRENT_SOURCE_DIR}/simulation/include
    )
 
-   # Simulation time driver uses std::thread
+   # Simulation time driver uses std::thread (no port dependency)
    find_package(Threads REQUIRED)
    target_link_libraries(cortos_time PUBLIC Threads::Threads)
 

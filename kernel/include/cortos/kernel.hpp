@@ -16,6 +16,10 @@
 namespace cortos
 {
 
+namespace config
+{
+   static constexpr std::size_t MAX_WAIT_NODES = 8;
+}
 
 /* ============================================================================
  * Function - Type-Erased Callable with Configurable Storage

@@ -4,57 +4,92 @@
  */
 
 #include "cortos/time_driver_periodic.hpp"
+#include "cortos/port.h"
+
 #include <cassert>
 
 namespace cortos
 {
 
-PeriodicTickDriver::PeriodicTickDriver(uint32_t tick_frequency_hz, Callback on_timer_tick, void* arg)
-   : ITimeDriver(on_timer_tick, arg), tick_frequency_hz(tick_frequency_hz) {}
-
-TimePoint PeriodicTickDriver::now() const
+[[nodiscard]] TimePoint PeriodicTickDriver::now() const noexcept
 {
-   return TimePoint{tick_count.load(std::memory_order_acquire)};
+   return TimePoint{cortos_port_time_now()};
 }
 
-void PeriodicTickDriver::schedule_wakeup(TimePoint /*wakeup_time*/)
+
+ITimeDriver::Handle PeriodicTickDriver::schedule_at(TimePoint tp, Callback cb, void* arg) noexcept
 {
-   // In periodic mode, we don't configure the timer - it fires at fixed intervals
-   // The kernel will check on each tick if any threads need waking
+   if (!cb) return {};
+
+   IrqGuard guard;
+
+   // Find free slot
+   for (auto& slot : slots) {
+      if (slot.id == 0) {
+         uint32_t id = next_id++;
+         if (id == 0) id = next_id++; // avoid 0
+         slot.id = id;
+         slot.when = tp.value;
+         slot.cb = cb;
+         slot.arg = arg;
+         return Handle{id};
+      }
+   }
+   return {}; // out of slots
 }
 
-void PeriodicTickDriver::cancel_wakeup()
+bool PeriodicTickDriver::cancel(Handle h) noexcept
 {
-   // No-op in periodic mode
+   if (h.id == 0) return false;
+
+   IrqGuard g;
+
+   for (auto& slot : slots) {
+      if (slot.id == h.id) {
+         slot = Slot{};
+         return true;
+      }
+   }
+   return false;
 }
 
-Duration PeriodicTickDriver::from_milliseconds(uint32_t ms) const
+void PeriodicTickDriver::start() noexcept
 {
-   uint64_t ticks = (static_cast<uint64_t>(ms) * tick_frequency_hz) / 1'000;
-   return Duration{ticks};
-}
-
-Duration PeriodicTickDriver::from_microseconds(uint32_t us) const
-{
-   uint64_t ticks = (static_cast<uint64_t>(us) * tick_frequency_hz) / 1'000'000;
-   return Duration{ticks};
-}
-
-void PeriodicTickDriver::start()
-{
-   // Platform-specific: enable timer interrupt
-   // This would call into port layer to configure hardware timer
-   // For now, assume it's done externally
+   // Register handler before enabling IRQ
+   cortos_port_time_register_isr_handler(&isr_trampoline, this);
+   cortos_port_time_irq_enable();
    started = true;
 }
 
-void PeriodicTickDriver::on_tick_interrupt()
+void PeriodicTickDriver::stop() noexcept
 {
-   tick_count.fetch_add(1, std::memory_order_release);
+   cortos_port_time_irq_disable();
+   started = false;
+}
 
-   if (on_timer_tick) {
-      on_timer_tick(arg);
+void PeriodicTickDriver::on_timer_isr() noexcept {
+   // In periodic mode, port is expected to deliver this at fixed tick rate.
+   // Now comes from port and is already advanced appropriately.
+   uint64_t now = cortos_port_time_now();
+   fire_due_isr(now);
+   // No need to arm one-shot in periodic mode.
+}
+
+void PeriodicTickDriver::fire_due_isr(uint64_t now) noexcept {
+   // ISR-safe: no heap, no locks (assuming IRQ context is exclusive for this driver).
+   // If you allow schedule_at/cancel concurrently from other cores in SMP,
+   // you must ensure those operations synchronize (see SMP note).
+   for (auto& slot : slots) {
+      if (slot.id != 0 && slot.when <= now) {
+         auto callback = slot.cb;
+         auto arg = slot.arg;
+         slot = Slot{}; // free slot before invoking callback (prevents reentrancy issues)
+         callback(arg);
+      }
    }
 }
+
+PeriodicTickDriver::IrqGuard::IrqGuard() : s(cortos_port_irq_save()) {}
+PeriodicTickDriver::IrqGuard::~IrqGuard() { cortos_port_irq_restore(s); }
 
 } // namespace cortos
