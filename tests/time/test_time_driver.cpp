@@ -40,7 +40,7 @@ TEST(TimeTypesTest, DurationArithmetic)
    Duration d3 = d1 + d2;
    EXPECT_EQ(d3.value, 80);
 
-   Duration diff = t2 - t1;
+   Duration diff = duration_between(t1, t2);
    EXPECT_EQ(diff.value, 50);
 }
 

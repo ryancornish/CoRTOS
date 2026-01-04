@@ -7,6 +7,7 @@ target_link_libraries(test_time_driver_simulation PRIVATE
    gtest_main
    gtest
    cortos::time  # For ITimeDriver interface
+   cortos::port
 )
 
 # Add simulation driver source directly (not linked through cortos::time)
@@ -30,7 +31,9 @@ add_test(NAME test_time_driver_simulation COMMAND test_time_driver_simulation)
 add_executable(test_time_driver_periodic test_time_driver_periodic.cpp)
 target_link_libraries(test_time_driver_periodic PRIVATE
    gtest_main
+   gtest
    cortos::time  # For ITimeDriver interface
+   cortos::port
 )
 
 # Add periodic driver source directly

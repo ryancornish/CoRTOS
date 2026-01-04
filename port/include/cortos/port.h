@@ -227,7 +227,7 @@ void* cortos_port_get_stack_pointer(void);
 
 /**
  * @brief Monotonic time source
- * Must be monotonic and ideally 64-bit in "native ticks" (driver decides units).
+ * Must be monotonic 64-bit in "port ticks" (opaque unit for whole system).
  */
 uint64_t cortos_port_time_now(void);
 

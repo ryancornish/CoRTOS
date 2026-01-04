@@ -17,18 +17,16 @@
 #define CORTOS_TIME_DRIVER_PERIODIC_HPP
 
 #include "cortos/time_driver.hpp"
-#include <atomic>
 #include <array>
 
 namespace cortos
 {
 
-class PeriodicTickDriver final : public ITimeDriver
-{
+class PeriodicTickDriver final : public ITimeDriver {
 public:
-   static constexpr uint32_t MAX_EVENTS = 16;
+   static constexpr uint32_t MAX_SCHEDULED_CALLBACKS = 16;
 
-   explicit PeriodicTickDriver(uint32_t tick_hz) noexcept : tick_hz(tick_hz) {}
+   explicit PeriodicTickDriver(uint32_t tick_frequency_hz) noexcept : tick_frequency_hz(tick_frequency_hz) {}
 
    [[nodiscard]] TimePoint now() const noexcept override;
 
@@ -37,15 +35,14 @@ public:
 
    [[nodiscard]] Duration from_milliseconds(uint32_t ms) const noexcept override
    {
-      // Duration is in port time units. For periodic this is typically ticks at tick_hz_.
-      // Round up to be safe for sleeps/timeouts.
-      uint64_t ticks = (uint64_t(ms) * tick_hz + 999) / 1000;
+      // Round up to avoid undersleep for small values
+      uint64_t const ticks = (static_cast<uint64_t>(ms) * tick_frequency_hz + 999) / 1000;
       return Duration{ticks};
    }
 
    [[nodiscard]] Duration from_microseconds(uint32_t us) const noexcept override
    {
-      uint64_t ticks = (uint64_t(us) * tick_hz + 999'999) / 1'000'000;
+      uint64_t const ticks = (static_cast<uint64_t>(us) * tick_frequency_hz + 999'999) / 1'000'000;
       return Duration{ticks};
    }
 
@@ -57,8 +54,8 @@ public:
 private:
    struct Slot
    {
-      uint32_t id{0};          // 0 = free
-      uint64_t when{0};        // in port time units
+      uint32_t id{0};        // 0 = free
+      uint64_t when{0};      // absolute deadline in port ticks
       Callback cb{nullptr};
       void* arg{nullptr};
    };
@@ -68,24 +65,20 @@ private:
       static_cast<PeriodicTickDriver*>(arg)->on_timer_isr();
    }
 
-   // Finds and fires due callbacks. Must be ISR-safe.
-   void fire_due_isr(uint64_t now) noexcept;
-
-   // Critical section: IRQ save/restore (single-core safety).
-   // For SMP safety, the port’s timer IRQ should be routed to a single core
-   // OR these operations must be guarded by an SMP-safe lock (see note below).
+   // Only mutate slots with interrupts masked on the time core.
    struct IrqGuard
    {
-      uint32_t s;
+      uint32_t slot;
       IrqGuard();
       ~IrqGuard();
    };
 
-   uint32_t tick_hz{0};
+   void fire_due_isr(uint64_t now_ticks) noexcept;
+
+   uint32_t tick_frequency_hz{0};
    uint32_t next_id{1};
    bool started{false};
-
-   std::array<Slot, MAX_EVENTS> slots{};
+   std::array<Slot, MAX_SCHEDULED_CALLBACKS> slots{};
 };
 
 } // namespace cortos

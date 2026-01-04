@@ -4,60 +4,38 @@
  */
 
 #include "cortos/time_driver_simulation.hpp"
-#include <algorithm>
+#include "cortos/port.h"
+
 #include <cassert>
+
+// Provided by the linux backend
+extern "C" void cortos_port_time_advance_to(uint64_t t);
 
 namespace cortos
 {
 
 template<TimeMode Mode>
-SimulationTimeDriver<Mode>::SimulationTimeDriver(uint32_t tick_frequency_hz) : tick_frequency_hz(tick_frequency_hz)
+TimePoint SimulationTimeDriver<Mode>::now() const noexcept
 {
-   if constexpr (Mode == TimeMode::RealTime) {
-      start_time = std::chrono::steady_clock::now();
-   }
+   return TimePoint{cortos_port_time_now()};
 }
 
-template<TimeMode Mode>
-SimulationTimeDriver<Mode>::~SimulationTimeDriver()
-{
-   if (timer_thread.joinable())
-   {
-      timer_thread.join();
-   }
-}
-
-template<TimeMode Mode>
-TimePoint SimulationTimeDriver<Mode>::now() const
-{
-   if constexpr (Mode == TimeMode::RealTime) {
-      // Calculate elapsed time since start
-      auto elapsed = std::chrono::steady_clock::now() - start_time;
-      auto us = std::chrono::duration_cast<std::chrono::microseconds>(elapsed).count();
-
-      // Convert to ticks
-      uint64_t ticks = (static_cast<uint64_t>(us) * tick_frequency_hz) / 1'000'000;
-      return TimePoint{ticks};
-   } else {
-      // Virtual mode: return manually-advanced time
-      return TimePoint{virtual_time.load(std::memory_order_acquire)};
-   }
-}
 
 template<TimeMode Mode>
 ITimeDriver::Handle SimulationTimeDriver<Mode>::schedule_at(TimePoint tp, Callback cb, void* arg) noexcept
 {
-   std::lock_guard lock(callbacks_mutex);
+   if (!cb) return {};
 
-   uint32_t id = next_handle_id.fetch_add(1, std::memory_order_relaxed);
+   uint32_t id = next_id.fetch_add(1, std::memory_order_relaxed);
+   if (id == 0) id = next_id.fetch_add(1, std::memory_order_relaxed);
 
-   scheduled_callbacks.push_back(ScheduledCallback{
-      .id = id,
-      .when = tp,
-      .callback = cb,
-      .arg = arg,
-      .cancelled = false
-   });
+   std::lock_guard lk(m);
+   events.push_back(Event{.id=id, .when=tp.value, .cb=cb, .arg=arg, .cancelled=false});
+
+   // Tickless-readiness: if the port supports arm/disarm, we can arm the earliest deadline.
+   // In a pure periodic simulation port, this can be a no-op.
+   // We'll keep it simple here: arm the requested deadline (port may take min internally).
+   cortos_port_time_arm(tp.value);
 
    return Handle{id};
 }
@@ -67,103 +45,106 @@ bool SimulationTimeDriver<Mode>::cancel(Handle h) noexcept
 {
    if (h.id == 0) return false;
 
-   std::lock_guard lock(callbacks_mutex);
-
-   for (auto& cb : scheduled_callbacks) {
-      if (cb.id == h.id && !cb.cancelled) {
-         cb.cancelled = true;
+   std::lock_guard lk(m);
+   for (auto& event : events) {
+      if (event.id == h.id && !event.cancelled) {
+         event.cancelled = true;
          return true;
       }
    }
-
-   return false;  // Already fired or never existed
+   return false;
 }
 
 template<TimeMode Mode>
-Duration SimulationTimeDriver<Mode>::from_milliseconds(uint32_t ms) const
+void SimulationTimeDriver<Mode>::start() noexcept
 {
-   uint64_t ticks = (static_cast<uint64_t>(ms) * tick_frequency_hz) / 1'000;
-   return Duration{ticks};
-}
+   bool expected = false;
+   if (!running.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) return;
 
-template<TimeMode Mode>
-Duration SimulationTimeDriver<Mode>::from_microseconds(uint32_t us) const
-{
-   uint64_t ticks = (static_cast<uint64_t>(us) * tick_frequency_hz) / 1'000'000;
-   return Duration{ticks};
-}
-
-template<TimeMode Mode>
-void SimulationTimeDriver<Mode>::start()
-{
-   started = true;
+   cortos_port_time_register_isr_handler(&isr_trampoline, this);
+   cortos_port_time_irq_enable();
 
    if constexpr (Mode == TimeMode::RealTime) {
-      // Start the background timer thread
-      timer_thread = std::thread([this]()
-      {
-         run_timer_loop();
-      });
+      rt_thread = std::thread([this]{ realtime_thread_main(); });
    }
 }
 
 template<TimeMode Mode>
-void SimulationTimeDriver<Mode>::advance_time(uint64_t delta_ticks) requires (Mode == TimeMode::Virtual)
-{
-   uint64_t old_time = virtual_time.fetch_add(delta_ticks, std::memory_order_release);
-   uint64_t new_time = old_time + delta_ticks;
+void SimulationTimeDriver<Mode>::stop() noexcept {
+   bool was = running.exchange(false, std::memory_order_acq_rel);
+   if (!was) return;
 
-   check_and_fire_callbacks(TimePoint{new_time});
-}
+   cortos_port_time_irq_disable();
 
-template<TimeMode Mode>
-void SimulationTimeDriver<Mode>::advance_to(TimePoint target_time) requires (Mode == TimeMode::Virtual)
-{
-   uint64_t current = virtual_time.load(std::memory_order_acquire);
-   if (target_time.value > current) {
-      advance_time(target_time.value - current);
+   if constexpr (Mode == TimeMode::RealTime) {
+      if (rt_thread.joinable()) rt_thread.join();
    }
 }
 
 template<TimeMode Mode>
-void SimulationTimeDriver<Mode>::run_timer_loop()
-{
-   // In RealTime mode, periodically check for scheduled callbacks
-   while (started) {
-      auto current = now();
-      check_and_fire_callbacks(current);
+void SimulationTimeDriver<Mode>::on_timer_isr() noexcept {
+   const uint64_t now_ticks = cortos_port_time_now();
 
-      // Sleep for a short interval (simulate tick period)
-      std::this_thread::sleep_for(std::chrono::microseconds(1'000'000 / tick_frequency_hz));
-   }
-}
-
-template<TimeMode Mode>
-void SimulationTimeDriver<Mode>::check_and_fire_callbacks(TimePoint current_time)
-{
-   std::lock_guard lock(callbacks_mutex);
-
-   // Find all callbacks that should fire
-   for (auto it = scheduled_callbacks.begin(); it != scheduled_callbacks.end(); ) {
-      if (!it->cancelled && current_time >= it->when) {
-         // Fire callback
-         if (it->callback) {
-            it->callback(it->arg);
+   std::vector<Event> due;
+   {
+      std::lock_guard lk(m);
+      for (auto& event : events) {
+         if (event.id != 0 && !event.cancelled && event.when <= now_ticks) {
+            due.push_back(event);
+            event.cancelled = true;
          }
+      }
+      // Optional: compact cancelled events periodically.
+   }
 
-         // Remove from list
-         it = scheduled_callbacks.erase(it);
-      } else {
-         ++it;
+   for (auto& event : due) {
+      event.cb(event.arg);
+   }
+
+   // Tickless-readiness: re-arm next earliest pending event if your port uses it.
+   // We can compute min non-cancelled 'when' and call time_arm(min).
+   uint64_t next = UINT64_MAX;
+   {
+      std::lock_guard lk(m);
+      for (auto const& event : events) {
+         if (event.id != 0 && !event.cancelled && event.when < next) next = event.when;
       }
    }
+   if (next == UINT64_MAX) {
+      cortos_port_time_disarm();
+   } else {
+      cortos_port_time_arm(next);
+   }
+}
 
-   // Clean up cancelled callbacks periodically
-   scheduled_callbacks.erase(
-      std::remove_if(scheduled_callbacks.begin(), scheduled_callbacks.end(),
-         [](const ScheduledCallback& cb) { return cb.cancelled; }),
-      scheduled_callbacks.end()
-   );
+template<>
+void SimulationTimeDriver<TimeMode::Virtual>::advance_to(TimePoint tp)
+{
+   // Advance the PORT time (Option 1), then pump ISR once.
+   cortos_port_time_advance_to(tp.value);
+   on_timer_isr();
+}
+
+template<>
+void SimulationTimeDriver<TimeMode::Virtual>::advance_by(Duration d)
+{
+   const uint64_t cur = cortos_port_time_now();
+   advance_to(TimePoint{cur + d.value});
+}
+
+template<>
+void SimulationTimeDriver<TimeMode::RealTime>::realtime_thread_main()
+{
+   using namespace std::chrono_literals;
+
+   // Simple: poll and pump. You can optimize to sleep until next armed deadline later.
+   while (running.load(std::memory_order_acquire)) {
+      std::this_thread::sleep_for(1ms);
+      // In RealTime mode, your PORT time_now() should track steady_clock.
+      // The port timer IRQ can be “delivered” by the port itself; but since we have no
+      // backend yet, we pump via on_timer_isr() here.
+      on_timer_isr();
+   }
 }
 
 // Explicit instantiations

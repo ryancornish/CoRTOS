@@ -32,72 +32,64 @@ enum class TimeMode
 };
 
 template<TimeMode Mode>
-class SimulationTimeDriver : public ITimeDriver
+class SimulationTimeDriver final : public ITimeDriver
 {
 public:
-   /**
-    * @brief Construct a simulation time driver
-    * @param mode RealTime or Virtual
-    * @param tick_frequency_hz Simulated tick frequency (e.g., 1000 = 1kHz)
-    */
-   explicit SimulationTimeDriver(uint32_t tick_frequency_hz);
+   explicit SimulationTimeDriver(uint32_t tick_frequency_hz) noexcept : tick_frequency_hz(tick_frequency_hz) {}
 
-   ~SimulationTimeDriver() override;
+   ~SimulationTimeDriver() override { stop(); }
 
-   SimulationTimeDriver(SimulationTimeDriver const&)            = delete;
-   SimulationTimeDriver& operator=(SimulationTimeDriver const&) = delete;
-   SimulationTimeDriver(SimulationTimeDriver&&)                 = delete;
-   SimulationTimeDriver& operator=(SimulationTimeDriver&&)      = delete;
+   [[nodiscard]] TimePoint now() const noexcept override;
 
-   // ITimeDriver interface
-   [[nodiscard]] TimePoint now() const override;
    [[nodiscard]] Handle schedule_at(TimePoint tp, Callback cb, void* arg) noexcept override;
    bool cancel(Handle h) noexcept override;
-   [[nodiscard]] Duration from_milliseconds(uint32_t ms) const override;
-   [[nodiscard]] Duration from_microseconds(uint32_t us) const override;
-   void start() override;
 
-   // Extended API for tests/simulation
+   [[nodiscard]] Duration from_milliseconds(uint32_t ms) const noexcept override
+   {
+      const uint64_t ticks = (static_cast<uint64_t>(ms) * tick_frequency_hz + 999) / 1000;
+      return Duration{ticks};
+   }
 
-   /**
-    * @brief Advance virtual time (Virtual mode only)
-    * @param delta_ticks Number of ticks to advance
-    *
-    * Fires any callbacks scheduled before new time.
-    */
-   void advance_time(uint64_t delta_ticks) requires (Mode == TimeMode::Virtual);
+   [[nodiscard]] Duration from_microseconds(uint32_t us) const noexcept override
+   {
+      const uint64_t ticks = (static_cast<uint64_t>(us) * tick_frequency_hz + 999'999) / 1'000'000;
+      return Duration{ticks};
+   }
 
-   /**
-    * @brief Advance to a specific time (Virtual mode only)
-    * @param target_time Target time point
-    *
-    * Fires any callbacks scheduled before target time.
-    */
-   void advance_to(TimePoint target_time) requires (Mode == TimeMode::Virtual);
+   void start() noexcept override;
+   void stop() noexcept override;
+
+   void on_timer_isr() noexcept override;
+
+   // Virtual-only controls
+   void advance_to(TimePoint tp) requires (Mode == TimeMode::Virtual);
+   void advance_by(Duration d)  requires (Mode == TimeMode::Virtual);
 
 private:
-   struct ScheduledCallback
+   struct Event
    {
-      uint32_t  id;
-      TimePoint when;
-      Callback  callback;
-      void*     arg;
-      bool      cancelled{false};
+      uint32_t id{0};
+      uint64_t when{0};
+      Callback cb{nullptr};
+      void* arg{nullptr};
+      bool cancelled{false};
    };
 
-   void run_timer_loop();
-   void check_and_fire_callbacks(TimePoint current_time);
+   static void isr_trampoline(void* arg) noexcept
+   {
+      static_cast<SimulationTimeDriver*>(arg)->on_timer_isr();
+   }
 
-   uint32_t tick_frequency_hz;
-   std::chrono::steady_clock::time_point start_time;
-   std::atomic<uint64_t> virtual_time{0};
-   bool started{false};
-   std::thread timer_thread;
+   void realtime_thread_main() requires (Mode == TimeMode::RealTime);
 
-   // Scheduled callbacks
-   std::mutex callbacks_mutex;
-   std::vector<ScheduledCallback> scheduled_callbacks;
-   std::atomic<uint32_t> next_handle_id{1};
+   uint32_t tick_frequency_hz{0};
+   std::atomic<uint32_t> next_id{1};
+
+   std::mutex m;
+   std::vector<Event> events;
+
+   std::atomic<bool> running{false};
+   std::thread rt_thread;
 };
 
 } // namespace cortos
