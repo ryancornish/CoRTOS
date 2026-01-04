@@ -78,6 +78,7 @@ struct Duration
 
    constexpr bool operator==(Duration rhs) const { return value == rhs.value; }
    constexpr bool operator< (Duration rhs) const { return value <  rhs.value; }
+   constexpr bool operator> (Duration rhs) const { return value >  rhs.value; }
 };
 
 constexpr TimePoint operator+(TimePoint tp, Duration d)
