@@ -90,6 +90,10 @@ private:
 
    std::atomic<bool> running{false};
    std::thread rt_thread;
+
+   std::atomic<uint64_t> virtual_now{0};
+   std::chrono::steady_clock::time_point rt_epoch;
+   std::atomic<bool> started{false};
 };
 
 } // namespace cortos

@@ -1,15 +1,7 @@
-/**
- * @file time_driver_simulation.cpp
- * @brief Simulation TimeDriver implementation
- */
-
 #include "cortos/time_driver_simulation.hpp"
-#include "cortos/port.h"
 
-#include <cassert>
-
-// Provided by the linux backend
-extern "C" void cortos_port_time_advance_to(uint64_t t);
+#include <algorithm>
+#include <chrono>
 
 namespace cortos
 {
@@ -17,9 +9,23 @@ namespace cortos
 template<TimeMode Mode>
 TimePoint SimulationTimeDriver<Mode>::now() const noexcept
 {
-   return TimePoint{cortos_port_time_now()};
-}
+   if constexpr (Mode == TimeMode::Virtual) {
+      return TimePoint{virtual_now.load(std::memory_order_relaxed)};
+   } else {
+      // Pre-start: treat as 0 to satisfy SingletonAccess test.
+      if (!started.load(std::memory_order_acquire)) {
+         return TimePoint{0};
+      }
+      auto elapsed = std::chrono::steady_clock::now() - rt_epoch;
+      auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(elapsed).count();
+      if (ns < 0) ns = 0;
 
+      // Convert real time to "ticks" in driver units
+      // ticks = ns * tick_hz / 1e9
+      uint64_t ticks = (static_cast<uint64_t>(ns) * tick_frequency_hz) / 1'000'000'000ULL;
+      return TimePoint{ticks};
+   }
+}
 
 template<TimeMode Mode>
 ITimeDriver::Handle SimulationTimeDriver<Mode>::schedule_at(TimePoint tp, Callback cb, void* arg) noexcept
@@ -29,14 +35,12 @@ ITimeDriver::Handle SimulationTimeDriver<Mode>::schedule_at(TimePoint tp, Callba
    uint32_t id = next_id.fetch_add(1, std::memory_order_relaxed);
    if (id == 0) id = next_id.fetch_add(1, std::memory_order_relaxed);
 
-   std::lock_guard lk(m);
-   events.push_back(Event{.id=id, .when=tp.value, .cb=cb, .arg=arg, .cancelled=false});
+   {
+      std::lock_guard lk(m);
+      events.push_back(Event{.id=id, .when=tp.value, .cb=cb, .arg=arg, .cancelled=false});
+   }
 
-   // Tickless-readiness: if the port supports arm/disarm, we can arm the earliest deadline.
-   // In a pure periodic simulation port, this can be a no-op.
-   // We'll keep it simple here: arm the requested deadline (port may take min internally).
-   cortos_port_time_arm(tp.value);
-
+   // Don’t run callbacks inline; they run when time advances / pump thread ticks.
    return Handle{id};
 }
 
@@ -46,9 +50,9 @@ bool SimulationTimeDriver<Mode>::cancel(Handle h) noexcept
    if (h.id == 0) return false;
 
    std::lock_guard lk(m);
-   for (auto& event : events) {
-      if (event.id == h.id && !event.cancelled) {
-         event.cancelled = true;
+   for (auto& e : events) {
+      if (e.id == h.id && !e.cancelled) {
+         e.cancelled = true;
          return true;
       }
    }
@@ -58,77 +62,69 @@ bool SimulationTimeDriver<Mode>::cancel(Handle h) noexcept
 template<TimeMode Mode>
 void SimulationTimeDriver<Mode>::start() noexcept
 {
-   bool expected = false;
-   if (!running.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) return;
-
-   cortos_port_time_register_isr_handler(&isr_trampoline, this);
-   cortos_port_time_irq_enable();
+   // allow multiple start/stop cycles
+   started.store(true, std::memory_order_release);
 
    if constexpr (Mode == TimeMode::RealTime) {
-      rt_thread = std::thread([this]{ realtime_thread_main(); });
+      bool expected = false;
+      if (!running.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
+         return; // already running
+      }
+
+      rt_epoch = std::chrono::steady_clock::now();
+
+      rt_thread = std::thread([this] { realtime_thread_main(); });
    }
 }
 
 template<TimeMode Mode>
-void SimulationTimeDriver<Mode>::stop() noexcept {
-   bool was = running.exchange(false, std::memory_order_acq_rel);
-   if (!was) return;
-
-   cortos_port_time_irq_disable();
-
+void SimulationTimeDriver<Mode>::stop() noexcept
+{
    if constexpr (Mode == TimeMode::RealTime) {
+      bool was = running.exchange(false, std::memory_order_acq_rel);
+      if (!was) return;
       if (rt_thread.joinable()) rt_thread.join();
    }
 }
 
 template<TimeMode Mode>
-void SimulationTimeDriver<Mode>::on_timer_isr() noexcept {
-   const uint64_t now_ticks = cortos_port_time_now();
+void SimulationTimeDriver<Mode>::on_timer_isr() noexcept
+{
+   const uint64_t now_ticks = now().value;
 
    std::vector<Event> due;
    {
       std::lock_guard lk(m);
-      for (auto& event : events) {
-         if (event.id != 0 && !event.cancelled && event.when <= now_ticks) {
-            due.push_back(event);
-            event.cancelled = true;
+      for (auto& e : events) {
+         if (e.id != 0 && !e.cancelled && e.when <= now_ticks) {
+            due.push_back(e);
+            e.cancelled = true; // consume
          }
       }
-      // Optional: compact cancelled events periodically.
+      // Optional: compact cancelled events periodically (not needed for tests)
    }
 
-   for (auto& event : due) {
-      event.cb(event.arg);
-   }
-
-   // Tickless-readiness: re-arm next earliest pending event if your port uses it.
-   // We can compute min non-cancelled 'when' and call time_arm(min).
-   uint64_t next = UINT64_MAX;
-   {
-      std::lock_guard lk(m);
-      for (auto const& event : events) {
-         if (event.id != 0 && !event.cancelled && event.when < next) next = event.when;
-      }
-   }
-   if (next == UINT64_MAX) {
-      cortos_port_time_disarm();
-   } else {
-      cortos_port_time_arm(next);
+   for (auto& e : due) {
+      e.cb(e.arg);
    }
 }
 
 template<>
 void SimulationTimeDriver<TimeMode::Virtual>::advance_to(TimePoint tp)
 {
-   // Advance the PORT time (Option 1), then pump ISR once.
-   cortos_port_time_advance_to(tp.value);
+   // Clamp monotonic
+   uint64_t cur = virtual_now.load(std::memory_order_relaxed);
+   uint64_t tgt = tp.value;
+   if (tgt < cur) tgt = cur;
+
+   virtual_now.store(tgt, std::memory_order_release);
    on_timer_isr();
 }
 
 template<>
 void SimulationTimeDriver<TimeMode::Virtual>::advance_by(Duration d)
 {
-   const uint64_t cur = cortos_port_time_now();
+   uint64_t cur = virtual_now.load(std::memory_order_relaxed);
    advance_to(TimePoint{cur + d.value});
 }
 
@@ -137,12 +133,9 @@ void SimulationTimeDriver<TimeMode::RealTime>::realtime_thread_main()
 {
    using namespace std::chrono_literals;
 
-   // Simple: poll and pump. You can optimize to sleep until next armed deadline later.
+   // Simple poll. Good enough for Linux tests; can later sleep-until-next-deadline.
    while (running.load(std::memory_order_acquire)) {
       std::this_thread::sleep_for(1ms);
-      // In RealTime mode, your PORT time_now() should track steady_clock.
-      // The port timer IRQ can be “delivered” by the port itself; but since we have no
-      // backend yet, we pump via on_timer_isr() here.
       on_timer_isr();
    }
 }
@@ -150,6 +143,5 @@ void SimulationTimeDriver<TimeMode::RealTime>::realtime_thread_main()
 // Explicit instantiations
 template class SimulationTimeDriver<TimeMode::RealTime>;
 template class SimulationTimeDriver<TimeMode::Virtual>;
-
 
 } // namespace cortos

@@ -7,6 +7,8 @@
 
 #include "cortos/time_driver.hpp"
 #include "cortos/time_driver_periodic.hpp"
+#include "cortos/port.h"
+
 #include <gtest/gtest.h>
 #include <atomic>
 
@@ -19,7 +21,11 @@ using namespace cortos;
 class PeriodicTimeDriverTest : public ::testing::Test
 {
 protected:
-   void SetUp() override {}
+   void SetUp() override
+   {
+      cortos_port_time_reset(0);
+   }
+
    void TearDown() override
    {
       ITimeDriver::set_instance(nullptr);

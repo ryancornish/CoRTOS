@@ -188,11 +188,10 @@ void* cortos_port_get_tls_pointer(void);
 
 /**
  * @brief Initialize the port layer
- * @param tick_hz Tick frequency in Hz (e.g., 1000 for 1ms tick)
  *
  * Called once at system startup before any threads are created.
  */
-void cortos_port_init(uint32_t tick_hz);
+void cortos_port_init(void);
 
 /* ============================================================================
  * Idle Hook
@@ -226,14 +225,44 @@ void* cortos_port_get_stack_pointer(void);
  * ========================================================================= */
 
 /**
+ * @brief Configure the underlying timer peripheral(s) used for OS time.
+ *
+ * If tick_hz > 0:
+ *   Configure a periodic timer interrupt at tick_hz.
+ *   The port must deliver the registered ISR handler once per tick IRQ.
+ *   The port ISR wrapper must call cortos_port_time_tick() exactly once per tick.
+ *
+ * If tick_hz == 0:
+ *   Configure tickless one-shot mode.
+ *   The driver will call cortos_port_time_arm()/disarm() to schedule deadlines.
+ *   The port must deliver the registered ISR handler when time_now() >= armed deadline.
+ *
+ * Called by the selected TimeDriver during start().
+ */
+void cortos_port_time_setup(uint32_t tick_hz);
+
+/**
+ * @brief Periodic tick hook (periodic driver support).
+ *
+ * Must be called exactly once per periodic tick IRQ (tick_hz > 0),
+ * from the port's timer ISR wrapper, with interrupts disabled.
+ *
+ * In tickless mode (tick_hz == 0), this function may be a no-op.
+ */
+void cortos_port_time_tick(void);
+
+/**
  * @brief Monotonic time source
  * Must be monotonic 64-bit in "port ticks" (opaque unit for whole system).
  */
 uint64_t cortos_port_time_now(void);
 
 /**
- * @brief One-shot alarm (tickless support)
- * Arm a one-shot interrupt for the earliest deadline.
+ * @brief Arm a one-shot interrupt for the given absolute deadline.
+ *
+ * If called multiple times before the interrupt fires, the port must ensure
+ * the earliest deadline is honored (i.e., effectively min(current, deadline)).
+ *
  * Must be safe to call with interrupts disabled.
  */
 void cortos_port_time_arm(uint64_t deadline);
@@ -244,14 +273,34 @@ void cortos_port_time_arm(uint64_t deadline);
 void cortos_port_time_disarm(void);
 
 /**
- * @brief Interrupt enable/disable/acknowledge
+ * @brief Interrupt enable/disable
  */
 void     cortos_port_time_irq_enable(void);
 void     cortos_port_time_irq_disable(void);
 
 void cortos_port_time_register_isr_handler(cortos_port_isr_handler_t handler, void* arg);
 
-void cortos_port_send_time_ipi(uint32_t core_id); // optional
+/**
+ * @brief Optional: notify the time core that there is pending time work.
+ *
+ * If unimplemented on a platform, it may be an empty function.
+ * Used for SMP policy where non-time cores enqueue requests for the time core.
+ */
+void cortos_port_send_time_ipi(uint32_t core_id);
+
+/**
+ * @brief Reset any internal global time tracking state.
+ *
+ * OPTIONAL.
+ *
+ * On embedded targets this is typically meaningless or implemented
+ * implicitly by a system reset.
+ *
+ * Intended primarily for simulation and unit testing to provide
+ * deterministic startup conditions.
+ */
+void cortos_port_time_reset(uint64_t time);
+
 
 #ifdef __cplusplus
 }

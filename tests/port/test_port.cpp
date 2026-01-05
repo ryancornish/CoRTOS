@@ -19,7 +19,7 @@ class PortTest : public ::testing::Test
 protected:
    void SetUp() override
    {
-      cortos_port_init(1000);  // 1kHz tick rate
+      cortos_port_init();
    }
 };
 

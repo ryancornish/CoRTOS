@@ -70,20 +70,29 @@ void PeriodicTickDriver::start() noexcept
    if (started) return;
 
    cortos_port_time_register_isr_handler(&isr_trampoline, this);
+
+   assert(tick_frequency_hz > 0 && "tick_freq of 0 indicates tickless mode, which this driver is NOT!");
+
+   cortos_port_time_setup(tick_frequency_hz);
+
    cortos_port_time_irq_enable();
 
    started = true;
-   }
+}
 
 void PeriodicTickDriver::stop() noexcept {
    if (!started) return;
 
    cortos_port_time_irq_disable();
+   cortos_port_time_disarm();
    started = false;
 }
 
 void PeriodicTickDriver::on_timer_isr() noexcept
 {
+   // Called in timer interrupt context (periodic tick).
+   // Advance the port monotonic time by one tick.
+   cortos_port_time_tick();
    // Contract: called in timer interrupt context (periodic tick)
    const uint64_t now_ticks = cortos_port_time_now();
    fire_due_isr(now_ticks);

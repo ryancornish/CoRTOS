@@ -28,8 +28,6 @@
 #include <pthread.h>
 #include <time.h>
 
-static inline void maybe_deliver_time_irq();
-
 /* ============================================================================
  * Port Context Structure
  * ========================================================================= */
@@ -235,10 +233,6 @@ extern "C" void cortos_port_irq_restore(uint32_t state)
    if (interrupt_disable_depth > 0) {
       interrupt_disable_depth--;
    }
-   // If we transitioned to enabled, we can pump deferred time IRQ.
-   if (state && interrupt_disable_depth == 0) {
-      maybe_deliver_time_irq();
-   }
 }
 
 static std::atomic<bool> g_need_resched{false};
@@ -296,7 +290,7 @@ extern "C" void* cortos_port_get_tls_pointer(void)
  * Platform Initialization
  * ========================================================================= */
 
-extern "C" void cortos_port_init(uint32_t tick_hz)
+extern "C" void cortos_port_init(void)
 {
    // Set core count from environment variable if present
    const char* core_count_env = std::getenv("CORTOS_SIM_CORES");
@@ -306,8 +300,6 @@ extern "C" void cortos_port_init(uint32_t tick_hz)
          g_core_count.store(cores, std::memory_order_relaxed);
       }
    }
-
-   (void)tick_hz; // Unused in boost.context port
 }
 
 /* ============================================================================
@@ -319,8 +311,6 @@ extern "C" void cortos_port_idle(void)
    // Sleep 1ms to simulate power saving, then yield
    struct timespec req = {.tv_sec = 0, .tv_nsec = 1'000'000};
    nanosleep(&req, nullptr);
-   // Pump timer delivery in RealTime mode (and harmless in Virtual).
-   maybe_deliver_time_irq();
    cortos_port_yield();
 }
 
@@ -358,147 +348,81 @@ extern "C" void* cortos_port_get_stack_pointer(void)
 }
 
 /* ============================================================================
- * Time Driver Port (Linux Boost Simulation)
+ * Time Driver Port (Linux Boost)
+ *
+ * Purpose:
+ * - Provide monotonic time for real drivers (periodic / tickless) in unit tests
+ * - Provide tickless one-shot arming and ISR delivery when pumped
+ *
+ * Note:
+ * - SimulationTimeDriver owns time and does NOT use this.
+ * - Periodic driver unit tests call driver.on_timer_isr() directly; port only
+ *   needs cortos_port_time_tick() so time advances deterministically.
  * ========================================================================= */
 
-using clock_type = std::chrono::steady_clock;
+static std::atomic<uint64_t> g_port_now{0};              // monotonic "port ticks"
+static std::atomic<uint64_t> g_armed_deadline{UINT64_MAX}; // one-shot deadline (port ticks)
+static std::atomic<bool>     g_irq_enabled{false};
 
-static std::atomic<bool> g_time_irq_enabled{false};
+static std::atomic<cortos_port_isr_handler_t> g_isr{nullptr};
+static std::atomic<void*>                   g_isr_arg{nullptr};
 
-// Registered timer ISR handler
-static std::atomic<cortos_port_isr_handler_t> g_time_isr_handler{nullptr};
-static std::atomic<void*> g_time_isr_arg{nullptr};
+extern "C" void cortos_port_time_setup(uint32_t tick_hz)
+{
+   if (tick_hz > 0) return; // Nothing needed for periodic
+}
 
-// Armed one-shot deadline (in port ticks). UINT64_MAX means "disarmed".
-static std::atomic<uint64_t> g_time_armed_deadline{UINT64_MAX};
-
-// Simulation time mode for the *port*.
-enum class SimTimeMode { RealTime, Virtual };
-static SimTimeMode g_time_mode = SimTimeMode::Virtual;
-
-// RealTime base
-static clock_type::time_point g_rt_epoch{};
-
-// Virtual monotonic time (port ticks)
-static std::atomic<uint64_t> g_virtual_now{0};
-
-/**
- * @brief Return current monotonic time in "port ticks" (ns in RealTime, virtual counter in Virtual)
- */
 extern "C" uint64_t cortos_port_time_now(void)
 {
-   if (g_time_mode == SimTimeMode::Virtual) {
-      return g_virtual_now.load(std::memory_order_relaxed);
-   }
-
-   auto now = clock_type::now();
-   auto ns  = std::chrono::duration_cast<std::chrono::nanoseconds>(now - g_rt_epoch).count();
-   ns = std::max<long>(ns, 0);
-   return static_cast<uint64_t>(ns);
+   return g_port_now.load(std::memory_order_relaxed);
 }
 
-/**
- * @brief Register timer ISR handler (called by time driver)
- */
+extern "C" void cortos_port_time_tick(void)
+{
+   // Called once per periodic tick IRQ (or by the periodic driver ISR wrapper in tests)
+   g_port_now.fetch_add(1, std::memory_order_release);
+}
+
 extern "C" void cortos_port_time_register_isr_handler(cortos_port_isr_handler_t handler, void* arg)
 {
-   // Usually registered once at startup before enabling IRQs.
-   g_time_isr_arg.store(arg, std::memory_order_relaxed);
-   g_time_isr_handler.store(handler, std::memory_order_release);
+   g_isr_arg.store(arg, std::memory_order_relaxed);
+   g_isr.store(handler, std::memory_order_release);
 }
 
-/**
- * @brief Enable/disable timer IRQ source
- */
 extern "C" void cortos_port_time_irq_enable(void)
 {
-   g_time_irq_enabled.store(true, std::memory_order_release);
+   g_irq_enabled.store(true, std::memory_order_release);
 }
 
 extern "C" void cortos_port_time_irq_disable(void)
 {
-   g_time_irq_enabled.store(false, std::memory_order_release);
+   g_irq_enabled.store(false, std::memory_order_release);
 }
 
-/**
- * @brief Arm/disarm one-shot deadline (tickless support)
- *
- * Port guarantees that once time_now() >= armed_deadline and IRQs are enabled,
- * the registered handler will eventually be invoked (when the port is pumped).
- */
 extern "C" void cortos_port_time_arm(uint64_t deadline)
 {
-   // Keep the earliest deadline (typical tickless semantics)
-   uint64_t cur = g_time_armed_deadline.load(std::memory_order_relaxed);
+   // Keep earliest deadline
+   uint64_t cur = g_armed_deadline.load(std::memory_order_relaxed);
    while (deadline < cur &&
-          !g_time_armed_deadline.compare_exchange_weak(cur, deadline, std::memory_order_release, std::memory_order_relaxed))
-   {
+          !g_armed_deadline.compare_exchange_weak(cur, deadline,
+                                                 std::memory_order_release,
+                                                 std::memory_order_relaxed)) {
       // cur updated by CAS
    }
-
-   // If already due, we can optionally "deliver" immediately when possible.
-   // We avoid calling handler from here because this might be called with interrupts masked.
 }
 
 extern "C" void cortos_port_time_disarm(void)
 {
-   g_time_armed_deadline.store(UINT64_MAX, std::memory_order_release);
+   g_armed_deadline.store(UINT64_MAX, std::memory_order_release);
 }
 
-/**
- * @brief Deliver timer interrupt if due.
- *
- * Safe to call frequently. Does nothing if:
- * - IRQ disabled
- * - interrupts masked (simulated)
- * - no handler registered
- * - no deadline armed or not yet due
- */
-static inline void maybe_deliver_time_irq()
-{
-   if (!g_time_irq_enabled.load(std::memory_order_acquire)) return;
-   if (!cortos_port_interrupts_enabled()) return;
-
-   auto handler = g_time_isr_handler.load(std::memory_order_acquire);
-   if (!handler) return;
-
-   uint64_t deadline = g_time_armed_deadline.load(std::memory_order_acquire);
-   if (deadline == UINT64_MAX) return;
-
-   uint64_t now = cortos_port_time_now();
-   if (now < deadline) return;
-
-   // Disarm before calling handler to avoid re-entrancy causing repeated delivery.
-   // Driver can re-arm inside handler if it has further work.
-   g_time_armed_deadline.store(UINT64_MAX, std::memory_order_release);
-
-   void* arg = g_time_isr_arg.load(std::memory_order_relaxed);
-   handler(arg);
-}
-
-/**
- * @brief Optional: send time IPI
- *
- * For now in this simulation port, treat as a "poke" that causes the time core
- * to process pending requests on next pump. We just try to deliver if due.
- */
 extern "C" void cortos_port_send_time_ipi(uint32_t /*core_id*/)
 {
-   // In a full SMP simulation you'd signal the target pthread.
-   // For now, we can just attempt delivery in the current context.
-   maybe_deliver_time_irq();
+   // SMP simulation TODO: poke target core thread.
 }
 
-/* ---- Linux-only test hook for Virtual time ----
- * Not part of portable port.h, but used by SimulationTimeDriver<Virtual>.
- */
-extern "C" void cortos_port_time_advance_to(uint64_t t)
+extern "C" void cortos_port_time_reset(uint64_t time)
 {
-   // Monotonic clamp
-   uint64_t cur = g_virtual_now.load(std::memory_order_relaxed);
-   t = std::max(t, cur);
-   g_virtual_now.store(t, std::memory_order_release);
-
-   // Pump delivery of the timer interrupt if due
-   maybe_deliver_time_irq();
+   g_port_now.store(time, std::memory_order_release);
+   g_armed_deadline.store(UINT64_MAX, std::memory_order_release);
 }
