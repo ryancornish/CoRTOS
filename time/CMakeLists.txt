@@ -1,6 +1,6 @@
 # Time driver implementation selection
-set(CORTOS_TIME_DRIVER "simulation" CACHE STRING "TimeDriver implementation (periodic, simulation)")
-set_property(CACHE CORTOS_TIME_DRIVER PROPERTY STRINGS periodic simulation)
+set(CORTOS_TIME_DRIVER "simulation" CACHE STRING "TimeDriver implementation (periodic, tickless, simulation)")
+set_property(CACHE CORTOS_TIME_DRIVER PROPERTY STRINGS periodic tickless simulation)
 
 # Always compile the base interface
 add_library(cortos_time STATIC
@@ -21,6 +21,18 @@ if(CORTOS_TIME_DRIVER STREQUAL "periodic")
    )
    target_include_directories(cortos_time PUBLIC
       ${CMAKE_CURRENT_SOURCE_DIR}/periodic/include
+   )
+
+   target_link_libraries(cortos_time PUBLIC
+      cortos::port
+   )
+
+elseif(CORTOS_TIME_DRIVER STREQUAL "tickless")
+   target_sources(cortos_time PRIVATE
+      tickless/time_driver_tickless.cpp
+   )
+   target_include_directories(cortos_time PUBLIC
+      ${CMAKE_CURRENT_SOURCE_DIR}/tickless/include
    )
 
    target_link_libraries(cortos_time PUBLIC
