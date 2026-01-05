@@ -36,23 +36,31 @@ function(setup_coverage)
       return()
    endif()
 
+   # Build filter patterns WITHOUT quotes - CMake handles escaping with VERBATIM
+   set(FILTER_KERNEL "${CMAKE_SOURCE_DIR}/kernel/.*")
+   set(FILTER_TIME "${CMAKE_SOURCE_DIR}/time/.*")
+   set(FILTER_PORT "${CMAKE_SOURCE_DIR}/port/.*")
+   set(FILTER_LIBCORTOS "${CMAKE_SOURCE_DIR}/libcortos/.*")
+
    # HTML coverage report
    add_custom_target(coverage
       # Clean old data and create output directory
-      COMMAND ${CMAKE_COMMAND} -E remove_directory coverage_html
-      COMMAND ${CMAKE_COMMAND} -E make_directory coverage_html
-      COMMAND find . -name '*.gcda' -delete || true
+      COMMAND ${CMAKE_COMMAND} -E remove_directory ${CMAKE_BINARY_DIR}/coverage_html
+      COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_BINARY_DIR}/coverage_html
+      COMMAND find ${CMAKE_BINARY_DIR} -name "*.gcda" -delete || true
 
       # Run tests
       COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure
 
-      # Generate HTML report (no --root, uses current dir)
+      # Generate HTML report
       COMMAND ${GCOVR}
-         --exclude '.*/tests/.*'
-         --exclude '.*/external/.*'
-         --exclude '.*/googletest/.*'
-         --exclude '.*/boost/.*'
-         --html-details coverage_html/index.html
+         --root ${CMAKE_SOURCE_DIR}
+         --object-directory ${CMAKE_BINARY_DIR}
+         --filter ${FILTER_KERNEL}
+         --filter ${FILTER_TIME}
+         --filter ${FILTER_PORT}
+         --filter ${FILTER_LIBCORTOS}
+         --html-details ${CMAKE_BINARY_DIR}/coverage_html/index.html
          --print-summary
 
       WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
@@ -62,15 +70,19 @@ function(setup_coverage)
 
    # XML coverage (for CI/CD)
    add_custom_target(coverage-xml
+      # Run tests
       COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure
 
+      # Generate XML
       COMMAND ${GCOVR}
-         --exclude '.*/tests/.*'
-         --exclude '.*/external/.*'
-         --exclude '.*/googletest/.*'
-         --exclude '.*/boost/.*'
+         --root ${CMAKE_SOURCE_DIR}
+         --object-directory ${CMAKE_BINARY_DIR}
+         --filter ${FILTER_KERNEL}
+         --filter ${FILTER_TIME}
+         --filter ${FILTER_PORT}
+         --filter ${FILTER_LIBCORTOS}
          --xml-pretty
-         --output coverage.xml
+         --output ${CMAKE_BINARY_DIR}/coverage.xml
 
       WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
       COMMENT "Generating XML coverage..."

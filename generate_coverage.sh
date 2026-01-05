@@ -35,8 +35,7 @@ echo "=== Opening report ==="
 REPORT="$(pwd)/coverage_html/index.html"
 
 if [ -f "$REPORT" ]; then
-   echo "Report: file://$REPORT"
-   xdg-open "$REPORT" 2>/dev/null || open "$REPORT" 2>/dev/null || true
+   echo -e "Report:\n$REPORT"
 else
    echo "ERROR: Report not found at $REPORT"
    exit 1
