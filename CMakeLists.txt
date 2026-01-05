@@ -22,6 +22,9 @@ option(CORTOS_BUILD_TESTS "Build tests" ON)
 option(CORTOS_BUILD_EXAMPLES "Build examples" ON)
 option(CORTOS_ENABLE_ASSERTIONS "Enable runtime assertions" ON)
 
+# CMake modules
+include(cmake/CodeCoverage.cmake)
+
 # Port selection
 set(CORTOS_PORT "linux_boost" CACHE STRING "Port to build (linux_boost, cortex-m, riscv)")
 set_property(CACHE CORTOS_PORT PROPERTY STRINGS linux_boost cortex-m riscv)
@@ -57,3 +60,6 @@ endif()
 if(CORTOS_BUILD_EXAMPLES)
    add_subdirectory(examples)
 endif()
+
+# Coverage make
+setup_coverage()

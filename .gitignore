@@ -43,3 +43,10 @@
 .cache/
 build/
 compile_commands.json
+
+# Coverage artifacts
+*.gcda
+*.gcno
+coverage.xml
+coverage_html/
+build_coverage/
