@@ -2,54 +2,23 @@
 #include "cortos/port.h"
 
 #include <cstdint>
+#include <limits>
 
 namespace cortos
 {
 
-TicklessDriver::IrqGuard::IrqGuard() : state(cortos_port_irq_save()) {}
-TicklessDriver::IrqGuard::~IrqGuard() { cortos_port_irq_restore(state); }
-
-Duration TicklessDriver::from_milliseconds(uint32_t ms) const noexcept
+[[nodiscard]] Duration TicklessDriver::from_milliseconds(uint32_t ms) const noexcept
 {
-   // Tickless still uses "port ticks" as its unit; conversions are driver-defined.
-   // If you want real conversions, you’ll need a "ticks_per_second" concept in the driver.
-   // For now, keep the same rounding behaviour you used elsewhere by treating 1 tick = 1ms,
-   // OR delete these from tickless until you define the unit. I’ll implement the safe stub:
-   return Duration{static_cast<uint64_t>(ms)};
+   const uint64_t f = cortos_port_time_freq_hz();
+   const uint64_t ticks = (static_cast<uint64_t>(ms) * f + 999) / 1000;
+   return Duration{ticks};
 }
 
-Duration TicklessDriver::from_microseconds(uint32_t us) const noexcept
+[[nodiscard]] Duration TicklessDriver::from_microseconds(uint32_t us) const noexcept
 {
-   // Same note as above.
-   return Duration{(us + 999) / 1000};
-}
-
-void TicklessDriver::start() noexcept
-{
-   if (started) return;
-
-   cortos_port_time_register_isr_handler(&isr_trampoline, this);
-
-   // tick_hz == 0 => tickless
-   cortos_port_time_setup(0);
-
-   // Arm earliest if any were scheduled before start()
-   {
-      IrqGuard g;
-      rearm_earliest_locked();
-   }
-
-   cortos_port_time_irq_enable();
-   started = true;
-}
-
-void TicklessDriver::stop() noexcept
-{
-   if (!started) return;
-
-   cortos_port_time_irq_disable();
-   cortos_port_time_disarm();
-   started = false;
+   const uint64_t f = cortos_port_time_freq_hz();
+   const uint64_t ticks = (static_cast<uint64_t>(us) * f + 999'999) / 1'000'000;
+   return Duration{ticks};
 }
 
 ITimeDriver::Handle TicklessDriver::schedule_at(TimePoint tp, Callback cb, void* arg) noexcept
@@ -58,28 +27,21 @@ ITimeDriver::Handle TicklessDriver::schedule_at(TimePoint tp, Callback cb, void*
 
    IrqGuard g;
 
-   // find free slot
+   // Allocate slot
    for (auto& s : slots) {
       if (s.id == 0) {
          uint32_t id = next_id++;
-         if (id == 0) id = next_id++; // avoid 0
+         if (id == 0) id = next_id++;
 
-         s.id   = id;
+         s.id = id;
          s.when = tp.value;
-         s.cb   = cb;
-         s.arg  = arg;
+         s.cb = cb;
+         s.arg = arg;
 
-         // Ensure hardware is armed to earliest deadline
-         rearm_earliest_locked();
-
-         // If the earliest deadline is already due, poke the time core to process ASAP.
-         // On real embedded, hardware will fire immediately anyway when deadline <= now.
-         if (started) {
-         uint64_t now = cortos_port_time_now();
-         if (tp.value <= now) {
-            cortos_port_send_time_ipi(0);
-         }
-         }
+         // If already due, we don't call cb here (could be with IRQs masked).
+         // We'll rely on the next on_timer_isr() call. But we should ensure
+         // the timer is armed "immediately" by arming to <= now.
+         rearm_locked();
 
          return Handle{id};
       }
@@ -97,34 +59,60 @@ bool TicklessDriver::cancel(Handle h) noexcept
    for (auto& s : slots) {
       if (s.id == h.id) {
          s = Slot{};
-         rearm_earliest_locked();
+         rearm_locked();
          return true;
       }
    }
+
    return false;
+}
+
+void TicklessDriver::start() noexcept
+{
+   if (started) return;
+
+   cortos_port_time_register_isr_handler(&isr_trampoline, this);
+
+   // tick_hz==0 => tickless setup by your chosen convention
+   cortos_port_time_setup(0);
+
+   // Arm based on any pre-existing slots (usually none)
+   {
+      IrqGuard g;
+      rearm_locked();
+   }
+
+   cortos_port_time_irq_enable();
+   started = true;
+}
+
+void TicklessDriver::stop() noexcept
+{
+   if (!started) return;
+
+   cortos_port_time_irq_disable();
+   cortos_port_time_disarm();
+   started = false;
 }
 
 void TicklessDriver::on_timer_isr() noexcept
 {
-   // Called when armed deadline is reached (or later)
    const uint64_t now_ticks = cortos_port_time_now();
 
-   // Fire everything due
+   // Fire everything due. We free slot before calling cb to avoid reentrancy hazards.
    fire_due_isr(now_ticks);
 
-   // Rearm next deadline (if any)
-   {
-      IrqGuard g;
-      rearm_earliest_locked();
-   }
+   // Rearm next deadline after firing
+   IrqGuard g;
+   rearm_locked();
 }
 
-void TicklessDriver::fire_due_isr(uint64_t now_ticks) noexcept
+void TicklessDriver::fire_due_isr(uint64_t now) noexcept
 {
-   // ISR-safe: free slot before invoking callback
+   // ISR context: do not allocate.
    for (auto& s : slots) {
-      if (s.id != 0 && s.when <= now_ticks) {
-         auto cb  = s.cb;
+      if (s.id != 0 && s.when <= now) {
+         auto cb = s.cb;
          auto arg = s.arg;
          s = Slot{};
          cb(arg);
@@ -132,17 +120,21 @@ void TicklessDriver::fire_due_isr(uint64_t now_ticks) noexcept
    }
 }
 
-void TicklessDriver::rearm_earliest_locked() noexcept
+void TicklessDriver::rearm_locked() noexcept
 {
-   uint64_t earliest = UINT64_MAX;
+   uint64_t earliest = std::numeric_limits<uint64_t>::max();
 
    for (auto const& s : slots) {
-      if (s.id != 0 && s.when < earliest) earliest = s.when;
+      if (s.id != 0 && s.when < earliest) {
+         earliest = s.when;
+      }
    }
 
-   if (earliest == UINT64_MAX) {
+   if (earliest == std::numeric_limits<uint64_t>::max()) {
       cortos_port_time_disarm();
    } else {
+      // Arm at earliest absolute counter tick. If already in the past, port
+      // should arrange an "immediate" interrupt (or next pump on Linux).
       cortos_port_time_arm(earliest);
    }
 }

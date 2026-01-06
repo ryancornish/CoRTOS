@@ -230,7 +230,6 @@ void* cortos_port_get_stack_pointer(void);
  * If tick_hz > 0:
  *   Configure a periodic timer interrupt at tick_hz.
  *   The port must deliver the registered ISR handler once per tick IRQ.
- *   The port ISR wrapper must call cortos_port_time_tick() exactly once per tick.
  *
  * If tick_hz == 0:
  *   Configure tickless one-shot mode.
@@ -242,20 +241,20 @@ void* cortos_port_get_stack_pointer(void);
 void cortos_port_time_setup(uint32_t tick_hz);
 
 /**
- * @brief Periodic tick hook (periodic driver support).
- *
- * Must be called exactly once per periodic tick IRQ (tick_hz > 0),
- * from the port's timer ISR wrapper, with interrupts disabled.
- *
- * In tickless mode (tick_hz == 0), this function may be a no-op.
- */
-void cortos_port_time_tick(void);
-
-/**
  * @brief Monotonic time source
  * Must be monotonic 64-bit in "port ticks" (opaque unit for whole system).
  */
 uint64_t cortos_port_time_now(void);
+
+/**
+ * @brief Free-running counter frequency in Hz (ticks per second).
+ *
+ * For example:
+ *  - DWT_CYCCNT at CPU clock: 168'000'000
+ *  - Timer running at 1 MHz: 1'000'000
+ *  - Linux steady_clock ns ticks: 1'000'000'000
+ */
+uint64_t cortos_port_time_freq_hz(void);
 
 /**
  * @brief Arm a one-shot interrupt for the given absolute deadline.
@@ -289,9 +288,7 @@ void cortos_port_time_register_isr_handler(cortos_port_isr_handler_t handler, vo
 void cortos_port_send_time_ipi(uint32_t core_id);
 
 /**
- * @brief Reset any internal global time tracking state.
- *
- * OPTIONAL.
+ * @brief Optional: reset any internal global time tracking state.
  *
  * On embedded targets this is typically meaningless or implemented
  * implicitly by a system reset.

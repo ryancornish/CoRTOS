@@ -356,20 +356,19 @@ extern "C" void* cortos_port_get_stack_pointer(void)
  *
  * Note:
  * - SimulationTimeDriver owns time and does NOT use this.
- * - Periodic driver unit tests call driver.on_timer_isr() directly; port only
- *   needs cortos_port_time_tick() so time advances deterministically.
+ * - Periodic driver unit tests call driver.on_timer_isr() directly
  * ========================================================================= */
 
-static std::atomic<uint64_t> g_port_now{0};              // monotonic "port ticks"
-static std::atomic<uint64_t> g_armed_deadline{UINT64_MAX}; // one-shot deadline (port ticks)
-static std::atomic<bool>     g_irq_enabled{false};
+static std::atomic<uint64_t> g_port_now{0};
 
+static std::atomic<bool> g_time_irq_enabled{false};
+static std::atomic<uint64_t> g_armed_deadline{UINT64_MAX};
 static std::atomic<cortos_port_isr_handler_t> g_isr{nullptr};
-static std::atomic<void*>                   g_isr_arg{nullptr};
+static std::atomic<void*> g_isr_arg{nullptr};
 
 extern "C" void cortos_port_time_setup(uint32_t tick_hz)
 {
-   if (tick_hz > 0) return; // Nothing needed for periodic
+   (void)tick_hz;
 }
 
 extern "C" uint64_t cortos_port_time_now(void)
@@ -377,38 +376,35 @@ extern "C" uint64_t cortos_port_time_now(void)
    return g_port_now.load(std::memory_order_relaxed);
 }
 
-extern "C" void cortos_port_time_tick(void)
+extern "C" uint64_t cortos_port_time_freq_hz(void)
 {
-   // Called once per periodic tick IRQ (or by the periodic driver ISR wrapper in tests)
-   g_port_now.fetch_add(1, std::memory_order_release);
+   return 1'000'000ull; // 1 tick = 1 us (recommend)
 }
 
-extern "C" void cortos_port_time_register_isr_handler(cortos_port_isr_handler_t handler, void* arg)
+extern "C" void cortos_port_time_reset(uint64_t t)
+{
+   g_port_now.store(t, std::memory_order_release);
+   g_armed_deadline.store(UINT64_MAX, std::memory_order_release);
+}
+
+extern "C" void cortos_port_time_register_isr_handler(cortos_port_isr_handler_t h, void* arg)
 {
    g_isr_arg.store(arg, std::memory_order_relaxed);
-   g_isr.store(handler, std::memory_order_release);
+   g_isr.store(h, std::memory_order_release);
 }
 
-extern "C" void cortos_port_time_irq_enable(void)
-{
-   g_irq_enabled.store(true, std::memory_order_release);
-}
-
-extern "C" void cortos_port_time_irq_disable(void)
-{
-   g_irq_enabled.store(false, std::memory_order_release);
-}
+extern "C" void cortos_port_time_irq_enable(void)  { g_time_irq_enabled.store(true,  std::memory_order_release); }
+extern "C" void cortos_port_time_irq_disable(void) { g_time_irq_enabled.store(false, std::memory_order_release); }
 
 extern "C" void cortos_port_time_arm(uint64_t deadline)
 {
-   // Keep earliest deadline
+   // Keep earliest
    uint64_t cur = g_armed_deadline.load(std::memory_order_relaxed);
    while (deadline < cur &&
-          !g_armed_deadline.compare_exchange_weak(cur, deadline,
-                                                 std::memory_order_release,
-                                                 std::memory_order_relaxed)) {
-      // cur updated by CAS
-   }
+            !g_armed_deadline.compare_exchange_weak(cur, deadline,
+                                                   std::memory_order_release,
+                                                   std::memory_order_relaxed))
+   {}
 }
 
 extern "C" void cortos_port_time_disarm(void)
@@ -416,13 +412,13 @@ extern "C" void cortos_port_time_disarm(void)
    g_armed_deadline.store(UINT64_MAX, std::memory_order_release);
 }
 
+// Linux-only helper for tests
+extern "C" void cortos_port_time_advance(uint64_t delta)
+{
+   g_port_now.fetch_add(delta, std::memory_order_release);
+}
+
 extern "C" void cortos_port_send_time_ipi(uint32_t /*core_id*/)
 {
    // SMP simulation TODO: poke target core thread.
-}
-
-extern "C" void cortos_port_time_reset(uint64_t time)
-{
-   g_port_now.store(time, std::memory_order_release);
-   g_armed_deadline.store(UINT64_MAX, std::memory_order_release);
 }

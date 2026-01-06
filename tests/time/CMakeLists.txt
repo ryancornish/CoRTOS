@@ -48,3 +48,25 @@ target_include_directories(test_time_driver_periodic PRIVATE
 )
 
 add_test(NAME test_time_driver_periodic COMMAND test_time_driver_periodic)
+
+# Tickless driver tests (always compiled, links against tickless driver)
+add_executable(test_time_driver_tickless test_time_driver_tickless.cpp)
+target_link_libraries(test_time_driver_tickless PRIVATE
+   gtest_main
+   gtest
+   cortos::time  # For ITimeDriver interface
+   cortos::port
+)
+
+# Add tickless driver source directly
+target_sources(test_time_driver_tickless PRIVATE
+   ${CMAKE_SOURCE_DIR}/time/base/time_driver.cpp
+   ${CMAKE_SOURCE_DIR}/time/tickless/time_driver_tickless.cpp
+)
+
+target_include_directories(test_time_driver_tickless PRIVATE
+   ${CMAKE_SOURCE_DIR}/time/include
+   ${CMAKE_SOURCE_DIR}/time/tickless/include
+)
+
+add_test(NAME test_time_driver_tickless COMMAND test_time_driver_tickless)

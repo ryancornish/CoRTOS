@@ -16,8 +16,6 @@ namespace cortos
    return TimePoint{cortos_port_time_now()};
 }
 
-
-
 ITimeDriver::Handle PeriodicTickDriver::schedule_at(TimePoint tp, Callback cb, void* arg) noexcept
 {
    if (!cb) return {};
@@ -65,6 +63,22 @@ bool PeriodicTickDriver::cancel(Handle h) noexcept
    return false;
 }
 
+static inline uint64_t ceil_div_u64(uint64_t a, uint64_t b) noexcept { return (a + b - 1) / b; }
+
+[[nodiscard]] Duration PeriodicTickDriver::from_milliseconds(uint32_t ms) const noexcept
+{
+   const uint64_t f = cortos_port_time_freq_hz();
+   const uint64_t ticks = ceil_div_u64(uint64_t(ms) * f, 1000ULL);
+   return Duration{ticks};
+}
+
+[[nodiscard]] Duration PeriodicTickDriver::from_microseconds(uint32_t us) const noexcept
+{
+   const uint64_t f = cortos_port_time_freq_hz();
+   const uint64_t ticks = ceil_div_u64(uint64_t(us) * f, 1'000'000ULL);
+   return Duration{ticks};
+}
+
 void PeriodicTickDriver::start() noexcept
 {
    if (started) return;
@@ -84,16 +98,11 @@ void PeriodicTickDriver::stop() noexcept {
    if (!started) return;
 
    cortos_port_time_irq_disable();
-   cortos_port_time_disarm();
    started = false;
 }
 
 void PeriodicTickDriver::on_timer_isr() noexcept
 {
-   // Called in timer interrupt context (periodic tick).
-   // Advance the port monotonic time by one tick.
-   cortos_port_time_tick();
-   // Contract: called in timer interrupt context (periodic tick)
    const uint64_t now_ticks = cortos_port_time_now();
    fire_due_isr(now_ticks);
 }

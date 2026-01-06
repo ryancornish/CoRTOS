@@ -26,6 +26,7 @@
 #include "cortos/time_driver.hpp"
 
 #include <array>
+#include <atomic>
 
 namespace cortos
 {
@@ -40,7 +41,6 @@ namespace cortos
  * Architecture:
  * - Port configures hardware timer via cortos_port_time_setup(tick_hz)
  * - Port timer ISR calls registered handler (isr_trampoline)
- * - Driver calls cortos_port_time_tick() to advance port time
  * - Driver fires all callbacks where deadline <= now()
  *
  * Resource usage:
@@ -95,7 +95,6 @@ public:
     * @return Current monotonic time point (from cortos_port_time_now())
     *
     * Delegates to port layer's hardware timer counter.
-    * Time advances when cortos_port_time_tick() is called from on_timer_isr().
     */
    [[nodiscard]] TimePoint now() const noexcept override;
 
@@ -141,12 +140,7 @@ public:
     * Example: at 1kHz, from_milliseconds(10) = 10 ticks
     * Example: at 1kHz, from_milliseconds(1) = 1 tick (not 0!)
     */
-   [[nodiscard]] Duration from_milliseconds(uint32_t ms) const noexcept override
-   {
-      // Round up to avoid undersleep for small values
-      const uint64_t ticks = (static_cast<uint64_t>(ms) * tick_frequency_hz + 999) / 1000;
-      return Duration{ticks};
-   }
+   [[nodiscard]] Duration from_milliseconds(uint32_t ms) const noexcept override;
 
    /**
     * @brief Convert microseconds to driver ticks
@@ -156,12 +150,7 @@ public:
     * Example: at 1kHz, from_microseconds(5000) = 5 ticks (5ms)
     * Example: at 1kHz, from_microseconds(1001) = 2 ticks (rounds up)
     */
-   [[nodiscard]] Duration from_microseconds(uint32_t us) const noexcept override
-   {
-      const uint64_t ticks = (static_cast<uint64_t>(us) * tick_frequency_hz + 999'999) / 1'000'000;
-      return Duration{ticks};
-   }
-
+   [[nodiscard]] Duration from_microseconds(uint32_t us) const noexcept override;
    /**
     * @brief Start the periodic time driver
     *
@@ -198,7 +187,6 @@ public:
     * - Must be called exactly once per timer tick
     *
     * Behavior:
-    * 1. Calls cortos_port_time_tick() to advance port time
     * 2. Gets current time from cortos_port_time_now()
     * 3. Fires all callbacks where deadline <= current_time
     * 4. Frees slot before invoking callback (avoids reentrancy hazards)
