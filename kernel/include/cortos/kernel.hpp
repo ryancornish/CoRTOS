@@ -298,7 +298,8 @@ Function<Ret(Args...), InlineSize, Policy>::VTableImpl<F, Heap>::table{
  */
 class Waitable
 {
-   friend class Scheduler;
+   friend class  Scheduler;
+   friend struct TaskControlBlock;
 
 public:
    /**
@@ -309,6 +310,45 @@ public:
       int  index{-1};     ///< Index of waitable that triggered (-1 if none)
       bool acquired{false}; ///< True if resource was acquired (e.g., mutex locked)
    };
+
+   Waitable();
+   virtual ~Waitable();
+
+   Waitable(Waitable const&)            = delete;
+   Waitable& operator=(Waitable const&) = delete;
+   Waitable(Waitable&&)            = delete;
+   Waitable& operator=(Waitable&&) = delete;
+
+   /**
+    * @brief Check if any threads are waiting
+    * @return true if wait queue is empty, false if threads are waiting
+    */
+   [[nodiscard]] bool empty() const noexcept;
+
+   /**
+    * @brief Signal one waiting thread (highest priority)
+    * @param acquired True if signalled thread acquired the resource (e.g., mutex lock)
+    *
+    * Moves the highest-priority waiting thread to the ready queue.
+    * If no threads are waiting, this is a no-op.
+    *
+    * The 'acquired' parameter is returned in Waitable::Result:
+    * - Mutex::unlock() -> wake_one(true)  // Woken thread now owns mutex
+    * - Semaphore::post() -> wake_one(false) // Woken thread is just notified
+    * - Timer::expire() -> wake_one(false)   // Woken thread didn't acquire anything
+    *
+    * Called by the owning primitive (e.g., Mutex::unlock(), Timer expiry).
+    */
+   void signal_one(bool acquired = true) noexcept;
+
+   /**
+    * @brief Signal all waiting threads
+    * @param acquired True if signalled threads acquired the resource
+    *
+    * Moves all waiting threads to the ready queue.
+    * If no threads are waiting, this is a no-op.
+    */
+   void signal_all(bool acquired = true) noexcept;
 
 protected:
    /**
@@ -346,53 +386,19 @@ protected:
    template<typename Fn>
    void for_each_waiter(Fn&& fn);
 
-public:
-   Waitable();
-   virtual ~Waitable();
-
-   Waitable(Waitable const&)            = delete;
-   Waitable& operator=(Waitable const&) = delete;
-   Waitable(Waitable&&)            = delete;
-   Waitable& operator=(Waitable&&) = delete;
-
-   /**
-    * @brief Check if any threads are waiting
-    * @return true if wait queue is empty, false if threads are waiting
-    */
-   [[nodiscard]] bool empty() const noexcept;
-
-   /**
-    * @brief Signal one waiting thread (highest priority)
-    * @param acquired True if signalled thread acquired the resource (e.g., mutex lock)
-    *
-    * Moves the highest-priority waiting thread to the ready queue.
-    * If no threads are waiting, this is a no-op.
-    *
-    * The 'acquired' parameter is returned in Waitable::Result:
-    * - Mutex::unlock() -> wake_one(true)  // Woken thread now owns mutex
-    * - Semaphore::post() -> wake_one(false) // Woken thread is just notified
-    * - Timer::expire() -> wake_one(false)   // Woken thread didn't acquire anything
-    *
-    * Called by the owning primitive (e.g., Mutex::unlock(), Timer expiry).
-    */
-   void signal_one(bool acquired = true);
-
-   /**
-    * @brief Signal all waiting threads
-    * @param acquired True if signalled threads acquired the resource
-    *
-    * Moves all waiting threads to the ready queue.
-    * If no threads are waiting, this is a no-op.
-    */
-   void signal_all(bool acquired = true);
-
 private:
-   void* wait_queue;  // Opaque pointer to kernel wait queue (LinkedList<WaitNode>)
+   struct WaitNode* head;
+   struct WaitNode* tail;
 
-   // Internal: add/remove wait nodes (called by scheduler)
-   void add_wait_node(void* node);
-   void remove_wait_node(void* node);
-   void* pick_best_waiter();  // Returns highest priority WaitNode
+   void add(WaitNode& wait_node) noexcept;
+   void remove(WaitNode& wait_node) noexcept;
+
+   // Select best waiter but do NOT unlink it.
+   // FIFO among equals: scan from head, pick first with highest priority.
+   WaitNode* pick_best() noexcept;
+
+   // kernel-owned helper (only called with scheduler/irq discipline)
+   void wake_node(WaitNode& wait_node, bool acquired) noexcept;
 };
 
 namespace kernel
