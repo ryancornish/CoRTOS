@@ -44,6 +44,7 @@ struct WaitNode
       waitable = nullptr;
       group    = nullptr;
       index    = INVALID_INDEX;
+      // tcb and slot are explicitly not reset
    }
 };
 
@@ -70,8 +71,8 @@ public:
 
    void reset_all() noexcept
    {
-      for (std::size_t i = 0; i < N; ++i) {
-         nodes[i].reset();
+      for (auto& node : nodes) {
+         node.reset();
       }
       free_mask = ALL_NODES_FREE;
    }
@@ -84,11 +85,11 @@ public:
     * Allocate a node, initialize its identity fields, and return it.
     * Returns nullptr if pool exhausted.
     */
-   WaitNode* alloc(TaskControlBlock* tcb, WaitGroup* group, Waitable* waitable, uint8_t index) noexcept
+   WaitNode* alloc(WaitGroup& group, Waitable* waitable, uint8_t index) noexcept
    {
       assert(index != WaitNode::INVALID_INDEX);
 
-      if (!tcb || !group || !waitable) return nullptr;
+      if (!waitable) return nullptr;
       if (free_mask == 0) return nullptr;
 
       uint32_t bit = std::countr_zero(free_mask);
@@ -102,8 +103,7 @@ public:
 
       node.reset();
       node.active   = true;
-      node.tcb      = tcb;
-      node.group    = group;
+      node.group    = &group;
       node.waitable = waitable;
       node.index    = index;
 
@@ -143,10 +143,10 @@ public:
    void for_each_active(Fn&& fn, WaitGroup* only_group = nullptr) noexcept
    {
       for (std::size_t i = 0; i < N; ++i) {
-         auto& n = nodes[i];
-         if (!n.active) continue;
-         if (only_group && n.group != only_group) continue;
-         fn(n);
+         auto& node = nodes[i];
+         if (!node.active) continue;
+         if (only_group && node.group != only_group) continue;
+         fn(node);
       }
    }
 
@@ -154,7 +154,7 @@ public:
     * Return pointer to node by slot index (even if inactive).
     * Primarily for debugging / assertions.
     */
-   [[nodiscard]] WaitNode* get_by_slot(std::size_t slot) noexcept
+   [[nodiscard]] WaitNode* at(std::size_t slot) noexcept
    {
       if (slot >= N) return nullptr;
       return &nodes[slot];
@@ -245,11 +245,10 @@ struct TaskControlBlock
       wait_group.begin(static_cast<uint8_t>(waitables.size()));
 
       // Allocate and enqueue nodes
-      for (size_t i = 0; i < waitables.size(); ++i) {
-         auto* waitable = waitables[i];
-         assert(waitable);
+      for (std::size_t i = 0; auto* waitable : waitables) {
+         assert(waitable != nullptr);
 
-         WaitNode* wait_node = wait_nodes.alloc(this, &wait_group, waitable, i);
+         WaitNode* wait_node = wait_nodes.alloc(wait_group, waitable, i);
          assert(wait_node != nullptr);
 
          waitable->add(*wait_node);
@@ -267,6 +266,17 @@ struct TaskControlBlock
       };
    }
 
+   void teardown_wait_group(WaitGroup* group) noexcept
+   {
+      wait_nodes.for_each_active([&](WaitNode& node) {
+         if (node.group != group) return;
+
+         if (node.waitable) node.waitable->remove(node);
+         bool ok = wait_nodes.free(&node);
+         (void)ok;
+         assert(ok);
+      }, group);
+   }
 };
 
 static void thread_launcher(void* vtcb)
@@ -346,19 +356,35 @@ void Waitable::on_thread_removed(Thread*) {}
 
 void Waitable::add(WaitNode& wait_node) noexcept
 {
+   assert(wait_node.waitable == this || wait_node.waitable == nullptr);
+   assert(wait_node.next == nullptr && wait_node.prev == nullptr);
+
+   wait_node.waitable = this;
+
    wait_node.prev = tail;
    wait_node.next = nullptr;
-   if (tail) tail->next = &wait_node;
-   else      head = &wait_node;
+   if (tail) {
+      tail->next = &wait_node;
+   } else {
+      head = &wait_node;
+   }
    tail = &wait_node;
 }
 
 void Waitable::remove(WaitNode& wait_node) noexcept
 {
-   if (wait_node.prev) wait_node.prev->next = wait_node.next;
-   else          head = wait_node.next;
-   if (wait_node.next) wait_node.next->prev = wait_node.prev;
-   else          tail = wait_node.prev;
+   if (wait_node.waitable != this) return;
+
+   if (wait_node.prev) {
+      wait_node.prev->next = wait_node.next;
+   } else {
+      head = wait_node.next;
+   }
+   if (wait_node.next) {
+      wait_node.next->prev = wait_node.prev;
+   } else {
+      tail = wait_node.prev;
+   }
    wait_node.prev = wait_node.next = nullptr;
    wait_node.waitable = nullptr;
 }
@@ -369,6 +395,9 @@ WaitNode* Waitable::pick_best() noexcept
    uint8_t best_prio = 0;
 
    for (auto* it = head; it; it = it->next) {
+      if (!it->active) continue;
+      if (it->group && it->group->done.load(std::memory_order_acquire)) continue;
+
       auto* tcb = it->tcb;
       if (!tcb) continue;
 
@@ -383,55 +412,37 @@ WaitNode* Waitable::pick_best() noexcept
 
 inline void Waitable::wake_node(WaitNode& wait_node, bool acquired) noexcept
 {
-   auto* tcb = wait_node.tcb;
-   auto* g   = wait_node.group;
-   if (!tcb || !g) return;
+   if (!wait_node.tcb || !wait_node.group) return;
 
-   // SMP-safe winner selection
-   if (!g->try_win(static_cast<int>(wait_node.index), acquired)) {
-      // Someone else already won this group; do nothing.
-      return;
+   if (!wait_node.group->try_win(static_cast<int>(wait_node.index), acquired)) {
+      return; // lost
    }
 
-   // Winner path: remove *all* wait nodes for this group
-   tcb->wait_nodes.for_each_active([]{}); // TODO: Teardown!
+   // Winner: remove all nodes in this group (including this one)
+   wait_node.tcb->teardown_wait_group(wait_node.group);
 
-   // Mark thread runnable + store result somewhere the blocked thread can read.
-   // (You can store it in tcb->wait_result, or reuse wait_group fields directly.)
-   //
-   // tcb->state = Ready;
+   // Mark tcb runnable, pend reschedule, etc.
+   // tcb->state = TaskControlBlock::State::Ready;
    // scheduler_make_ready(tcb);
    // cortos_port_pend_reschedule();
 }
 
 void Waitable::signal_one(bool acquired) noexcept
 {
-   // scheduler/irq discipline assumed: this is kernel entry / ISR-safe wrapper
-   auto* n = pick_best();
-   if (!n) return;
-
-   wake_node(*n, acquired);
-
-   // pend_reschedule() typically happens inside wake_node winner path.
+   if (auto* wait_node = pick_best()) {
+      wake_node(*wait_node, acquired);
+   }
 }
 
 void Waitable::signal_all(bool acquired) noexcept
 {
-   while (head) {
-      // head may change after wake_node due to teardown
-      auto* n = head;
-      wake_node(*n, acquired);
-
-      // If still linked (e.g., wake_node lost and didn't remove it), remove it to progress.
-      if (n->waitable == this) {
-         remove(*n);
-         // and if it was still active, leave it to the group teardown to clean
-         // (or free here if you decide signal_all cancels groups; I wouldn't)
-      }
+   while (true) {
+      auto* wait_node = pick_best();
+      if (!wait_node) break;
+      wake_node(*wait_node, acquired);
    }
-
-   // pend_reschedule once at the end is fine, but winner path already pends.
 }
+
 
 template<typename Fn>
 void Waitable::for_each_waiter(Fn&& fn)
@@ -477,7 +488,13 @@ namespace kernel
 
    Waitable::Result wait_for_any(std::span<Waitable* const> waitables)
    {
-      // Invoke Block on?
+      assert(waitables.size() > 0);
+      assert(waitables.size() <= config::MAX_WAIT_NODES);
+
+      // auto* tcb = scheduler_current_tcb();
+      // return tcb->block_on(waitables);
+
+      return {}; // TODO
    }
 
 } // namespace kernel
