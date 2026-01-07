@@ -532,23 +532,19 @@ private:
 namespace this_thread
 {
    /**
-    * @brief Get current thread
-    * @return Reference to the currently executing thread
-    *
-    * Only valid after kernel::start() has been called.
-    */
-   ::cortos::Thread& get();
-
-   /**
     * @brief Get current thread ID
     */
-   inline ::cortos::Thread::Id get_id() { return get().get_id(); };
+   [[nodiscard]] inline ::cortos::Thread::Id id();
 
    /**
-    * @brief Get current CPU core ID
-    * @return Core ID (0-based)
+    * @brief Get current thread (effective) priority
     */
-   [[nodiscard]] std::uint32_t get_current_core() noexcept;
+   [[nodiscard]] inline ::cortos::Thread::Priority priority();
+
+   /**
+    * @brief Get current CPU core ID (0-based)
+    */
+   [[nodiscard]] std::uint32_t core_id() noexcept;
 
    /**
     * @brief Exit current thread
