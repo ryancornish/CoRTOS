@@ -85,11 +85,10 @@ public:
     * Allocate a node, initialize its identity fields, and return it.
     * Returns nullptr if pool exhausted.
     */
-   WaitNode* alloc(WaitGroup& group, Waitable* waitable, uint8_t index) noexcept
+   WaitNode* alloc(WaitGroup& group, Waitable& waitable, uint8_t index) noexcept
    {
       assert(index != WaitNode::INVALID_INDEX);
 
-      if (!waitable) return nullptr;
       if (free_mask == 0) return nullptr;
 
       uint32_t bit = std::countr_zero(free_mask);
@@ -104,7 +103,7 @@ public:
       node.reset();
       node.active   = true;
       node.group    = &group;
-      node.waitable = waitable;
+      node.waitable = &waitable;
       node.index    = index;
 
       return &node;
@@ -113,26 +112,21 @@ public:
    /**
     * Free a node back to the pool.
     * Caller is responsible for unlinking it from any Waitable queue first.
-    * Returns false if node was already free / invalid.
     */
-   bool free(WaitNode* node) noexcept
+   void free(WaitNode& node) noexcept
    {
-      if (!node) return false;
-
-      std::ptrdiff_t index = node - nodes.data();
+      std::ptrdiff_t index = &node - nodes.data();
       // Ensure pointer belongs to this pool.
       if (index < 0 || static_cast<std::size_t>(index) >= N) {
          assert(false && "WaitNodePool::free: node not from this pool");
-         return false;
       }
 
       auto& n = nodes[static_cast<std::size_t>(index)];
-      if (!n.active) return false; // already free
+      assert(n.active && "Freeing an inactive node");
 
       assert(n.slot == static_cast<uint8_t>(index));
       n.reset();
       free_mask |= (1u << static_cast<uint32_t>(index));
-      return true;
    }
 
    /**
@@ -248,7 +242,7 @@ struct TaskControlBlock
       for (std::size_t i = 0; auto* waitable : waitables) {
          assert(waitable != nullptr);
 
-         WaitNode* wait_node = wait_nodes.alloc(wait_group, waitable, i);
+         WaitNode* wait_node = wait_nodes.alloc(wait_group, *waitable, i);
          assert(wait_node != nullptr);
 
          waitable->add(*wait_node);
@@ -266,16 +260,14 @@ struct TaskControlBlock
       };
    }
 
-   void teardown_wait_group(WaitGroup* group) noexcept
+   void teardown_wait_group(WaitGroup& group) noexcept
    {
       wait_nodes.for_each_active([&](WaitNode& node) {
-         if (node.group != group) return;
+         if (node.group != &group) return;
 
          if (node.waitable) node.waitable->remove(node);
-         bool ok = wait_nodes.free(&node);
-         (void)ok;
-         assert(ok);
-      }, group);
+         wait_nodes.free(node);
+      }, &group);
    }
 };
 
@@ -419,7 +411,7 @@ inline void Waitable::wake_node(WaitNode& wait_node, bool acquired) noexcept
    }
 
    // Winner: remove all nodes in this group (including this one)
-   wait_node.tcb->teardown_wait_group(wait_node.group);
+   wait_node.tcb->teardown_wait_group(*wait_node.group);
 
    // Mark tcb runnable, pend reschedule, etc.
    // tcb->state = TaskControlBlock::State::Ready;
