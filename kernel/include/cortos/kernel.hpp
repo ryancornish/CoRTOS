@@ -298,9 +298,6 @@ Function<Ret(Args...), InlineSize, Policy>::VTableImpl<F, Heap>::table{
  */
 class Waitable
 {
-   friend class  Scheduler;
-   friend struct TaskControlBlock;
-
 public:
    /**
     * @brief Result of a wait operation
@@ -387,6 +384,8 @@ protected:
    void for_each_waiter(Fn&& fn);
 
 private:
+   friend struct TaskControlBlock;
+
    struct WaitNode* head;
    struct WaitNode* tail;
 
@@ -396,9 +395,6 @@ private:
    // Select best waiter but do NOT unlink it.
    // FIFO among equals: scan from head, pick first with highest priority.
    WaitNode* pick_best() noexcept;
-
-   // kernel-owned helper (only called with scheduler/irq discipline)
-   void wake_node(WaitNode& wait_node, bool acquired) noexcept;
 };
 
 namespace kernel
@@ -427,44 +423,45 @@ namespace kernel
    [[nodiscard]] std::uint32_t core_count() noexcept;
 
    /**
-    * @brief Block current thread on a waitable
-    * @param waitable Object to wait on (Mutex, Semaphore, Timer, etc.)
-    * @return Result indicating which waitable triggered and if acquired
-    *
-    * Current thread is blocked until waitable.wake_one() or wake_all() is called.
-    * Scheduler switches to next ready thread.
-    *
-    * Example:
-    *   Mutex mutex;
-    *   auto result = kernel::wait_for(&mutex);
-    *   if (result.acquired) {
-    *      // Mutex was acquired
-    *   }
-    */
-   Waitable::Result wait_for(Waitable* waitable);
+   * @brief Block current thread until ANY of the given waitables is signalled.
+   *
+   * Low-level overload taking a span of waitable pointers.
+   * Prefer the templated wait_for_any(Waitables&...) overload in user code.
+   *
+   * @param waitables Non-empty list of waitables (must remain valid for the wait duration).
+   * @return Result: index of the signalled waitable and whether it was acquired.
+   */
+   Waitable::Result wait_for_any(std::span<Waitable* const> waitables);
 
    /**
-    * @brief Block current thread on multiple waitables
-    * @param waitables List of objects to wait on
-    * @return Result indicating which waitable triggered (index) and if acquired
-    *
-    * Current thread is blocked until ANY of the waitables is triggered.
-    * Commonly used for:
-    * - Mutex + Timer (lock with timeout)
-    * - Multiple events (wait for any event)
-    * - Cancellation (wait for work + cancel signal)
-    *
-    * Example:
-    *   Mutex mutex;
-    *   Timer timer;
-    *   auto result = kernel::wait_for_any({&mutex, &timer});
-    *   if (result.index == 0) {
-    *      // Mutex acquired
-    *   } else if (result.index == 1) {
-    *      // Timeout
-    *   }
-    */
-   Waitable::Result wait_for_any(std::span<Waitable* const> waitables);
+   * @brief Block current thread until ANY of the given waitables is signalled. (Preferred)
+   *
+   * Convenience overload that accepts references and forwards to the span overload.
+   *
+   * @tparam Waitables One or more waitable types.
+   * @param waitables One or more waitables (must remain valid for the wait duration).
+   * @return Result: index of the signalled waitable and whether it was acquired.
+   */
+   template<typename... Waitables>
+   inline Waitable::Result wait_for_any(Waitables&... waitables)
+   {
+      static_assert(sizeof...(Waitables) > 0);
+      return wait_for_any(std::initializer_list<Waitable* const>{ (&waitables)... });
+   }
+
+   /**
+   * @brief Block current thread on a single waitable.
+   *
+   * Equivalent to wait_for_any(waitable).
+   *
+   * @param waitable Waitable to block on (must remain valid for the wait duration).
+   * @return Result for the wait (index will be 0).
+   */
+   inline Waitable::Result wait_for(Waitable& waitable)
+   {
+      return wait_for_any(waitable);
+   }
+
 }  // namespace kernel
 
 

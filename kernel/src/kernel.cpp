@@ -133,8 +133,7 @@ public:
     * Iterate active nodes (optionally filtered by group).
     * Useful for teardown: remove all nodes for a completed wait.
     */
-   template<typename Fn>
-   void for_each_active(Fn&& fn, WaitGroup* only_group = nullptr) noexcept
+   void for_each_active(Function<void(WaitNode&), 32, HeapPolicy::NoHeap>&& fn, WaitGroup* only_group = nullptr) noexcept
    {
       for (std::size_t i = 0; i < N; ++i) {
          auto& node = nodes[i];
@@ -283,6 +282,24 @@ static void thread_launcher(void* vtcb)
    cortos_port_thread_exit();
 }
 
+// TODO: Scheduler method? For now free standing is fine
+static void wake_node(WaitNode const& wait_node, bool acquired) noexcept
+{
+   assert(wait_node.tcb != nullptr && wait_node.group != nullptr);
+
+   if (!wait_node.group->try_win(static_cast<int>(wait_node.index), acquired)) {
+      return; // lost
+   }
+
+   // Winner: remove all nodes in this group (including this one)
+   wait_node.tcb->teardown_wait_group(*wait_node.group);
+
+   // Mark tcb runnable, pend reschedule, etc.
+   // tcb->state = TaskControlBlock::State::Ready;
+   // scheduler_make_ready(tcb);
+   cortos_port_pend_reschedule();
+}
+
 // Carves a user-provided buffer region into:
 // +----------------------+ <-- buffer's end (high address)
 // +   TaskControlBlock   + (Fixed size)
@@ -384,39 +401,22 @@ void Waitable::remove(WaitNode& wait_node) noexcept
 WaitNode* Waitable::pick_best() noexcept
 {
    WaitNode* best = nullptr;
-   uint8_t best_prio = 0;
+   uint8_t best_priority = 0;
 
-   for (auto* it = head; it; it = it->next) {
-      if (!it->active) continue;
-      if (it->group && it->group->done.load(std::memory_order_acquire)) continue;
+   for (auto* iter = head; iter; iter = iter->next) {
+      if (!iter->active) continue;
+      if (iter->group && iter->group->done.load(std::memory_order_acquire)) continue;
 
-      auto* tcb = it->tcb;
+      auto* tcb = iter->tcb;
       if (!tcb) continue;
 
-      uint8_t p = tcb->effective_priority;
-      if (!best || p > best_prio) {
-         best = it;
-         best_prio = p;
+      auto priority = tcb->effective_priority;
+      if (!best || priority > best_priority) {
+         best = iter;
+         best_priority = priority;
       }
    }
    return best;
-}
-
-inline void Waitable::wake_node(WaitNode& wait_node, bool acquired) noexcept
-{
-   if (!wait_node.tcb || !wait_node.group) return;
-
-   if (!wait_node.group->try_win(static_cast<int>(wait_node.index), acquired)) {
-      return; // lost
-   }
-
-   // Winner: remove all nodes in this group (including this one)
-   wait_node.tcb->teardown_wait_group(*wait_node.group);
-
-   // Mark tcb runnable, pend reschedule, etc.
-   // tcb->state = TaskControlBlock::State::Ready;
-   // scheduler_make_ready(tcb);
-   // cortos_port_pend_reschedule();
 }
 
 void Waitable::signal_one(bool acquired) noexcept
@@ -471,11 +471,6 @@ namespace kernel
    std::uint32_t core_count() noexcept
    {
       return cortos_port_get_core_count();
-   }
-
-   Waitable::Result wait_for(Waitable* w)
-   {
-      return wait_for_any(std::initializer_list<Waitable* const>{w});
    }
 
    Waitable::Result wait_for_any(std::span<Waitable* const> waitables)
