@@ -584,6 +584,8 @@ class Scheduler
    uint32_t preempt_disable_depth{};
 
 public:
+   std::atomic<uint32_t> pinned_task_count{};
+
    constexpr Scheduler() = default;
 
    void set_task_ready(TaskControlBlock* tcb);
@@ -591,30 +593,71 @@ public:
    void yield_to_peers();
    TaskControlBlock* pick_next_task();
    void reschedule();
+
+   void disable_preemption()
+   {
+      ++preempt_disable_depth;
+   }
+   void enable_preemption()
+   {
+      assert(preempt_disable_depth > 0);
+      if (--preempt_disable_depth == 0 && need_reschedule) {
+         reschedule();
+      }
+   }
 };
 
 
 struct Kernel
 {
+   Spinlock lock;
    std::atomic<bool> initialised{false};
    std::array<Scheduler, CORTOS_PORT_CORE_COUNT> schedulers{};
 
    std::atomic<uint32_t> thread_id_generator{1};
 
-   Scheduler& scheduler_for_core(std::uint32_t core_id) noexcept
+   Scheduler& scheduler_for_core(std::uint32_t core_id) noexcept { return schedulers.at(core_id); }
+   Scheduler& scheduler_for_this_core()                 noexcept { return scheduler_for_core(cortos_port_get_core_id()); }
+   Scheduler& scheduler_for_time_core()                 noexcept { return scheduler_for_core(config::TIME_CORE_ID); }
+
+   std::uint32_t choose_core_for(TaskControlBlock const& tcb) noexcept
    {
-      return schedulers.at(core_id);
+      uint32_t best_core = 0;
+      uint32_t best_load = std::numeric_limits<uint32_t>::max();
+
+      bool found = false;
+
+      for (uint32_t core = 0; core < schedulers.size(); ++core) {
+         if (!tcb.affinity.allows(core)) continue;
+
+         uint32_t load = schedulers[core].pinned_task_count.load(std::memory_order_relaxed);
+
+         if (load < best_load) {
+            best_load = load;
+            best_core = core;
+            found = true;
+         }
+      }
+
+      assert(found && "Thread affinity mask allows no cores");
+      return best_core;
    }
 
-   Scheduler& scheduler_for_this_core() noexcept
+   void pin_thread_to_core(TaskControlBlock& tcb, uint32_t core_id) noexcept
    {
-      return scheduler_for_core(cortos_port_get_core_id());
+      tcb.pinned_core = core_id;
+      schedulers[core_id].pinned_task_count.fetch_add(1, std::memory_order_relaxed);
    }
 
-   Scheduler& scheduler_for_time_core() noexcept
+   void register_thread(TaskControlBlock& tcb) noexcept
    {
-      return scheduler_for_core(config::TIME_CORE_ID);
+      SpinlockGuard guard(lock);
+
+      auto core = choose_core_for(tcb);
+      pin_thread_to_core(tcb, core);
+      schedulers[core].set_task_ready(&tcb);
    }
+
 };
 static constinit Kernel k;
 
@@ -627,7 +670,7 @@ namespace kernel
 
       // TODO: init scheduler structures per core (ready queues, current thread pointers, etc.)
       // TODO: init idle threads per core (or lazily)
-      // TODO: set up port (cortos_port_init)
+      cortos_port_init();
    }
 
    [[noreturn]] void start()
@@ -672,10 +715,17 @@ Thread::Thread(EntryFn&& entry, std::span<std::byte> stack, Priority priority, C
 
 void Spinlock::lock()
 {
+   k.scheduler_for_this_core().disable_preemption();
    while (flag.test_and_set(std::memory_order_acquire)) {
       // Busy-wait with CPU yield hint
       cortos_port_cpu_relax();
    }
+}
+
+void Spinlock::unlock()
+{
+   flag.clear(std::memory_order_release);
+   k.scheduler_for_this_core().enable_preemption();
 }
 
 }  // namespace cortos

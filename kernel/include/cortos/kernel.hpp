@@ -479,6 +479,7 @@ struct CoreAffinity
    constexpr explicit operator std::uint32_t() const { return mask; }
    constexpr CoreAffinity operator|(CoreAffinity rhs) const { return CoreAffinity{mask | rhs.mask}; }
    constexpr CoreAffinity operator&(CoreAffinity rhs) const { return CoreAffinity{mask & rhs.mask}; }
+   [[nodiscard]] constexpr bool allows(uint32_t core_id) const noexcept { return (mask & (1u << core_id)) != 0; }
 };
 // Predefined core masks
 static constexpr CoreAffinity Core0 = CoreAffinity{0x01};
@@ -590,9 +591,7 @@ namespace this_thread
 class Spinlock
 {
 public:
-   Spinlock() : flag(ATOMIC_FLAG_INIT)
-   {
-   }
+   constexpr Spinlock() : flag(ATOMIC_FLAG_INIT) {}
 
    ~Spinlock() = default;
 
@@ -612,10 +611,7 @@ public:
    /**
     * @brief Release the spinlock
     */
-   void unlock()
-   {
-      flag.clear(std::memory_order_release);
-   }
+   void unlock();
 
    /**
     * @brief Try to acquire the spinlock without blocking
