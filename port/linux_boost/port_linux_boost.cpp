@@ -63,9 +63,6 @@ static thread_local void* tls_thread_pointer = nullptr;
 // Simulated core ID (set when pthread is created for SMP simulation)
 static thread_local uint32_t tls_core_id = 0;
 
-// Global core count (can be set via environment variable)
-static std::atomic<uint32_t> g_core_count{1};
-
 /* ============================================================================
  * Core Identification
  * ========================================================================= */
@@ -73,11 +70,6 @@ static std::atomic<uint32_t> g_core_count{1};
 extern "C" uint32_t cortos_port_get_core_id(void)
 {
    return tls_core_id;
-}
-
-extern "C" uint32_t cortos_port_get_core_count(void)
-{
-   return g_core_count.load(std::memory_order_relaxed);
 }
 
 /* ============================================================================
@@ -292,14 +284,6 @@ extern "C" void* cortos_port_get_tls_pointer(void)
 
 extern "C" void cortos_port_init(void)
 {
-   // Set core count from environment variable if present
-   const char* core_count_env = std::getenv("CORTOS_SIM_CORES");
-   if (core_count_env) {
-      auto cores = static_cast<uint32_t>(std::atoi(core_count_env));
-      if (cores > 0) {
-         g_core_count.store(cores, std::memory_order_relaxed);
-      }
-   }
 }
 
 /* ============================================================================

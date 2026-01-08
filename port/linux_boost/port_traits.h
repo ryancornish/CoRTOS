@@ -40,4 +40,6 @@
  */
 #define CORTOS_STACK_ALIGN 16
 
+#define CORTOS_PORT_CORE_COUNT 4
+
 #endif // CORTOS_PORT_TRAITS_H

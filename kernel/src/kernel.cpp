@@ -4,6 +4,7 @@
 #include "cortos/port.h"
 
 #include <bit>
+#include <bitset>
 #include <cassert>
 #include <cstdint>
 #include <type_traits>
@@ -300,14 +301,16 @@ static void wake_node(WaitNode const& wait_node, bool acquired) noexcept
    cortos_port_pend_reschedule();
 }
 
-// Carves a user-provided buffer region into:
-// +----------------------+ <-- buffer's end (high address)
-// +   TaskControlBlock   + (Fixed size)
-// +----------------------+
-// + Thread-local storage + (Variable size)
-// +----------------------+
-// +     User's stack     +
-// +----------------------+ <-- buffer's base (low address)
+/**
+ * Carves a user-provided buffer region into:
+ * +----------------------+ <-- buffer's end (high address)
+ * +   TaskControlBlock   + (Fixed size)
+ * +----------------------+
+ * + Thread-local storage + (Variable size)
+ * +----------------------+
+ * +     User's stack     +
+ * +----------------------+ <-- buffer's base (low address)
+ */
 struct StackLayout
 {
    TaskControlBlock* tcb;
@@ -341,17 +344,6 @@ struct StackLayout
       user_stack = buffer.subspan(0, stack_len);
    }
 };
-
-static std::atomic<uint32_t> next_thread_id{1};
-Thread::Thread(EntryFn&& entry, std::span<std::byte> stack, Priority priority, CoreAffinity affinity)
-{
-   auto id = next_thread_id.fetch_add(1, std::memory_order_relaxed);
-
-   StackLayout slayout(stack, 0);
-   tcb = ::new (slayout.tcb) TaskControlBlock(id, priority, affinity, slayout.user_stack, std::move(entry));
-
-   //set_task_ready(tcb);
-}
 
 
 // Waitable stuff
@@ -442,15 +434,196 @@ void Waitable::for_each_waiter(Fn&& fn)
    (void)fn;
 }
 
+class TaskReadyQueue
+{
+   TaskControlBlock* head;
+   TaskControlBlock* tail;
+
+public:
+   [[nodiscard]] constexpr bool              empty() const noexcept { return !head; }
+   [[nodiscard]] constexpr bool           has_peer() const noexcept { return head && head != tail; }
+   [[nodiscard]] constexpr TaskControlBlock* front() const noexcept { return head; }
+
+   // This walks the linked list so isn't 'free'. Will be used for debugging only for now
+   [[nodiscard]] std::size_t size() const noexcept;
+
+   void push_back(TaskControlBlock& tcb) noexcept
+   {
+      // Caller should ensure it's not already in a queue.
+      assert(tcb.next == nullptr && tcb.prev == nullptr);
+
+      tcb.next = nullptr;
+      tcb.prev = tail;
+
+      if (tail) {
+         tail->next = &tcb;
+      } else {
+         head = &tcb;
+      }
+      tail = &tcb;
+   }
+
+   TaskControlBlock* pop_front() noexcept
+   {
+      auto* tcb = head;
+      if (!tcb) return nullptr;
+
+      auto* new_head = tcb->next;
+
+      head = new_head;
+      if (new_head) {
+         new_head->prev = nullptr;
+      } else {
+         // queue became empty
+         tail = nullptr;
+      }
+      tcb->next = nullptr;
+      tcb->prev = nullptr;
+
+      return tcb;
+   }
+
+   void remove(TaskControlBlock& tcb) noexcept
+   {
+      assert(&tcb == head || tcb.prev != nullptr);
+      assert(&tcb == tail || tcb.next != nullptr);
+
+      auto* prev = tcb.prev;
+      auto* next = tcb.next;
+
+      if (prev) {
+         prev->next = next;
+      } else {
+         head = next;
+      }
+
+      if (next) {
+         next->prev = prev;
+      } else {
+         tail = prev;
+      }
+
+      tcb.next = nullptr;
+      tcb.prev = nullptr;
+
+      // Invariant: if one end is null, both are null
+      assert((head == nullptr) == (tail == nullptr));
+   }
+};
+
+class TaskReadyMatrix
+{
+   std::array<TaskReadyQueue, config::MAX_PRIORITIES> matrix{};
+   uint32_t bitmap{0};
+   static_assert(config::MAX_PRIORITIES <= std::numeric_limits<uint32_t>::digits, "bitmap cannot hold that many priorities!");
+
+public:
+   [[nodiscard]] constexpr bool empty() const noexcept { return bitmap == 0; }
+   [[nodiscard]] constexpr bool empty_at(uint32_t priority) const noexcept
+   {
+      return matrix[priority].empty();
+   }
+   [[nodiscard]] std::size_t size_at(uint32_t priority) const noexcept
+   {
+      return matrix[priority].size();
+   }
+   [[nodiscard]] constexpr bool has_peer(uint32_t priority) const noexcept
+   {
+      return matrix[priority].has_peer();
+   }
+   [[nodiscard]] constexpr int best_priority() const noexcept
+   {
+      return bitmap ? std::countr_zero(bitmap) : -1;
+   }
+   [[nodiscard]] std::bitset<std::numeric_limits<uint32_t>::digits> bitmap_view() const noexcept
+   {
+      return {bitmap};
+   }
+
+   void enqueue_task(TaskControlBlock& tcb) noexcept
+   {
+      assert(tcb.effective_priority < config::MAX_PRIORITIES);
+      matrix[tcb.effective_priority].push_back(tcb);
+      bitmap |= (1u << tcb.effective_priority);
+   }
+
+   TaskControlBlock* pop_best_task() noexcept
+   {
+      if (bitmap == 0) return nullptr;
+      auto const priority = std::countr_zero(bitmap);
+      TaskControlBlock* tcb = matrix[priority].pop_front();
+      if (matrix[priority].empty()) bitmap &= ~(1u << priority);
+      return tcb;
+   }
+
+   [[nodiscard]] TaskControlBlock* peek_best_task() const noexcept
+   {
+      if (bitmap == 0) return nullptr;
+      auto const priority = std::countr_zero(bitmap);
+      return matrix[priority].front();
+   }
+
+   void remove_task(TaskControlBlock& tcb) noexcept
+   {
+      auto const priority = tcb.effective_priority;
+      matrix[priority].remove(tcb);
+      if (matrix[priority].empty()) bitmap &= ~(1u << priority);
+   }
+};
+
+
+class Scheduler
+{
+   std::uint32_t core_id{};
+   TaskControlBlock* current_task{nullptr};
+   TaskControlBlock* idle_task{nullptr};
+
+   TaskReadyMatrix ready_matrix;
+
+   std::atomic<bool> need_reschedule{false};
+   uint32_t preempt_disable_depth{};
+
+public:
+   constexpr Scheduler() = default;
+
+   void set_task_ready(TaskControlBlock* tcb);
+   void block_current_task();
+   void yield_to_peers();
+   TaskControlBlock* pick_next_task();
+   void reschedule();
+};
+
+
+struct Kernel
+{
+   std::atomic<bool> initialised{false};
+   std::array<Scheduler, CORTOS_PORT_CORE_COUNT> schedulers{};
+
+   std::atomic<uint32_t> thread_id_generator{1};
+
+   Scheduler& scheduler_for_core(std::uint32_t core_id) noexcept
+   {
+      return schedulers.at(core_id);
+   }
+
+   Scheduler& scheduler_for_this_core() noexcept
+   {
+      return scheduler_for_core(cortos_port_get_core_id());
+   }
+
+   Scheduler& scheduler_for_time_core() noexcept
+   {
+      return scheduler_for_core(config::TIME_CORE_ID);
+   }
+};
+static constinit Kernel k;
+
 namespace kernel
 {
-
-   static bool g_initialised = false;
-
    void initialise()
    {
-      if (g_initialised) return;
-      g_initialised = true;
+      assert(!k.initialised);
+      k.initialised = true;
 
       // TODO: init scheduler structures per core (ready queues, current thread pointers, etc.)
       // TODO: init idle threads per core (or lazily)
@@ -459,7 +632,7 @@ namespace kernel
 
    [[noreturn]] void start()
    {
-      assert(g_initialised && "kernel::initialise() must be called first");
+      assert(k.initialised && "kernel::initialise() must be called first");
 
       // TODO: pick initial threads for each core, set TLS, start first context on each core
       // For now:
@@ -486,6 +659,16 @@ namespace kernel
 
 } // namespace kernel
 
+
+Thread::Thread(EntryFn&& entry, std::span<std::byte> stack, Priority priority, CoreAffinity affinity)
+{
+   auto id = k.thread_id_generator.fetch_add(1, std::memory_order_relaxed);
+
+   StackLayout slayout(stack, 0);
+   tcb = ::new (slayout.tcb) TaskControlBlock(id, priority, affinity, slayout.user_stack, std::move(entry));
+
+   //set_task_ready(tcb);
+}
 
 void Spinlock::lock()
 {

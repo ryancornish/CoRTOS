@@ -20,6 +20,7 @@ namespace config
 {
    static constexpr std::size_t MAX_WAIT_NODES = 8;
    static constexpr std::uint32_t TIME_CORE_ID = 0;
+   static constexpr std::size_t MAX_PRIORITIES = 32;
 }
 
 /* ============================================================================
