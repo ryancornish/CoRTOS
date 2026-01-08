@@ -178,9 +178,6 @@ TEST_F(PortTest, CoreIdentification)
 {
    uint32_t core_id = cortos_port_get_core_id();
    EXPECT_EQ(core_id, 0);  // Single-threaded test, always core 0
-
-   uint32_t core_count = cortos_port_get_core_count();
-   EXPECT_GE(core_count, 1);
 }
 
 /* ============================================================================

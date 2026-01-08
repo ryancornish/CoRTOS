@@ -571,6 +571,14 @@ public:
    }
 };
 
+struct SchedulerRequest
+{
+   enum class Kind
+   {
+      SetTaskReady, // Enqueue a TCB into this core's ready queue
+   } kind{};
+   TaskControlBlock* tcb{nullptr};
+};
 
 class Scheduler
 {
@@ -586,9 +594,25 @@ class Scheduler
 public:
    std::atomic<uint32_t> pinned_task_count{};
 
+   Spinlock inbox_lock;
+   static constexpr uint32_t INBOX_CAP = 64; // tune later
+   std::array<SchedulerRequest, INBOX_CAP> inbox{};
+   uint32_t inbox_head{0}; // pop index
+   uint32_t inbox_tail{0}; // push index
+
    constexpr Scheduler() = default;
 
-   void set_task_ready(TaskControlBlock* tcb);
+   // Core-local operations (only called on owning core)
+   void set_task_ready_local(TaskControlBlock& tcb) noexcept;
+   void drain_inbox_local() noexcept;
+
+   // Cross-core safe posting API
+   bool post_to_inbox(SchedulerRequest request) noexcept;
+
+   // Reschedule request entrypoints
+   void request_reschedule_local() noexcept { need_reschedule.store(true, std::memory_order_release); }
+   void request_reschedule_ipi() noexcept; // calls port IPI for this core (or time core)
+
    void block_current_task();
    void yield_to_peers();
    TaskControlBlock* pick_next_task();
@@ -607,11 +631,56 @@ public:
    }
 };
 
+// Core-local operations (only called on owning core)
+void Scheduler::set_task_ready_local(TaskControlBlock& tcb) noexcept
+{
+   // Preconditions to assert later:
+   // - tcb pinned_core == this->core_id
+   // - tcb not already in ready queue
+   // - tcb->state is Blocked/Ready transition etc.
+
+   ready_matrix.enqueue_task(tcb);
+   // tcb->state = TaskControlBlock::State::Ready;
+
+   request_reschedule_local(); // optional (only if it beats current?)
+}
+void Scheduler::drain_inbox_local() noexcept
+{
+   // Optional: avoid taking the lock if empty (fast path)
+   {
+      SpinlockGuard g(inbox_lock);
+      while (inbox_head != inbox_tail) {
+         auto request = inbox[inbox_head];
+         inbox_head = (inbox_head + 1) % INBOX_CAP;
+
+         switch (request.kind) {
+            case SchedulerRequest::Kind::SetTaskReady:
+               set_task_ready_local(*request.tcb);
+               break;
+         }
+      }
+   }
+}
+
+// Cross-core safe posting API
+bool Scheduler::post_to_inbox(SchedulerRequest request) noexcept
+{
+   SpinlockGuard g(inbox_lock);
+
+   uint32_t next_tail = (inbox_tail + 1) % INBOX_CAP;
+   if (next_tail == inbox_head) return false; // Full
+
+   inbox[inbox_tail] = request;
+   inbox_tail = next_tail;
+   return true;
+}
+
 
 struct Kernel
 {
    Spinlock lock;
    std::atomic<bool> initialised{false};
+   std::atomic<bool>     started{false};
    std::array<Scheduler, CORTOS_PORT_CORE_COUNT> schedulers{};
 
    std::atomic<uint32_t> thread_id_generator{1};
@@ -651,11 +720,40 @@ struct Kernel
 
    void register_thread(TaskControlBlock& tcb) noexcept
    {
-      SpinlockGuard guard(lock);
+      uint32_t target_core = 0;
 
-      auto core = choose_core_for(tcb);
-      pin_thread_to_core(tcb, core);
-      schedulers[core].set_task_ready(&tcb);
+      {
+         SpinlockGuard guard(lock);
+         target_core = choose_core_for(tcb);
+         pin_thread_to_core(tcb, target_core);
+         // Potentially add to global thread list later (under this lock).
+      }
+
+      Scheduler& target = scheduler_for_core(target_core);
+
+      if (!started.load(std::memory_order_acquire)) {
+         // Pre-start: safe to mutate directly (single-threaded init assumption)
+         target.set_task_ready_local(tcb);
+         return;
+      }
+
+      uint32_t this_core = cortos_port_get_core_id();
+
+      if (this_core == target_core) {
+         // Running on same core: keep it local
+         target.set_task_ready_local(tcb);
+         target.request_reschedule_local();
+         return;
+      }
+
+      // Remote core: post request + IPI poke
+      bool ok = target.post_to_inbox({
+         .kind = SchedulerRequest::Kind::SetTaskReady,
+         .tcb  = &tcb,
+      });
+      assert(ok && "Scheduler inbox full");
+
+      cortos_port_send_reschedule_ipi(target_core);
    }
 
 };
