@@ -7,14 +7,138 @@
 #include <bitset>
 #include <cassert>
 #include <cstdint>
+#include <optional>
 #include <type_traits>
 #include <limits>
+
+// Invariants list:
+// Only core X mutates Scheduler[X].ready_matrix, current_task, blocked lists, etc.
+// Cross-core ops must go through Scheduler::post_to_inbox() + cortos_port_send_reschedule_ipi(core).
+// Spinlocks are only used with preemption disabled (and maybe IRQs) inside kernel land.
+
 
 namespace cortos
 {
 
 static constexpr std::uintptr_t align_down(std::uintptr_t v, std::size_t a) { return v & ~(static_cast<std::uintptr_t>(a) - 1); }
 static constexpr std::uintptr_t   align_up(std::uintptr_t v, std::size_t a) { return (v + (a - 1)) & ~(static_cast<std::uintptr_t>(a) - 1); }
+
+template<typename T, std::size_t N>
+class MpscRingBuffer
+{
+   static_assert(N > 0);
+   static_assert((N & (N - 1)) == 0, "N must be a power of two");
+   static_assert(std::is_nothrow_destructible_v<T>);
+
+   static constexpr std::size_t mask = N - 1;
+   struct Cell
+   {
+      std::atomic<std::size_t> sequence;
+      alignas(T) std::array<std::byte, sizeof(T)> storage{};
+
+      constexpr explicit Cell(std::size_t seq) noexcept : sequence(seq) {}
+      Cell() noexcept = default;
+      T&       item()       noexcept { return *std::launder(reinterpret_cast<T*>(storage.data())); }
+      T const& item() const noexcept { return *std::launder(reinterpret_cast<T const*>(storage.data())); }
+   };
+
+public:
+   constexpr MpscRingBuffer() noexcept : MpscRingBuffer(std::make_index_sequence<N>{}) {}
+
+   MpscRingBuffer(MpscRingBuffer&&)            = default;
+   MpscRingBuffer& operator=(MpscRingBuffer&&) = default;
+   MpscRingBuffer(MpscRingBuffer const&)            = delete;
+   MpscRingBuffer& operator=(MpscRingBuffer const&) = delete;
+
+   ~MpscRingBuffer() noexcept
+   {
+      // Single-consumer destruction: drain remaining items
+      T tmp;
+      while (pop(tmp)) { /* discard */ }
+   }
+
+   // Many-producer: safe concurrently.
+   template<typename U>
+   bool push(U&& value) noexcept(std::is_nothrow_constructible_v<T, U&&>)
+   {
+      auto position = head.load(std::memory_order_relaxed);
+
+      while (true)
+      {
+         auto& cell = cells[position & mask];
+         auto sequence = cell.sequence.load(std::memory_order_acquire);
+         auto diff = static_cast<intptr_t>(sequence) - static_cast<intptr_t>(position);
+
+         if (diff == 0) {
+            // cell is available for this position; try to claim position
+            if (head.compare_exchange_weak(position, position + 1,
+                                           std::memory_order_relaxed,
+                                           std::memory_order_relaxed)) {
+               // We own this cell now
+               ::new (cell.storage.data()) T(std::forward<U>(value));
+               // Publish: mark cell ready for consumer by setting sequence to position+1
+               cell.sequence.store(position + 1, std::memory_order_release);
+               return true;
+            }
+            // CAS failed: position updated, retry
+         } else if (diff < 0) {
+            // sequence < position => consumer hasn't advanced enough; buffer full
+            return false;
+         } else {
+            // Another producer is ahead; reload head and retry
+            position = head.load(std::memory_order_relaxed);
+         }
+      }
+   }
+
+   // Single-consumer ONLY: call from exactly one core/thread.
+   bool pop(T& out) noexcept(std::is_nothrow_move_assignable_v<T> || std::is_nothrow_move_constructible_v<T>)
+   {
+      auto position = tail.load(std::memory_order_relaxed);
+      auto& cell = cells[position & mask];
+
+      auto sequence = cell.sequence.load(std::memory_order_acquire);
+      auto diff = static_cast<intptr_t>(sequence) - static_cast<intptr_t>(position + 1);
+
+      if (diff == 0) {
+         // cell contains an item for this position
+         tail.store(position + 1, std::memory_order_relaxed);
+
+         auto& item = cell.item();
+         if constexpr (std::is_nothrow_move_assignable_v<T>) {
+            out = std::move(item);
+         } else {
+            out = T(std::move(item));
+         }
+         item.~T();
+
+         // Mark cell free for producer at pos + N
+         cell.sequence.store(position + N, std::memory_order_release);
+         return true;
+      }
+
+      // empty (or producer mid-flight)
+      return false;
+   }
+
+   // Single-consumer only (approximate under contention; fine for stats/debug)
+   [[nodiscard]] std::size_t approx_size() const noexcept
+   {
+      auto h = head.load(std::memory_order_acquire);
+      auto t = tail.load(std::memory_order_acquire);
+      return (h >= t) ? (h - t) : 0;
+   }
+
+private:
+   // Expands into: Cell{0}, Cell{1}, Cell{2}...
+   template<std::size_t... Is>
+   constexpr explicit MpscRingBuffer(std::index_sequence<Is...>) noexcept : cells{ Cell{Is}... } {}
+
+   // Align these to reduce false sharing
+   alignas(64) std::atomic<std::size_t> head{0}; // producers claim slots
+   alignas(64) std::atomic<std::size_t> tail{0}; // consumer owns advancing
+   alignas(64) std::array<Cell, N> cells{};
+};
 
 struct TaskControlBlock;
 struct WaitGroup;
@@ -443,43 +567,31 @@ public:
    [[nodiscard]] constexpr bool              empty() const noexcept { return !head; }
    [[nodiscard]] constexpr bool           has_peer() const noexcept { return head && head != tail; }
    [[nodiscard]] constexpr TaskControlBlock* front() const noexcept { return head; }
-
-   // This walks the linked list so isn't 'free'. Will be used for debugging only for now
-   [[nodiscard]] std::size_t size() const noexcept;
+   // This walks the linked list so isn't 'free'
+   [[nodiscard]] constexpr std::size_t size() const noexcept
+   {
+      std::size_t n = 0;
+      for (auto* tcb = head; tcb; tcb = tcb->next) ++n;
+      return n;
+   }
 
    void push_back(TaskControlBlock& tcb) noexcept
    {
-      // Caller should ensure it's not already in a queue.
-      assert(tcb.next == nullptr && tcb.prev == nullptr);
-
+      assert(tcb.next == nullptr && tcb.prev == nullptr && "TCB already linked");
+      assert(tcb.state == TaskControlBlock::State::Ready && "Task must be ready to be enqueued");
       tcb.next = nullptr;
       tcb.prev = tail;
-
-      if (tail) {
-         tail->next = &tcb;
-      } else {
-         head = &tcb;
-      }
+      if (tail) tail->next = &tcb; else head = &tcb;
       tail = &tcb;
    }
 
    TaskControlBlock* pop_front() noexcept
    {
+      if (empty()) return nullptr;
       auto* tcb = head;
-      if (!tcb) return nullptr;
-
-      auto* new_head = tcb->next;
-
-      head = new_head;
-      if (new_head) {
-         new_head->prev = nullptr;
-      } else {
-         // queue became empty
-         tail = nullptr;
-      }
-      tcb->next = nullptr;
-      tcb->prev = nullptr;
-
+      head = tcb->next;
+      if (head) head->prev = nullptr; else tail = nullptr;
+      tcb->next = tcb->prev = nullptr;
       return tcb;
    }
 
@@ -488,24 +600,9 @@ public:
       assert(&tcb == head || tcb.prev != nullptr);
       assert(&tcb == tail || tcb.next != nullptr);
 
-      auto* prev = tcb.prev;
-      auto* next = tcb.next;
-
-      if (prev) {
-         prev->next = next;
-      } else {
-         head = next;
-      }
-
-      if (next) {
-         next->prev = prev;
-      } else {
-         tail = prev;
-      }
-
-      tcb.next = nullptr;
-      tcb.prev = nullptr;
-
+      if (tcb.prev) tcb.prev->next = tcb.next; else head = tcb.next;
+      if (tcb.next) tcb.next->prev = tcb.prev; else tail = tcb.prev;
+      tcb.next = tcb.prev = nullptr;
       // Invariant: if one end is null, both are null
       assert((head == nullptr) == (tail == nullptr));
    }
@@ -513,31 +610,24 @@ public:
 
 class TaskReadyMatrix
 {
+   static constexpr std::size_t BITMAP_BITS = std::numeric_limits<uint32_t>::digits;
    std::array<TaskReadyQueue, config::MAX_PRIORITIES> matrix{};
    uint32_t bitmap{0};
-   static_assert(config::MAX_PRIORITIES <= std::numeric_limits<uint32_t>::digits, "bitmap cannot hold that many priorities!");
+   static_assert(config::MAX_PRIORITIES <= BITMAP_BITS, "bitmap cannot hold that many priorities!");
 
 public:
-   [[nodiscard]] constexpr bool empty() const noexcept { return bitmap == 0; }
-   [[nodiscard]] constexpr bool empty_at(uint32_t priority) const noexcept
+   [[nodiscard]] constexpr int  best_priority()                    const noexcept { return bitmap ? std::countr_zero(bitmap) : -1; }
+   [[nodiscard]] constexpr bool empty()                            const noexcept { return bitmap == 0; }
+   [[nodiscard]] constexpr bool empty_at(uint32_t priority)        const noexcept { return matrix[priority].empty(); }
+   [[nodiscard]] constexpr bool has_peer(uint32_t priority)        const noexcept { return matrix[priority].has_peer(); }
+   [[nodiscard]] constexpr std::size_t size_at(uint32_t priority)  const noexcept { return matrix[priority].size(); }
+   [[nodiscard]] constexpr std::bitset<BITMAP_BITS>  bitmap_view() const noexcept { return {bitmap}; }
+
+   [[nodiscard]] constexpr TaskControlBlock* peek_best_task() const noexcept
    {
-      return matrix[priority].empty();
-   }
-   [[nodiscard]] std::size_t size_at(uint32_t priority) const noexcept
-   {
-      return matrix[priority].size();
-   }
-   [[nodiscard]] constexpr bool has_peer(uint32_t priority) const noexcept
-   {
-      return matrix[priority].has_peer();
-   }
-   [[nodiscard]] constexpr int best_priority() const noexcept
-   {
-      return bitmap ? std::countr_zero(bitmap) : -1;
-   }
-   [[nodiscard]] std::bitset<std::numeric_limits<uint32_t>::digits> bitmap_view() const noexcept
-   {
-      return {bitmap};
+      if (bitmap == 0) return nullptr;
+      auto const priority = std::countr_zero(bitmap);
+      return matrix[priority].front();
    }
 
    void enqueue_task(TaskControlBlock& tcb) noexcept
@@ -556,28 +646,12 @@ public:
       return tcb;
    }
 
-   [[nodiscard]] TaskControlBlock* peek_best_task() const noexcept
-   {
-      if (bitmap == 0) return nullptr;
-      auto const priority = std::countr_zero(bitmap);
-      return matrix[priority].front();
-   }
-
    void remove_task(TaskControlBlock& tcb) noexcept
    {
       auto const priority = tcb.effective_priority;
       matrix[priority].remove(tcb);
       if (matrix[priority].empty()) bitmap &= ~(1u << priority);
    }
-};
-
-struct SchedulerRequest
-{
-   enum class Kind
-   {
-      SetTaskReady, // Enqueue a TCB into this core's ready queue
-   } kind{};
-   TaskControlBlock* tcb{nullptr};
 };
 
 class Scheduler
@@ -592,26 +666,33 @@ class Scheduler
    uint32_t preempt_disable_depth{};
 
 public:
+   struct Request
+   {
+      enum class Kind
+      {
+         SetTaskReady, // Enqueue a TCB into this core's ready queue
+      } kind{};
+      TaskControlBlock* tcb{nullptr};
+   };
+
    std::atomic<uint32_t> pinned_task_count{};
 
-   Spinlock inbox_lock;
+   std::atomic<bool> inbox_poke_pending{false};
    static constexpr uint32_t INBOX_CAP = 64; // tune later
-   std::array<SchedulerRequest, INBOX_CAP> inbox{};
-   uint32_t inbox_head{0}; // pop index
-   uint32_t inbox_tail{0}; // push index
+   MpscRingBuffer<Request, INBOX_CAP> inbox;
 
    constexpr Scheduler() = default;
 
    // Core-local operations (only called on owning core)
    void set_task_ready_local(TaskControlBlock& tcb) noexcept;
-   void drain_inbox_local() noexcept;
+   void drain_inbox() noexcept;
 
    // Cross-core safe posting API
-   bool post_to_inbox(SchedulerRequest request) noexcept;
+   bool post_to_inbox(Request request) noexcept;
 
    // Reschedule request entrypoints
-   void request_reschedule_local() noexcept { need_reschedule.store(true, std::memory_order_release); }
-   void request_reschedule_ipi() noexcept; // calls port IPI for this core (or time core)
+   void request_reschedule_local()     noexcept { need_reschedule.store(true, std::memory_order_release); }
+   void request_reschedule_ipi() const noexcept { cortos_port_send_reschedule_ipi(core_id); }
 
    void block_current_task();
    void yield_to_peers();
@@ -639,39 +720,36 @@ void Scheduler::set_task_ready_local(TaskControlBlock& tcb) noexcept
    // - tcb not already in ready queue
    // - tcb->state is Blocked/Ready transition etc.
 
+   tcb.state = TaskControlBlock::State::Ready;
    ready_matrix.enqueue_task(tcb);
-   // tcb->state = TaskControlBlock::State::Ready;
 
    request_reschedule_local(); // optional (only if it beats current?)
 }
-void Scheduler::drain_inbox_local() noexcept
-{
-   // Optional: avoid taking the lock if empty (fast path)
-   {
-      SpinlockGuard g(inbox_lock);
-      while (inbox_head != inbox_tail) {
-         auto request = inbox[inbox_head];
-         inbox_head = (inbox_head + 1) % INBOX_CAP;
 
-         switch (request.kind) {
-            case SchedulerRequest::Kind::SetTaskReady:
-               set_task_ready_local(*request.tcb);
-               break;
-         }
+void Scheduler::drain_inbox() noexcept
+{
+   inbox_poke_pending.store(false, std::memory_order_release);
+
+   Request request;
+   while (inbox.pop(request)) {
+      switch (request.kind) {
+         case Request::Kind::SetTaskReady:
+            set_task_ready_local(*request.tcb);
+            break;
       }
    }
 }
 
 // Cross-core safe posting API
-bool Scheduler::post_to_inbox(SchedulerRequest request) noexcept
+bool Scheduler::post_to_inbox(Request request) noexcept
 {
-   SpinlockGuard g(inbox_lock);
+   // Many-producer safe
+   if (!inbox.push(request)) return false; // Full
 
-   uint32_t next_tail = (inbox_tail + 1) % INBOX_CAP;
-   if (next_tail == inbox_head) return false; // Full
-
-   inbox[inbox_tail] = request;
-   inbox_tail = next_tail;
+   bool expected = false;
+   if (inbox_poke_pending.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
+      cortos_port_send_reschedule_ipi(core_id);
+   }
    return true;
 }
 
@@ -748,7 +826,7 @@ struct Kernel
 
       // Remote core: post request + IPI poke
       bool ok = target.post_to_inbox({
-         .kind = SchedulerRequest::Kind::SetTaskReady,
+         .kind = Scheduler::Request::Kind::SetTaskReady,
          .tcb  = &tcb,
       });
       assert(ok && "Scheduler inbox full");
