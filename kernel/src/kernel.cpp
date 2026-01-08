@@ -2,6 +2,7 @@
 
 #include "cortos/kernel.hpp"
 #include "cortos/port.h"
+#include "mpsc_ring_buffer.hpp"
 
 #include <bit>
 #include <bitset>
@@ -22,123 +23,6 @@ namespace cortos
 
 static constexpr std::uintptr_t align_down(std::uintptr_t v, std::size_t a) { return v & ~(static_cast<std::uintptr_t>(a) - 1); }
 static constexpr std::uintptr_t   align_up(std::uintptr_t v, std::size_t a) { return (v + (a - 1)) & ~(static_cast<std::uintptr_t>(a) - 1); }
-
-template<typename T, std::size_t N>
-class MpscRingBuffer
-{
-   static_assert(N > 0);
-   static_assert((N & (N - 1)) == 0, "N must be a power of two");
-   static_assert(std::is_nothrow_destructible_v<T>);
-
-   static constexpr std::size_t mask = N - 1;
-   struct Cell
-   {
-      std::atomic<std::size_t> sequence;
-      alignas(T) std::array<std::byte, sizeof(T)> storage{};
-
-      constexpr explicit Cell(std::size_t seq) noexcept : sequence(seq) {}
-      Cell() noexcept = default;
-      T&       item()       noexcept { return *std::launder(reinterpret_cast<T*>(storage.data())); }
-      T const& item() const noexcept { return *std::launder(reinterpret_cast<T const*>(storage.data())); }
-   };
-
-public:
-   constexpr MpscRingBuffer() noexcept : MpscRingBuffer(std::make_index_sequence<N>{}) {}
-
-   MpscRingBuffer(MpscRingBuffer&&)            = default;
-   MpscRingBuffer& operator=(MpscRingBuffer&&) = default;
-   MpscRingBuffer(MpscRingBuffer const&)            = delete;
-   MpscRingBuffer& operator=(MpscRingBuffer const&) = delete;
-
-   ~MpscRingBuffer() noexcept
-   {
-      // Single-consumer destruction: drain remaining items
-      T tmp;
-      while (pop(tmp)) { /* discard */ }
-   }
-
-   // Many-producer: safe concurrently.
-   template<typename U>
-   bool push(U&& value) noexcept(std::is_nothrow_constructible_v<T, U&&>)
-   {
-      auto position = head.load(std::memory_order_relaxed);
-
-      while (true)
-      {
-         auto& cell = cells[position & mask];
-         auto sequence = cell.sequence.load(std::memory_order_acquire);
-         auto diff = static_cast<intptr_t>(sequence) - static_cast<intptr_t>(position);
-
-         if (diff == 0) {
-            // cell is available for this position; try to claim position
-            if (head.compare_exchange_weak(position, position + 1,
-                                           std::memory_order_relaxed,
-                                           std::memory_order_relaxed)) {
-               // We own this cell now
-               ::new (cell.storage.data()) T(std::forward<U>(value));
-               // Publish: mark cell ready for consumer by setting sequence to position+1
-               cell.sequence.store(position + 1, std::memory_order_release);
-               return true;
-            }
-            // CAS failed: position updated, retry
-         } else if (diff < 0) {
-            // sequence < position => consumer hasn't advanced enough; buffer full
-            return false;
-         } else {
-            // Another producer is ahead; reload head and retry
-            position = head.load(std::memory_order_relaxed);
-         }
-      }
-   }
-
-   // Single-consumer ONLY: call from exactly one core/thread.
-   bool pop(T& out) noexcept(std::is_nothrow_move_assignable_v<T> || std::is_nothrow_move_constructible_v<T>)
-   {
-      auto position = tail.load(std::memory_order_relaxed);
-      auto& cell = cells[position & mask];
-
-      auto sequence = cell.sequence.load(std::memory_order_acquire);
-      auto diff = static_cast<intptr_t>(sequence) - static_cast<intptr_t>(position + 1);
-
-      if (diff == 0) {
-         // cell contains an item for this position
-         tail.store(position + 1, std::memory_order_relaxed);
-
-         auto& item = cell.item();
-         if constexpr (std::is_nothrow_move_assignable_v<T>) {
-            out = std::move(item);
-         } else {
-            out = T(std::move(item));
-         }
-         item.~T();
-
-         // Mark cell free for producer at pos + N
-         cell.sequence.store(position + N, std::memory_order_release);
-         return true;
-      }
-
-      // empty (or producer mid-flight)
-      return false;
-   }
-
-   // Single-consumer only (approximate under contention; fine for stats/debug)
-   [[nodiscard]] std::size_t approx_size() const noexcept
-   {
-      auto h = head.load(std::memory_order_acquire);
-      auto t = tail.load(std::memory_order_acquire);
-      return (h >= t) ? (h - t) : 0;
-   }
-
-private:
-   // Expands into: Cell{0}, Cell{1}, Cell{2}...
-   template<std::size_t... Is>
-   constexpr explicit MpscRingBuffer(std::index_sequence<Is...>) noexcept : cells{ Cell{Is}... } {}
-
-   // Align these to reduce false sharing
-   alignas(64) std::atomic<std::size_t> head{0}; // producers claim slots
-   alignas(64) std::atomic<std::size_t> tail{0}; // consumer owns advancing
-   alignas(64) std::array<Cell, N> cells{};
-};
 
 struct TaskControlBlock;
 struct WaitGroup;
