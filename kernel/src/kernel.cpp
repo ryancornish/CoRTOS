@@ -578,10 +578,13 @@ public:
    void request_reschedule_local()     noexcept { need_reschedule.store(true, std::memory_order_release); }
    void request_reschedule_ipi() const noexcept { cortos_port_send_reschedule_ipi(core_id); }
 
+   void schedule_point() noexcept;
+   void schedule_from_isr() noexcept;
+
    void block_current_task();
    void yield_to_peers();
    TaskControlBlock* pick_next_task();
-   void reschedule();
+   void reschedule() noexcept;
 
    void disable_preemption()
    {
@@ -637,6 +640,29 @@ bool Scheduler::post_to_inbox(Request request) noexcept
    return true;
 }
 
+void Scheduler::schedule_point() noexcept
+{
+   // called in thread context at safe points
+   if (preempt_disable_depth != 0) return;
+   if (!need_reschedule.exchange(false, std::memory_order_acq_rel)) return;
+   cortos_port_pend_reschedule();
+}
+
+void Scheduler::schedule_from_isr() noexcept
+{
+   request_reschedule_local();
+   cortos_port_pend_reschedule(); // ISR-safe version if you want separate API
+}
+
+void Scheduler::reschedule() noexcept
+{
+   drain_inbox();
+   auto* next = pick_next_task();
+   if (!next || next == current_task) return;
+   auto* prev = current_task;
+   current_task = next;
+   cortos_port_switch(prev->context(), next->context());
+}
 
 struct Kernel
 {
@@ -746,7 +772,7 @@ namespace kernel
 
    std::uint32_t core_count() noexcept
    {
-      return cortos_port_get_core_count();
+      return CORTOS_PORT_CORE_COUNT;
    }
 
    Waitable::Result wait_for_any(std::span<Waitable* const> waitables)

@@ -56,12 +56,6 @@ typedef void (*cortos_port_isr_handler_t)(void* arg);
  */
 uint32_t cortos_port_get_core_id(void);
 
-/**
- * @brief Get the total number of CPU cores
- * @return Number of cores available
- */
-uint32_t cortos_port_get_core_count(void);
-
 /* ============================================================================
  * Context Switching
  * ========================================================================= */
