@@ -263,16 +263,31 @@ extern "C" void cortos_port_send_reschedule_ipi(uint32_t core_id)
    // else: TODO when pthread-per-core exists
 }
 
+struct BackendCoreThread
+{
+   pthread_t pthread{};
+   uint32_t core_id{};
+   cortos_port_core_entry_t entry{};
+};
 
 void cortos_port_start_cores(cortos_port_core_entry_t entry)
 {
-   std::array<pthread_t, CORTOS_PORT_CORE_COUNT - 1> threads{};
-   for (auto& pthread : threads) {
-      pthread_create(&pthread, nullptr, [](void* p_entry) -> void* {
-         auto entry = reinterpret_cast<cortos_port_core_entry_t>(p_entry);
-         entry();
-         return nullptr;
-      }, reinterpret_cast<void*>(entry));
+   /**
+    * Spawn CORTOS_PORT_CORE_COUNT-1 child threads (-1 because the one currently running will become Core0)
+    */
+   std::array<BackendCoreThread, CORTOS_PORT_CORE_COUNT - 1> core_threads{};
+   for (size_t core_id = 1; auto& core_thread : core_threads) {
+      core_thread.core_id = core_id;
+      core_thread.entry   = entry;
+      pthread_create(&core_thread.pthread, nullptr, [](void* init_arg) -> void*
+         {
+            auto* thread_init = reinterpret_cast<BackendCoreThread*>(init_arg);
+            tls_core_id = thread_init->core_id;
+            thread_init->entry();
+            return nullptr;
+         },
+         reinterpret_cast<void*>(&core_thread)
+      );
    }
 
    // Bootstrap core
@@ -313,8 +328,9 @@ extern "C" void cortos_port_init(void)
 
 extern "C" void cortos_port_idle(void)
 {
+   std::printf("Core: %d: cortos_port_idle()\n", tls_core_id);
    // Sleep 1ms to simulate power saving, then yield
-   struct timespec req = {.tv_sec = 0, .tv_nsec = 1'000'000};
+   struct timespec req = {.tv_sec = 1, .tv_nsec = 1'000'000};
    nanosleep(&req, nullptr);
    cortos_port_yield();
 }

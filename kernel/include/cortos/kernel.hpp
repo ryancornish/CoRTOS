@@ -479,6 +479,7 @@ struct CoreAffinity
    constexpr CoreAffinity operator|(CoreAffinity rhs) const { return CoreAffinity{mask | rhs.mask}; }
    constexpr CoreAffinity operator&(CoreAffinity rhs) const { return CoreAffinity{mask & rhs.mask}; }
    [[nodiscard]] constexpr bool allows(uint32_t core_id) const noexcept { return (mask & (1u << core_id)) != 0; }
+   [[nodiscard]] constexpr static CoreAffinity from_id(std::uint32_t core_id) { return CoreAffinity{1u << core_id}; }
 };
 // Predefined core masks
 static constexpr CoreAffinity Core0 = CoreAffinity{0x01};

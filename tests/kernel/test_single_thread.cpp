@@ -11,25 +11,23 @@ using namespace cortos;
 
 static void entry()
 {
-   std::printf("HELLO");
-   while (true) {}
+   while (true) {
+      std::printf("core %d: entry()\n", this_thread::core_id());
+      struct timespec req = {.tv_sec = 1, .tv_nsec = 1'000'000};
+      nanosleep(&req, nullptr);
+   }
 }
 
 int main()
 {
-   // 1) init kernel
    kernel::initialise();
 
-   // 2) provide stack storage
-   // NOTE: your StackLayout assumes stack grows "down" inside provided span;
-   // just make it a decent size and aligned.
-   alignas(16) static std::byte stack[16 * 1024];
+   alignas(16) static std::array<std::byte, 16 * 1024> stack;
 
-   // 3) create a single thread
    Thread t1(
       entry,
-      std::span<std::byte>{stack, sizeof(stack)},
-      Thread::Priority{0},            // 0 = highest priority in your scheme
+      stack,
+      Thread::Priority(0),
       Core0
    );
 

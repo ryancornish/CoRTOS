@@ -219,7 +219,7 @@ struct TaskControlBlock
    uint8_t base_priority;
    uint8_t effective_priority; // Can change dynamically
 
-   // Core pinning (future, but you already have affinity)
+   // Core pinning
    std::uint32_t pinned_core{0};
    CoreAffinity  affinity;
 
@@ -549,7 +549,7 @@ class Scheduler
    std::uint32_t core_id;
    TaskControlBlock* current_task{nullptr};
    TaskControlBlock* idle_task{nullptr};
-   alignas(CORTOS_STACK_ALIGN) std::array<std::byte, 1024> idle_stack{};
+   alignas(CORTOS_STACK_ALIGN) std::array<std::byte, 4 * 1024> idle_stack{};
 
    TaskReadyMatrix ready_matrix;
 
@@ -577,7 +577,7 @@ public:
    void init_idle_task()
    {
       StackLayout slayout(idle_stack, 0);
-      idle_task = ::new (slayout.tcb) TaskControlBlock(0, config::MAX_PRIORITIES-1, CoreAffinity(core_id), slayout.user_stack,
+      idle_task = ::new (slayout.tcb) TaskControlBlock(0, config::MAX_PRIORITIES-1, CoreAffinity::from_id(core_id), slayout.user_stack,
       []{
          while (true) {
             cortos_port_idle();
@@ -697,7 +697,16 @@ void Scheduler::reschedule() noexcept
    if (next == nullptr) {
       next = idle_task;
    }
-   if (next == current_task) return;
+
+   if (next == current_task) {
+      if constexpr (CORTOS_PORT_SIMULATION) {
+         // The below optimisation does not work on the linux backend
+         // because we alternate between scheduler/thread contexts.
+         // There must be an explicit switch back to the thread - even if it is the same one!
+         cortos_port_switch(current_task->context(), next->context());
+      }
+      return; // Optimisation: No need to switch to the same task
+   }
 
    TaskControlBlock* prev = current_task;
    current_task = next;
@@ -810,8 +819,6 @@ namespace kernel
       assert(!k.initialised);
       k.initialised = true;
 
-      // TODO: init scheduler structures per core (ready queues, current thread pointers, etc.)
-      // TODO: init idle threads per core (or lazily)
       cortos_port_init();
 
       for (auto& s : k.schedulers) {
@@ -830,7 +837,9 @@ namespace kernel
          sched.start(); // picks first runnable (or idle) pinned to this core and port_start_first()
 
          if constexpr(CORTOS_PORT_SIMULATION) {
-            cortos_port_on_core_returned();
+            while (true) {
+               sched.reschedule();
+            }
          } else {
             __builtin_unreachable();
          }
@@ -855,6 +864,13 @@ namespace kernel
 
 } // namespace kernel
 
+namespace this_thread
+{
+   [[nodiscard]] std::uint32_t core_id() noexcept
+   {
+      return cortos_port_get_core_id();
+   }
+}
 
 Thread::Thread(EntryFn&& entry, std::span<std::byte> stack, Priority priority, CoreAffinity affinity)
 {
