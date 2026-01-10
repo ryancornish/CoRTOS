@@ -549,6 +549,7 @@ class Scheduler
    std::uint32_t core_id;
    TaskControlBlock* current_task{nullptr};
    TaskControlBlock* idle_task{nullptr};
+   alignas(CORTOS_STACK_ALIGN) std::array<std::byte, 1024> idle_stack{};
 
    TaskReadyMatrix ready_matrix;
 
@@ -573,6 +574,17 @@ public:
 
    constexpr explicit Scheduler(std::uint32_t core_id) : core_id(core_id) {};
 
+   void init_idle_task()
+   {
+      StackLayout slayout(idle_stack, 0);
+      idle_task = ::new (slayout.tcb) TaskControlBlock(0, config::MAX_PRIORITIES-1, CoreAffinity(core_id), slayout.user_stack,
+      []{
+         while (true) {
+            cortos_port_idle();
+         }
+      });
+   }
+
    // Core-local operations (only called on owning core)
    void start() noexcept;
    void set_task_ready_local(TaskControlBlock& tcb) noexcept;
@@ -590,7 +602,6 @@ public:
 
    void block_current_task();
    void yield_to_peers();
-   TaskControlBlock* pop_next_task();
    void set_current_task(TaskControlBlock& tcb);
    void reschedule() noexcept;
 
@@ -612,7 +623,10 @@ public:
 
 void Scheduler::start() noexcept
 {
-   auto* first = pop_next_task();
+   auto* first = ready_matrix.pop_best_task();
+   if (first == nullptr) {
+      first = idle_task;
+   }
    assert(first != nullptr);
    set_current_task(*first);
 
@@ -679,8 +693,11 @@ void Scheduler::reschedule() noexcept
 {
    drain_inbox();
 
-   TaskControlBlock* next = pop_next_task();
-   if (!next || next == current_task) return;
+   TaskControlBlock* next = ready_matrix.pop_best_task();
+   if (next == nullptr) {
+      next = idle_task;
+   }
+   if (next == current_task) return;
 
    TaskControlBlock* prev = current_task;
    current_task = next;
@@ -784,6 +801,8 @@ private:
 static constinit Kernel<CORTOS_PORT_CORE_COUNT> k;
 
 
+
+
 namespace kernel
 {
    void initialise()
@@ -794,6 +813,10 @@ namespace kernel
       // TODO: init scheduler structures per core (ready queues, current thread pointers, etc.)
       // TODO: init idle threads per core (or lazily)
       cortos_port_init();
+
+      for (auto& s : k.schedulers) {
+         s.init_idle_task();
+      }
    }
 
    START_NO_RETURN void start()
@@ -841,6 +864,11 @@ Thread::Thread(EntryFn&& entry, std::span<std::byte> stack, Priority priority, C
    tcb = ::new (slayout.tcb) TaskControlBlock(id, priority, affinity, slayout.user_stack, std::move(entry));
 
    k.register_thread(*tcb);
+}
+
+Thread::~Thread()
+{
+
 }
 
 void Spinlock::lock()

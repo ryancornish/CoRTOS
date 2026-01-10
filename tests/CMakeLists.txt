@@ -10,6 +10,15 @@ function(add_cortos_test name)
    add_test(NAME ${name} COMMAND ${name})
 endfunction()
 
+function(add_cortos_non_gtest_test name)
+   add_executable(${name} ${ARGN})
+   target_link_libraries(${name} PRIVATE
+      cortos::kernel
+      cortos::libcortos
+   )
+   add_test(NAME ${name} COMMAND ${name})
+endfunction()
+
 # Kernel tests
 add_subdirectory(kernel)
 
