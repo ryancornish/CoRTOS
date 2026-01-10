@@ -13,7 +13,6 @@
 #include "cortos/port.h"
 #include "port_traits.h"
 
-#include <algorithm>
 #include <boost/context/fiber.hpp>
 #include <boost/context/preallocated.hpp>
 #include <boost/context/stack_context.hpp>
@@ -264,6 +263,27 @@ extern "C" void cortos_port_send_reschedule_ipi(uint32_t core_id)
    // else: TODO when pthread-per-core exists
 }
 
+
+void cortos_port_start_cores(cortos_port_core_entry_t entry)
+{
+   std::array<pthread_t, CORTOS_PORT_CORE_COUNT - 1> threads{};
+   for (auto& pthread : threads) {
+      pthread_create(&pthread, nullptr, [](void* p_entry) -> void* {
+         auto entry = reinterpret_cast<cortos_port_core_entry_t>(p_entry);
+         entry();
+         return nullptr;
+      }, reinterpret_cast<void*>(entry));
+   }
+
+   // Bootstrap core
+   entry();
+}
+
+// Likely no-op on real targets.
+void cortos_port_on_core_returned()
+{
+
+}
 
 /* ============================================================================
  * Thread-Local Storage

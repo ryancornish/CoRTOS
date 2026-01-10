@@ -43,6 +43,11 @@ typedef struct cortos_port_context cortos_port_context_t;
 typedef void (*cortos_port_entry_t)(void* arg);
 
 /**
+ * @brief Core entry point signature
+ */
+typedef void (*cortos_port_core_entry_t)(void);
+
+/**
  * @brief ISR signature
  */
 typedef void (*cortos_port_isr_handler_t)(void* arg);
@@ -174,6 +179,19 @@ void cortos_port_cpu_relax(void);
  * @param core_id Target core ID
  */
 void cortos_port_send_reschedule_ipi(uint32_t core_id);
+
+/**
+ * @brief Start (or release) all secondary cores and run entry on every core.
+ *
+ * After this call returns on the bootstrap core:
+ *  - On embedded: typically never returns because entry will start the first thread.
+ *  - On simulation: may return if port_start_first returns (cooperative).
+ */
+void cortos_port_start_cores(cortos_port_core_entry_t entry);
+
+// Likely no-op on real targets.
+void cortos_port_on_core_returned();
+
 
 /* ============================================================================
  * Thread-Local Storage (TLS)

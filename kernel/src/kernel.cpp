@@ -546,7 +546,7 @@ public:
 
 class Scheduler
 {
-   std::uint32_t core_id{};
+   std::uint32_t core_id;
    TaskControlBlock* current_task{nullptr};
    TaskControlBlock* idle_task{nullptr};
 
@@ -571,7 +571,7 @@ public:
    static constexpr uint32_t INBOX_CAP = 64; // tune later
    MpscRingBuffer<Request, INBOX_CAP> inbox;
 
-   constexpr Scheduler() = default;
+   constexpr explicit Scheduler(std::uint32_t core_id) : core_id(core_id) {};
 
    // Core-local operations (only called on owning core)
    void start() noexcept;
@@ -697,16 +697,19 @@ void Scheduler::set_current_task(TaskControlBlock& tcb)
    current_task = &tcb;
 }
 
-
+// Note: this is a template purely because it allows the compile-time index-sequence array initialiser for schedulers to work
+template<std::size_t CORES>
 struct Kernel
 {
    Spinlock lock;
    std::atomic<bool>    initialised{false};
    std::atomic<bool>        started{false};
    std::atomic<bool> stop_requested{false};
-   std::array<Scheduler, CORTOS_PORT_CORE_COUNT> schedulers{};
-
+   std::array<Scheduler, CORES> schedulers;
    std::atomic<uint32_t> thread_id_generator{1};
+
+   constexpr Kernel() noexcept : Kernel(std::make_index_sequence<CORES>{}) {}
+
 
    Scheduler& scheduler_for_core(std::uint32_t core_id) noexcept { return schedulers.at(core_id); }
    Scheduler& scheduler_for_this_core()                 noexcept { return scheduler_for_core(cortos_port_get_core_id()); }
@@ -749,38 +752,37 @@ struct Kernel
          SpinlockGuard guard(lock);
          target_core = choose_core_for(tcb);
          pin_thread_to_core(tcb, target_core);
-         // Potentially add to global thread list later (under this lock).
+         tcb.state = TaskControlBlock::State::Ready;
       }
 
       Scheduler& target = scheduler_for_core(target_core);
 
+      // If cores are not running yet, enqueue directly (even for remote cores)
       if (!started.load(std::memory_order_acquire)) {
-         // Pre-start: safe to mutate directly (single-threaded init assumption)
-         target.set_task_ready_local(tcb);
+         target.set_task_ready_local(tcb);   // direct, no inbox
          return;
       }
 
+      // Post-start: must respect per-core ownership
       uint32_t this_core = cortos_port_get_core_id();
-
       if (this_core == target_core) {
-         // Running on same core: keep it local
          target.set_task_ready_local(tcb);
          target.request_reschedule_local();
          return;
       }
 
-      // Remote core: post request + IPI poke
       bool ok = target.post_to_inbox({
-         .kind = Scheduler::Request::Kind::SetTaskReady,
-         .tcb  = &tcb,
+         .kind=Scheduler::Request::Kind::SetTaskReady,
+         .tcb=&tcb
       });
-      assert(ok && "Scheduler inbox full");
-
-      cortos_port_send_reschedule_ipi(target_core);
+      assert(ok);
    }
-
+private:
+   template<std::size_t... Is>
+   constexpr explicit Kernel(std::index_sequence<Is...>) noexcept : schedulers{ Scheduler{Is}... } {}
 };
-static constinit Kernel k;
+static constinit Kernel<CORTOS_PORT_CORE_COUNT> k;
+
 
 namespace kernel
 {
@@ -799,20 +801,17 @@ namespace kernel
       assert(k.initialised && "kernel::initialise() must be called first");
       k.started.store(true, std::memory_order_release);
 
-      auto& sched = k.scheduler_for_this_core();
-      sched.start();
+      cortos_port_start_cores([]()
+      {
+         auto& sched = k.scheduler_for_this_core();
+         sched.start(); // picks first runnable (or idle) pinned to this core and port_start_first()
 
-      // TODO: Move this to its own hook
-      if constexpr(CORTOS_PORT_SIMULATION) {
-         // If start() returns, it means the first thread yielded back.
-         // Now we can run the cooperative scheduler loop until test decides to stop.
-         while (!k.stop_requested.load(std::memory_order_acquire)) {
-            sched.schedule_point();
-            cortos_port_idle();
+         if constexpr(CORTOS_PORT_SIMULATION) {
+            cortos_port_on_core_returned();
+         } else {
+            __builtin_unreachable();
          }
-      } else {
-         __builtin_unreachable();
-      }
+      });
    }
 
    std::uint32_t core_count() noexcept
@@ -841,7 +840,7 @@ Thread::Thread(EntryFn&& entry, std::span<std::byte> stack, Priority priority, C
    StackLayout slayout(stack, 0);
    tcb = ::new (slayout.tcb) TaskControlBlock(id, priority, affinity, slayout.user_stack, std::move(entry));
 
-   //set_task_ready(tcb);
+   k.register_thread(*tcb);
 }
 
 void Spinlock::lock()
