@@ -574,6 +574,9 @@ public:
 
    constexpr explicit Scheduler(std::uint32_t core_id) : core_id(core_id) {};
 
+   [[nodiscard]] uint32_t current_task_id()       const noexcept { return current_task ? current_task->id : 0; }
+   [[nodiscard]] uint8_t  current_task_priority() const noexcept { return current_task ? current_task->effective_priority : 0; }
+
    void init_idle_task()
    {
       StackLayout slayout(idle_stack, 0);
@@ -807,10 +810,46 @@ private:
    template<std::size_t... Is>
    constexpr explicit Kernel(std::index_sequence<Is...>) noexcept : schedulers{ Scheduler{Is}... } {}
 };
-static constinit Kernel<CORTOS_PORT_CORE_COUNT> k;
+static constinit Kernel<config::CORES> k;
 
 
 
+
+
+
+
+
+Thread::Thread(EntryFn&& entry, std::span<std::byte> stack, Priority priority, CoreAffinity affinity)
+{
+   auto id = k.thread_id_generator.fetch_add(1, std::memory_order_relaxed);
+
+   StackLayout slayout(stack, 0);
+   tcb = ::new (slayout.tcb) TaskControlBlock(id, priority, affinity, slayout.user_stack, std::move(entry));
+
+   k.register_thread(*tcb);
+}
+
+Thread::~Thread()
+{
+
+}
+
+void Spinlock::lock()
+{
+   k.scheduler_for_this_core().disable_preemption();
+   while (flag.test_and_set(std::memory_order_acquire)) {
+      // Busy-wait with CPU yield hint
+      cortos_port_cpu_relax();
+   }
+}
+
+void Spinlock::unlock()
+{
+   flag.clear(std::memory_order_release);
+   k.scheduler_for_this_core().enable_preemption();
+}
+
+/**** PUBLIC ****/
 
 namespace kernel
 {
@@ -848,7 +887,7 @@ namespace kernel
 
    std::uint32_t core_count() noexcept
    {
-      return CORTOS_PORT_CORE_COUNT;
+      return config::CORES;
    }
 
    Waitable::Result wait_for_any(std::span<Waitable* const> waitables)
@@ -866,40 +905,26 @@ namespace kernel
 
 namespace this_thread
 {
+   [[nodiscard]] Thread::Id id()
+   {
+      return k.scheduler_for_this_core().current_task_id();
+   }
+
+   [[nodiscard]] Thread::Priority priority()
+   {
+      return k.scheduler_for_this_core().current_task_priority();
+   }
+
    [[nodiscard]] std::uint32_t core_id() noexcept
    {
       return cortos_port_get_core_id();
    }
-}
 
-Thread::Thread(EntryFn&& entry, std::span<std::byte> stack, Priority priority, CoreAffinity affinity)
-{
-   auto id = k.thread_id_generator.fetch_add(1, std::memory_order_relaxed);
-
-   StackLayout slayout(stack, 0);
-   tcb = ::new (slayout.tcb) TaskControlBlock(id, priority, affinity, slayout.user_stack, std::move(entry));
-
-   k.register_thread(*tcb);
-}
-
-Thread::~Thread()
-{
-
-}
-
-void Spinlock::lock()
-{
-   k.scheduler_for_this_core().disable_preemption();
-   while (flag.test_and_set(std::memory_order_acquire)) {
-      // Busy-wait with CPU yield hint
-      cortos_port_cpu_relax();
+   [[noreturn]] void thread_exit()
+   {
+      // TODO
+      __builtin_unreachable();
    }
-}
-
-void Spinlock::unlock()
-{
-   flag.clear(std::memory_order_release);
-   k.scheduler_for_this_core().enable_preemption();
-}
+}  // namespace this_thread
 
 }  // namespace cortos

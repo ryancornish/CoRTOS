@@ -4,9 +4,12 @@ add_library(cortos_port_boost STATIC
    port_linux_boost.cpp
 )
 
-target_include_directories(cortos_port_boost PUBLIC
+target_include_directories(cortos_port_boost PRIVATE
    ${CMAKE_SOURCE_DIR}/port/include
-   ${CMAKE_CURRENT_SOURCE_DIR}
+)
+
+target_include_directories(cortos_port_boost PUBLIC
+   ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
 
 target_compile_features(cortos_port_boost PUBLIC cxx_std_23)

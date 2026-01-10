@@ -8,9 +8,12 @@
 #ifndef CORTOS_KERNEL_HPP
 #define CORTOS_KERNEL_HPP
 
+#include "cortos/port_traits.h"
+
 #include <array>
 #include <atomic>
 #include <cstddef>
+#include <limits>
 #include <span>
 
 namespace cortos
@@ -18,10 +21,20 @@ namespace cortos
 
 namespace config
 {
+   /**
+    * @brief How many cores for SMP
+    */
+   static constexpr std::size_t CORES = 2;
+   static_assert(1 <= CORES && CORES <= CORTOS_PORT_CORE_COUNT, "Port does not support configured amount of cores.");
+
    static constexpr std::size_t MAX_WAIT_NODES = 8;
+
    static constexpr std::uint32_t TIME_CORE_ID = 0;
-   static constexpr std::size_t MAX_PRIORITIES = 32;
-}
+   static_assert(TIME_CORE_ID < CORES, "Time core set to non-existent core.");
+
+   static constexpr std::size_t MAX_PRIORITIES = 31;
+   static_assert(MAX_PRIORITIES < std::numeric_limits<uint32_t>::digits, "Priorities unsupported by kernel implementation.");
+}  // namespace config
 
 /* ============================================================================
  * Function - Type-Erased Callable with Configurable Storage
@@ -539,12 +552,12 @@ namespace this_thread
    /**
     * @brief Get current thread ID
     */
-   [[nodiscard]] inline ::cortos::Thread::Id id();
+   [[nodiscard]] ::cortos::Thread::Id id();
 
    /**
     * @brief Get current thread (effective) priority
     */
-   [[nodiscard]] inline ::cortos::Thread::Priority priority();
+   [[nodiscard]] ::cortos::Thread::Priority priority();
 
    /**
     * @brief Get current CPU core ID (0-based)

@@ -12,7 +12,7 @@
 #ifndef CORTOS_PORT_H
 #define CORTOS_PORT_H
 
-#include "port_traits.h"
+#include "cortos/port_traits.h"
 
 #include <stddef.h>
 #include <stdint.h>
