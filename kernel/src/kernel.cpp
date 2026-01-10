@@ -21,6 +21,12 @@
 namespace cortos
 {
 
+#ifdef CORTOS_PORT_SIMULATION
+#define START_NO_RETURN
+#else
+#define START_NO_RETURN [[noreturn]]
+#endif
+
 static constexpr std::uintptr_t align_down(std::uintptr_t v, std::size_t a) { return v & ~(static_cast<std::uintptr_t>(a) - 1); }
 static constexpr std::uintptr_t   align_up(std::uintptr_t v, std::size_t a) { return (v + (a - 1)) & ~(static_cast<std::uintptr_t>(a) - 1); }
 
@@ -401,7 +407,7 @@ void Waitable::remove(WaitNode& wait_node) noexcept
 WaitNode* Waitable::pick_best() noexcept
 {
    WaitNode* best = nullptr;
-   uint8_t best_priority = 0;
+   uint8_t best_priority = std::numeric_limits<uint8_t>::max();
 
    for (auto* iter = head; iter; iter = iter->next) {
       if (!iter->active) continue;
@@ -411,7 +417,7 @@ WaitNode* Waitable::pick_best() noexcept
       if (!tcb) continue;
 
       auto priority = tcb->effective_priority;
-      if (!best || priority > best_priority) {
+      if (!best || priority < best_priority) {
          best = iter;
          best_priority = priority;
       }
@@ -568,6 +574,7 @@ public:
    constexpr Scheduler() = default;
 
    // Core-local operations (only called on owning core)
+   void start() noexcept;
    void set_task_ready_local(TaskControlBlock& tcb) noexcept;
    void drain_inbox() noexcept;
 
@@ -583,7 +590,8 @@ public:
 
    void block_current_task();
    void yield_to_peers();
-   TaskControlBlock* pick_next_task();
+   TaskControlBlock* pop_next_task();
+   void set_current_task(TaskControlBlock& tcb);
    void reschedule() noexcept;
 
    void disable_preemption()
@@ -593,11 +601,24 @@ public:
    void enable_preemption()
    {
       assert(preempt_disable_depth > 0);
-      if (--preempt_disable_depth == 0 && need_reschedule) {
-         reschedule();
+      if (--preempt_disable_depth == 0) {
+         if (need_reschedule.load(std::memory_order_acquire)) {
+            // Defer to scheduler context
+            cortos_port_pend_reschedule();
+         }
       }
    }
 };
+
+void Scheduler::start() noexcept
+{
+   auto* first = pop_next_task();
+   assert(first != nullptr);
+   set_current_task(*first);
+
+   //cortos_port_set_thread_pointer(current_task);
+   cortos_port_start_first(current_task->context());
+}
 
 // Core-local operations (only called on owning core)
 void Scheduler::set_task_ready_local(TaskControlBlock& tcb) noexcept
@@ -657,18 +678,32 @@ void Scheduler::schedule_from_isr() noexcept
 void Scheduler::reschedule() noexcept
 {
    drain_inbox();
-   auto* next = pick_next_task();
+
+   TaskControlBlock* next = pop_next_task();
    if (!next || next == current_task) return;
-   auto* prev = current_task;
+
+   TaskControlBlock* prev = current_task;
    current_task = next;
+
+   prev->state = TaskControlBlock::State::Ready;
+   ready_matrix.enqueue_task(*prev);
    cortos_port_switch(prev->context(), next->context());
 }
+
+void Scheduler::set_current_task(TaskControlBlock& tcb)
+{
+   assert(tcb.state == TaskControlBlock::State::Ready);
+   tcb.state = TaskControlBlock::State::Running;
+   current_task = &tcb;
+}
+
 
 struct Kernel
 {
    Spinlock lock;
-   std::atomic<bool> initialised{false};
-   std::atomic<bool>     started{false};
+   std::atomic<bool>    initialised{false};
+   std::atomic<bool>        started{false};
+   std::atomic<bool> stop_requested{false};
    std::array<Scheduler, CORTOS_PORT_CORE_COUNT> schedulers{};
 
    std::atomic<uint32_t> thread_id_generator{1};
@@ -759,14 +794,24 @@ namespace kernel
       cortos_port_init();
    }
 
-   [[noreturn]] void start()
+   START_NO_RETURN void start()
    {
       assert(k.initialised && "kernel::initialise() must be called first");
+      k.started.store(true, std::memory_order_release);
 
-      // TODO: pick initial threads for each core, set TLS, start first context on each core
-      // For now:
-      while (true) {
-         cortos_port_idle();
+      auto& sched = k.scheduler_for_this_core();
+      sched.start();
+
+      // TODO: Move this to its own hook
+      if constexpr(CORTOS_PORT_SIMULATION) {
+         // If start() returns, it means the first thread yielded back.
+         // Now we can run the cooperative scheduler loop until test decides to stop.
+         while (!k.stop_requested.load(std::memory_order_acquire)) {
+            sched.schedule_point();
+            cortos_port_idle();
+         }
+      } else {
+         __builtin_unreachable();
       }
    }
 

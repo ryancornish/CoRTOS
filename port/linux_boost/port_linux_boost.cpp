@@ -63,10 +63,6 @@ static thread_local void* tls_thread_pointer = nullptr;
 // Simulated core ID (set when pthread is created for SMP simulation)
 static thread_local uint32_t tls_core_id = 0;
 
-static thread_local boost::context::fiber tls_sched_fiber{};
-static thread_local bool tls_in_scheduler = false;
-static thread_local std::atomic<bool> tls_pendsv_pending{false}; // per-core pending flag
-
 
 /* ============================================================================
  * Core Identification
@@ -144,33 +140,10 @@ extern "C" void cortos_port_context_init(cortos_port_context_t* context,
    );
 }
 
-extern "C" void cortos_port_run_scheduler(void (*entry)(void*), void* arg)
-{
-   // Construct scheduler fiber that never returns
-   tls_sched_fiber = boost::context::fiber([=](boost::context::fiber&& caller) mutable {
-      (void)caller;
-      tls_in_scheduler = true;
-
-      // "entry" is your kernel scheduler loop for this core
-      entry(arg);
-
-      std::abort(); // must never return
-      return boost::context::fiber{};
-   });
-
-   // Enter scheduler fiber
-   tls_sched_fiber = std::move(tls_sched_fiber).resume();
-   std::abort();
-}
 
 extern "C" void cortos_port_pend_reschedule(void)
 {
-   // Mark pending (coalesce)
-   tls_pendsv_pending.store(true, std::memory_order_release);
-
-   // If we are in thread context, yield immediately to the scheduler fiber.
-   // If we are already in scheduler context, do nothing (it will observe pending).
-   if (!tls_in_scheduler) {
+   if (tls_current_context) {
       cortos_port_yield();
    }
 }
@@ -285,10 +258,12 @@ extern "C" void cortos_port_cpu_relax(void)
 
 extern "C" void cortos_port_send_reschedule_ipi(uint32_t core_id)
 {
-   // TODO: For SMP simulation, signal the pthread representing core_id
-   // For now, this is a no-op
-   (void)core_id;
+   if (core_id == tls_core_id) {
+      cortos_port_pend_reschedule();
+   }
+   // else: TODO when pthread-per-core exists
 }
+
 
 /* ============================================================================
  * Thread-Local Storage

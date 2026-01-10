@@ -25,6 +25,10 @@ extern "C" {
 /* ============================================================================
  * Port Configuration
  * ========================================================================= */
+#ifndef CORTOS_PORT_SIMULATION
+# define CORTOS_PORT_SIMULATION 0
+#endif
+
 
 /**
  * @brief Opaque context structure (platform-specific size/alignment)
@@ -121,6 +125,17 @@ void cortos_port_yield(void);
 void cortos_port_thread_exit(void) __attribute__((noreturn));
 
 void cortos_port_pend_reschedule(void);
+
+/**
+ * @brief Enter the scheduler context for this core and run its loop.
+ *
+ * The port must switch into a scheduler-owned execution context.
+ * This function must not return.
+ *
+ * On embedded ports this would typically enable interrupts and start the first thread.
+ * On the Boost port it starts the scheduler fiber for this pthread/core.
+ */
+void cortos_port_run_scheduler(void) __attribute__((noreturn));
 
 /* ============================================================================
  * Critical Sections (Interrupt Control)

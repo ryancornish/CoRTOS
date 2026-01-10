@@ -411,10 +411,9 @@ namespace kernel
    /**
     * @brief Start the scheduler
     *
-    * Never returns. Begins executing threads.
     * At least one thread must exist before calling start().
     */
-   [[noreturn]] void start();
+   void start();
 
 
    /**
