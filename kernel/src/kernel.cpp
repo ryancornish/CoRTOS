@@ -544,44 +544,49 @@ public:
    }
 };
 
+struct CrossCoreRequest
+{
+   enum : uint8_t {
+      SetTaskReady, // Enqueue a TCB into this core's ready queue
+   } type{};
+   TaskControlBlock* tcb{nullptr};
+};
+
 class Scheduler
 {
-   std::uint32_t core_id;
+   std::uint32_t const core_id;
+   std::atomic<uint32_t> pinned_task_counter{0};
    TaskControlBlock* current_task{nullptr};
-   TaskControlBlock* idle_task{nullptr};
+   TaskControlBlock*    idle_task{nullptr};
    alignas(CORTOS_STACK_ALIGN) std::array<std::byte, 4 * 1024> idle_stack{};
 
    TaskReadyMatrix ready_matrix;
 
    std::atomic<bool> need_reschedule{false};
-   uint32_t preempt_disable_depth{};
-
-public:
-   struct Request
-   {
-      enum class Kind
-      {
-         SetTaskReady, // Enqueue a TCB into this core's ready queue
-      } kind{};
-      TaskControlBlock* tcb{nullptr};
-   };
-
-   std::atomic<uint32_t> pinned_task_count{};
+   uint32_t    preempt_disable_depth{0};
 
    std::atomic<bool> inbox_poke_pending{false};
    static constexpr uint32_t INBOX_CAP = 64; // tune later
-   MpscRingBuffer<Request, INBOX_CAP> inbox;
+   MpscRingBuffer<CrossCoreRequest, INBOX_CAP> inbox;
 
+public:
    constexpr explicit Scheduler(std::uint32_t core_id) : core_id(core_id) {};
 
    [[nodiscard]] uint32_t current_task_id()       const noexcept { return current_task ? current_task->id : 0; }
    [[nodiscard]] uint8_t  current_task_priority() const noexcept { return current_task ? current_task->effective_priority : 0; }
+   [[nodiscard]] uint32_t pinned_task_count()     const noexcept { return pinned_task_counter.load(std::memory_order_relaxed); }
+
+   void pin_task(TaskControlBlock& tcb)
+   {
+      tcb.pinned_core = core_id;
+      pinned_task_counter.fetch_add(1, std::memory_order_relaxed);
+   }
 
    void init_idle_task()
    {
       StackLayout slayout(idle_stack, 0);
       idle_task = ::new (slayout.tcb) TaskControlBlock(0, config::MAX_PRIORITIES-1, CoreAffinity::from_id(core_id), slayout.user_stack,
-      []{
+      +[]{
          while (true) {
             cortos_port_idle();
          }
@@ -594,7 +599,7 @@ public:
    void drain_inbox() noexcept;
 
    // Cross-core safe posting API
-   bool post_to_inbox(Request request) noexcept;
+   bool post_to_inbox(CrossCoreRequest request) noexcept;
 
    // Reschedule request entrypoints
    void request_reschedule_local()     noexcept { need_reschedule.store(true, std::memory_order_release); }
@@ -612,6 +617,7 @@ public:
    {
       ++preempt_disable_depth;
    }
+
    void enable_preemption()
    {
       assert(preempt_disable_depth > 0);
@@ -655,10 +661,10 @@ void Scheduler::drain_inbox() noexcept
 {
    inbox_poke_pending.store(false, std::memory_order_release);
 
-   Request request;
+   CrossCoreRequest request;
    while (inbox.pop(request)) {
-      switch (request.kind) {
-         case Request::Kind::SetTaskReady:
+      switch (request.type) {
+         case CrossCoreRequest::SetTaskReady:
             set_task_ready_local(*request.tcb);
             break;
       }
@@ -666,7 +672,7 @@ void Scheduler::drain_inbox() noexcept
 }
 
 // Cross-core safe posting API
-bool Scheduler::post_to_inbox(Request request) noexcept
+bool Scheduler::post_to_inbox(CrossCoreRequest request) noexcept
 {
    // Many-producer safe
    if (!inbox.push(request)) return false; // Full
@@ -739,73 +745,64 @@ struct Kernel
 
    constexpr Kernel() noexcept : Kernel(std::make_index_sequence<CORES>{}) {}
 
-
    Scheduler& scheduler_for_core(std::uint32_t core_id) noexcept { return schedulers.at(core_id); }
    Scheduler& scheduler_for_this_core()                 noexcept { return scheduler_for_core(cortos_port_get_core_id()); }
    Scheduler& scheduler_for_time_core()                 noexcept { return scheduler_for_core(config::TIME_CORE_ID); }
 
-   std::uint32_t choose_core_for(TaskControlBlock const& tcb) noexcept
+   // Load-balancing pinner
+   std::uint32_t pin_thread_to_core(TaskControlBlock& tcb) noexcept
    {
-      uint32_t best_core = 0;
+      uint32_t best_core = std::numeric_limits<uint32_t>::max();
       uint32_t best_load = std::numeric_limits<uint32_t>::max();
 
       bool found = false;
-
       for (uint32_t core = 0; core < schedulers.size(); ++core) {
          if (!tcb.affinity.allows(core)) continue;
 
-         uint32_t load = schedulers[core].pinned_task_count.load(std::memory_order_relaxed);
-
+         uint32_t load = schedulers[core].pinned_task_count();
          if (load < best_load) {
             best_load = load;
             best_core = core;
             found = true;
          }
       }
-
       assert(found && "Thread affinity mask allows no cores");
-      return best_core;
-   }
 
-   void pin_thread_to_core(TaskControlBlock& tcb, uint32_t core_id) noexcept
-   {
-      tcb.pinned_core = core_id;
-      schedulers[core_id].pinned_task_count.fetch_add(1, std::memory_order_relaxed);
+      schedulers.at(best_core).pin_task(tcb);
+      return best_core;
    }
 
    void register_thread(TaskControlBlock& tcb) noexcept
    {
-      uint32_t target_core = 0;
-
+      uint32_t chosen_core = 0;
       {
          SpinlockGuard guard(lock);
-         target_core = choose_core_for(tcb);
-         pin_thread_to_core(tcb, target_core);
-         tcb.state = TaskControlBlock::State::Ready;
+         chosen_core = pin_thread_to_core(tcb);
       }
 
-      Scheduler& target = scheduler_for_core(target_core);
+      auto& scheduler = scheduler_for_core(chosen_core);
 
       // If cores are not running yet, enqueue directly (even for remote cores)
       if (!started.load(std::memory_order_acquire)) {
-         target.set_task_ready_local(tcb);   // direct, no inbox
+         scheduler.set_task_ready_local(tcb);   // direct, no inbox
          return;
       }
 
       // Post-start: must respect per-core ownership
-      uint32_t this_core = cortos_port_get_core_id();
-      if (this_core == target_core) {
-         target.set_task_ready_local(tcb);
-         target.request_reschedule_local();
+      auto this_core = cortos_port_get_core_id();
+      if (this_core == chosen_core) {
+         scheduler.set_task_ready_local(tcb);
+         scheduler.request_reschedule_local();
          return;
       }
 
-      bool ok = target.post_to_inbox({
-         .kind=Scheduler::Request::Kind::SetTaskReady,
-         .tcb=&tcb
+      bool posted = scheduler.post_to_inbox({
+         .type = CrossCoreRequest::SetTaskReady,
+         .tcb  = &tcb,
       });
-      assert(ok);
+      assert(posted);
    }
+
 private:
    template<std::size_t... Is>
    constexpr explicit Kernel(std::index_sequence<Is...>) noexcept : schedulers{ Scheduler{Is}... } {}
@@ -870,7 +867,7 @@ namespace kernel
       assert(k.initialised && "kernel::initialise() must be called first");
       k.started.store(true, std::memory_order_release);
 
-      cortos_port_start_cores([]()
+      cortos_port_start_cores(+[]
       {
          auto& sched = k.scheduler_for_this_core();
          sched.start(); // picks first runnable (or idle) pinned to this core and port_start_first()
