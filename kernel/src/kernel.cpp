@@ -133,7 +133,8 @@ public:
       std::ptrdiff_t index = &node - nodes.data();
       // Ensure pointer belongs to this pool.
       if (index < 0 || static_cast<std::size_t>(index) >= N) {
-         assert(false && "WaitNodePool::free: node not from this pool");
+         // WaitNodePool::free: node not from this pool
+         std::abort();
       }
 
       auto& n = nodes[static_cast<std::size_t>(index)];
@@ -301,6 +302,7 @@ static void thread_launcher(void* vtcb)
 static void wake_node(WaitNode const& wait_node, bool acquired) noexcept
 {
    assert(wait_node.tcb != nullptr && wait_node.group != nullptr);
+   assert(wait_node.tcb->state == TaskControlBlock::State::Blocked);
 
    if (!wait_node.group->try_win(static_cast<int>(wait_node.index), acquired)) {
       return; // lost
@@ -450,8 +452,8 @@ void Waitable::for_each_waiter(Fn&& fn)
 
 class TaskReadyQueue
 {
-   TaskControlBlock* head;
-   TaskControlBlock* tail;
+   TaskControlBlock* head{nullptr};
+   TaskControlBlock* tail{nullptr};
 
 public:
    [[nodiscard]] constexpr bool              empty() const noexcept { return !head; }
@@ -602,16 +604,22 @@ public:
    bool post_to_inbox(CrossCoreRequest request) noexcept;
 
    // Reschedule request entrypoints
-   void request_reschedule_local()     noexcept { need_reschedule.store(true, std::memory_order_release); }
-   void request_reschedule_ipi() const noexcept { cortos_port_send_reschedule_ipi(core_id); }
+   void request_reschedule_local()     noexcept
+   {
+      need_reschedule.store(true, std::memory_order_release);
+      cortos_port_pend_reschedule();
+   }
 
-   void schedule_point() noexcept;
-   void schedule_from_isr() noexcept;
+   void request_reschedule_ipi() const noexcept
+   {
+      cortos_port_send_reschedule_ipi(core_id);
+   }
+
+   void reschedule() noexcept;
 
    void block_current_task();
    void yield_to_peers();
    void set_current_task(TaskControlBlock& tcb);
-   void reschedule() noexcept;
 
    void disable_preemption()
    {
@@ -632,6 +640,8 @@ public:
 
 void Scheduler::start() noexcept
 {
+   assert(idle_task != nullptr && "init_idle_task() must run before start()");
+
    auto* first = ready_matrix.pop_best_task();
    if (first == nullptr) {
       first = idle_task;
@@ -646,8 +656,8 @@ void Scheduler::start() noexcept
 // Core-local operations (only called on owning core)
 void Scheduler::set_task_ready_local(TaskControlBlock& tcb) noexcept
 {
+   assert(tcb.pinned_core == core_id);
    // Preconditions to assert later:
-   // - tcb pinned_core == this->core_id
    // - tcb not already in ready queue
    // - tcb->state is Blocked/Ready transition etc.
 
@@ -684,45 +694,22 @@ bool Scheduler::post_to_inbox(CrossCoreRequest request) noexcept
    return true;
 }
 
-void Scheduler::schedule_point() noexcept
-{
-   // called in thread context at safe points
-   if (preempt_disable_depth != 0) return;
-   if (!need_reschedule.exchange(false, std::memory_order_acq_rel)) return;
-   cortos_port_pend_reschedule();
-}
-
-void Scheduler::schedule_from_isr() noexcept
-{
-   request_reschedule_local();
-   cortos_port_pend_reschedule(); // ISR-safe version if you want separate API
-}
 
 void Scheduler::reschedule() noexcept
 {
    drain_inbox();
 
-   TaskControlBlock* next = ready_matrix.pop_best_task();
-   if (next == nullptr) {
-      next = idle_task;
+   auto* next_task = ready_matrix.pop_best_task();
+   if (next_task == nullptr) {
+      next_task = idle_task;
    }
 
-   if (next == current_task) {
-      if constexpr (CORTOS_PORT_SIMULATION) {
-         // The below optimisation does not work on the linux backend
-         // because we alternate between scheduler/thread contexts.
-         // There must be an explicit switch back to the thread - even if it is the same one!
-         cortos_port_switch(current_task->context(), next->context());
-      }
-      return; // Optimisation: No need to switch to the same task
-   }
+   auto* prev_task = current_task;
+   current_task = next_task;
 
-   TaskControlBlock* prev = current_task;
-   current_task = next;
-
-   prev->state = TaskControlBlock::State::Ready;
-   ready_matrix.enqueue_task(*prev);
-   cortos_port_switch(prev->context(), next->context());
+   prev_task->state = TaskControlBlock::State::Ready;
+   ready_matrix.enqueue_task(*prev_task);
+   cortos_port_switch(prev_task->context(), next_task->context());
 }
 
 void Scheduler::set_current_task(TaskControlBlock& tcb)
@@ -810,12 +797,6 @@ private:
 static constinit Kernel<config::CORES> k;
 
 
-
-
-
-
-
-
 Thread::Thread(EntryFn&& entry, std::span<std::byte> stack, Priority priority, CoreAffinity affinity)
 {
    auto id = k.thread_id_generator.fetch_add(1, std::memory_order_relaxed);
@@ -853,13 +834,17 @@ namespace kernel
    void initialise()
    {
       assert(!k.initialised);
-      k.initialised = true;
 
-      cortos_port_init();
+      auto reschedule_callback = +[]{
+         k.scheduler_for_this_core().reschedule();
+      };
+
+      cortos_port_init(reschedule_callback);
 
       for (auto& s : k.schedulers) {
          s.init_idle_task();
       }
+      k.initialised = true;
    }
 
    START_NO_RETURN void start()

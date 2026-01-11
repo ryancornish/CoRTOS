@@ -49,6 +49,11 @@ static_assert((CORTOS_STACK_ALIGN & (CORTOS_STACK_ALIGN - 1)) == 0,
               "CORTOS_STACK_ALIGN must be a power of two");
 
 /* ============================================================================
+ * Global state
+ * ========================================================================= */
+static cortos_port_reschedule_t g_reschedule_cb = nullptr;
+
+/* ============================================================================
  * Thread-Local State
  * ========================================================================= */
 
@@ -141,9 +146,15 @@ extern "C" void cortos_port_context_init(cortos_port_context_t* context,
 
 extern "C" void cortos_port_pend_reschedule(void)
 {
-   if (tls_current_context) {
-      cortos_port_yield();
-   }
+   // No current context - nothing to yield from
+   if (!tls_current_context) return;
+
+   auto* current = tls_current_context;
+   tls_current_context = nullptr;
+
+   assert(current->sched && "No scheduler context to switch to");
+   // This should put us into the "while forever" loop that reschedules
+   current->sched = std::move(current->sched).resume();
 }
 
 
@@ -173,18 +184,19 @@ extern "C" void cortos_port_start_first(cortos_port_context_t* first)
    tls_current_context = first;
    first->thread = std::move(first->thread).resume();
    tls_current_context = nullptr;
-}
 
-extern "C" void cortos_port_yield(void)
-{
-   // No current context - nothing to yield from
-   if (!tls_current_context) return;
+   // Once the first thread yields back to the scheduler (via pend_reschedule), we end up here
+   // We put ourselves in a while forever loop so that each time the sched context is resumed, we trigger
+   // the kernel to reschedule.
+   while (true) { // TODO: Add some external way of cancelling this
+      if (g_reschedule_cb == nullptr) throw "reschedule_cb not invokable";
 
-   auto* current = tls_current_context;
-   tls_current_context = nullptr;
+      g_reschedule_cb();
 
-   assert(current->sched && "No scheduler context to switch to");
-   current->sched = std::move(current->sched).resume();
+      // Safety: dont peg the CPU
+      struct timespec req = {.tv_sec = 0, .tv_nsec = 1'000'000};
+      nanosleep(&req, nullptr);
+   }
 }
 
 extern "C" void cortos_port_thread_exit(void)
@@ -192,7 +204,6 @@ extern "C" void cortos_port_thread_exit(void)
    // Boost.Context cleans up automatically when fiber exits
    // Just ensure we don't return
    while (true) {
-      cortos_port_yield();
    }
 }
 
@@ -317,8 +328,9 @@ extern "C" void* cortos_port_get_tls_pointer(void)
  * Platform Initialization
  * ========================================================================= */
 
-extern "C" void cortos_port_init(void)
+extern "C" void cortos_port_init(cortos_port_reschedule_t reschedule_cb)
 {
+   g_reschedule_cb = reschedule_cb;
 }
 
 /* ============================================================================
@@ -331,7 +343,7 @@ extern "C" void cortos_port_idle(void)
    // Sleep 1ms to simulate power saving, then yield
    struct timespec req = {.tv_sec = 1, .tv_nsec = 1'000'000};
    nanosleep(&req, nullptr);
-   cortos_port_yield();
+   cortos_port_pend_reschedule();
 }
 
 /* ============================================================================

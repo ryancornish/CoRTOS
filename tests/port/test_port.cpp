@@ -19,7 +19,7 @@ class PortTest : public ::testing::Test
 protected:
    void SetUp() override
    {
-      cortos_port_init();
+      cortos_port_init(nullptr);
    }
 };
 
@@ -80,7 +80,7 @@ TEST_F(PortTest, ContextSwitching)
    {
       auto* steps = static_cast<int*>(arg);
       steps[0] = ++steps[2];  // step1 = 1
-      cortos_port_yield();
+      cortos_port_pend_reschedule();
       steps[0] = ++steps[2];  // step1 = 3
    };
 
@@ -88,7 +88,7 @@ TEST_F(PortTest, ContextSwitching)
    {
       auto* steps = static_cast<int*>(arg);
       steps[1] = ++steps[2];  // step2 = 2
-      cortos_port_yield();
+      cortos_port_pend_reschedule();
       steps[1] = ++steps[2];  // step2 = 4
    };
 
@@ -131,9 +131,9 @@ TEST_F(PortTest, YieldReturnsToScheduler)
    {
       int* count = static_cast<int*>(arg);
       (*count)++;
-      cortos_port_yield();
+      cortos_port_pend_reschedule();
       (*count)++;
-      cortos_port_yield();
+      cortos_port_pend_reschedule();
       (*count)++;
    };
 

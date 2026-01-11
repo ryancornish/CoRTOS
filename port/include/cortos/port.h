@@ -38,6 +38,11 @@ extern "C" {
 typedef struct cortos_port_context cortos_port_context_t;
 
 /**
+ * @brief Port->Kernel reschedule hook
+ */
+typedef void (*cortos_port_reschedule_t)(void);
+
+/**
  * @brief Thread entry point signature
  */
 typedef void (*cortos_port_entry_t)(void* arg);
@@ -114,14 +119,6 @@ void cortos_port_switch(cortos_port_context_t* from, cortos_port_context_t* to);
 void cortos_port_start_first(cortos_port_context_t* first);
 
 /**
- * @brief Yield from current thread back to scheduler
- *
- * Called by a running thread to voluntarily give up the CPU.
- * The scheduler will decide which thread to run next.
- */
-void cortos_port_yield(void);
-
-/**
  * @brief Thread exit handler
  *
  * Called when a thread's entry function returns.
@@ -130,17 +127,6 @@ void cortos_port_yield(void);
 void cortos_port_thread_exit(void) __attribute__((noreturn));
 
 void cortos_port_pend_reschedule(void);
-
-/**
- * @brief Enter the scheduler context for this core and run its loop.
- *
- * The port must switch into a scheduler-owned execution context.
- * This function must not return.
- *
- * On embedded ports this would typically enable interrupts and start the first thread.
- * On the Boost port it starts the scheduler fiber for this pthread/core.
- */
-void cortos_port_run_scheduler(void) __attribute__((noreturn));
 
 /* ============================================================================
  * Critical Sections (Interrupt Control)
@@ -215,10 +201,10 @@ void* cortos_port_get_tls_pointer(void);
 
 /**
  * @brief Initialize the port layer
- *
+ * @param reschedule_cb Port uses this to invoke a reschedule
  * Called once at system startup before any threads are created.
  */
-void cortos_port_init(void);
+void cortos_port_init(cortos_port_reschedule_t reschedule_cb);
 
 /* ============================================================================
  * Idle Hook
