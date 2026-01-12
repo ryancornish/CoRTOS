@@ -173,7 +173,7 @@ void cortos_port_send_reschedule_ipi(uint32_t core_id);
  *  - On embedded: typically never returns because entry will start the first thread.
  *  - On simulation: may return if port_start_first returns (cooperative).
  */
-void cortos_port_start_cores(size_t ncores, cortos_port_core_entry_t entry);
+void cortos_port_start_cores(size_t cores_to_use, cortos_port_core_entry_t entry);
 
 // Likely no-op on real targets.
 void cortos_port_on_core_returned();
