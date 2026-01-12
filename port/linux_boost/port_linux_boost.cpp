@@ -266,12 +266,14 @@ struct BackendCoreThread
    cortos_port_core_entry_t entry{};
 };
 
-void cortos_port_start_cores(cortos_port_core_entry_t entry)
+void cortos_port_start_cores(size_t cores_to_use, cortos_port_core_entry_t entry)
 {
+   if ( 1 > cores_to_use || cores_to_use > CORTOS_PORT_CORE_COUNT) throw;
    // Allocate init blocks on heap so lifetime survives even if start_cores returns.
-   auto* threads = new std::array<BackendCoreThread, CORTOS_PORT_CORE_COUNT - 1>{};
+   auto* thread_mem = new BackendCoreThread[cores_to_use - 1]{};
+   std::span<BackendCoreThread> threads{thread_mem, cores_to_use - 1};
 
-   for (uint32_t core_id = 1; auto& thread : *threads) {
+   for (uint32_t core_id = 1; auto& thread : threads) {
       thread.core_id = core_id++;
       thread.entry   = entry;
       pthread_create(
@@ -293,10 +295,10 @@ void cortos_port_start_cores(cortos_port_core_entry_t entry)
    entry();
 
    // If entry returns, join children to avoid leaks/dangling behavior
-   for (auto& thread : *threads) {
+   for (auto& thread : threads) {
       pthread_join(thread.pthread, nullptr);
    }
-   delete threads;
+   delete[] thread_mem;
 }
 
 // Likely no-op on real targets.

@@ -34,12 +34,12 @@ TEST_F(PortTest, ContextCreationAndDestruction)
    std::vector<uint8_t> stack(stack_size);
 
    // Allocate context using port_traits
-   alignas(CORTOS_PORT_CONTEXT_ALIGN) uint8_t context_storage[CORTOS_PORT_CONTEXT_SIZE];
-   auto* context = reinterpret_cast<cortos_port_context_t*>(context_storage);
+   alignas(CORTOS_PORT_CONTEXT_ALIGN) std::array<std::byte, CORTOS_PORT_CONTEXT_SIZE> context_storage{};
+   auto* context = reinterpret_cast<cortos_port_context_t*>(context_storage.data());
 
    bool entry_called = false;
 
-   auto entry = [](void* arg)
+   auto entry = +[](void* arg)
    {
       bool* flag = static_cast<bool*>(arg);
       *flag = true;
@@ -70,11 +70,11 @@ TEST_F(PortTest, ContextSwitching)
    std::vector<uint8_t> stack1(stack_size);
    std::vector<uint8_t> stack2(stack_size);
 
-   alignas(CORTOS_PORT_CONTEXT_ALIGN) uint8_t ctx1_storage[CORTOS_PORT_CONTEXT_SIZE];
-   alignas(CORTOS_PORT_CONTEXT_ALIGN) uint8_t ctx2_storage[CORTOS_PORT_CONTEXT_SIZE];
+   alignas(CORTOS_PORT_CONTEXT_ALIGN) std::array<std::byte, CORTOS_PORT_CONTEXT_SIZE> ctx1_storage{};
+   alignas(CORTOS_PORT_CONTEXT_ALIGN) std::array<std::byte, CORTOS_PORT_CONTEXT_SIZE> ctx2_storage{};
 
-   auto* ctx1 = reinterpret_cast<cortos_port_context_t*>(ctx1_storage);
-   auto* ctx2 = reinterpret_cast<cortos_port_context_t*>(ctx2_storage);
+   auto* ctx1 = reinterpret_cast<cortos_port_context_t*>(ctx1_storage.data());
+   auto* ctx2 = reinterpret_cast<cortos_port_context_t*>(ctx2_storage.data());
 
    auto entry1 = [](void* arg)
    {
@@ -122,8 +122,8 @@ TEST_F(PortTest, YieldReturnsToScheduler)
    constexpr size_t stack_size = 4096;
    std::vector<uint8_t> stack(stack_size);
 
-   alignas(CORTOS_PORT_CONTEXT_ALIGN) uint8_t context_storage[CORTOS_PORT_CONTEXT_SIZE];
-   auto* context = reinterpret_cast<cortos_port_context_t*>(context_storage);
+   alignas(CORTOS_PORT_CONTEXT_ALIGN) std::array<std::byte, CORTOS_PORT_CONTEXT_SIZE> context_storage{};
+   auto* context = reinterpret_cast<cortos_port_context_t*>(context_storage.data());
 
    int yield_count = 0;
 
@@ -199,4 +199,222 @@ TEST_F(PortTest, InterruptControl)
 
    cortos_port_enable_interrupts();
    EXPECT_TRUE(cortos_port_interrupts_enabled());  // Now enabled
+}
+
+/* ============================================================================
+ * Multi-core (start_cores) Tests (configurable cores)
+ * ========================================================================= */
+
+struct SpinBarrier
+{
+   explicit SpinBarrier(uint32_t total_) : total(total_) {}
+
+   void reset(uint32_t total_)
+   {
+      total = total_;
+      arrived.store(0, std::memory_order_relaxed);
+      go.store(false, std::memory_order_relaxed);
+   }
+
+   void arrive_and_wait()
+   {
+      uint32_t v = arrived.fetch_add(1, std::memory_order_acq_rel) + 1;
+      if (v == total) {
+         go.store(true, std::memory_order_release);
+      } else {
+         while (!go.load(std::memory_order_acquire)) {
+            cortos_port_cpu_relax();
+         }
+      }
+   }
+
+   std::atomic<uint32_t> arrived{0};
+   std::atomic<bool>     go{false};
+   uint32_t total{0};
+};
+
+// Global (per TU) state so core-entry can be captureless.
+struct StartCoresTestState
+{
+   std::atomic<bool>     configured{false};
+   uint32_t              use_cores{1};
+
+   // Barriers and result arrays.
+   SpinBarrier barrier{1};
+
+   std::array<std::atomic<bool>, CORTOS_PORT_CORE_COUNT> seen{};
+   std::array<std::atomic<uint32_t>, CORTOS_PORT_CORE_COUNT> observed_core_id{};
+   std::array<std::atomic<void*>, CORTOS_PORT_CORE_COUNT> tls_readback{};
+   std::array<std::atomic<int>, CORTOS_PORT_CORE_COUNT> step{};
+
+   // To ensure each core runs entry at most once.
+   std::array<std::atomic<bool>, CORTOS_PORT_CORE_COUNT> already_reported{};
+
+   void reset(uint32_t cores)
+   {
+      use_cores = cores;
+      barrier.reset(cores);
+
+      for (uint32_t i = 0; i < CORTOS_PORT_CORE_COUNT; ++i) {
+         seen[i].store(false, std::memory_order_relaxed);
+         observed_core_id[i].store(0xFFFFFFFFu, std::memory_order_relaxed);
+         tls_readback[i].store(nullptr, std::memory_order_relaxed);
+         step[i].store(0, std::memory_order_relaxed);
+         already_reported[i].store(false, std::memory_order_relaxed);
+      }
+
+      configured.store(true, std::memory_order_release);
+   }
+};
+
+static StartCoresTestState g;
+
+// ----- captureless core entries -----
+
+static void core_entry_seen_and_coreid()
+{
+   // Wait until main thread configured state (paranoia for racing starts).
+   while (!g.configured.load(std::memory_order_acquire)) {
+      cortos_port_cpu_relax();
+   }
+
+   const uint32_t cid = cortos_port_get_core_id();
+   ASSERT_LT(cid, CORTOS_PORT_CORE_COUNT);
+
+   // Only cores [0..use_cores-1] should run entry.
+   ASSERT_LT(cid, g.use_cores) << "Port ran entry on an unexpected core";
+
+   bool expected = false;
+   ASSERT_TRUE(g.already_reported[cid].compare_exchange_strong(expected, true,
+                                                              std::memory_order_acq_rel))
+      << "Core entry ran more than once on core " << cid;
+
+   cortos_port_set_tls_pointer(reinterpret_cast<void*>(uintptr_t(0x1000u + cid)));
+
+   // Sync participating cores.
+   g.barrier.arrive_and_wait();
+
+   g.observed_core_id[cid].store(cid, std::memory_order_release);
+   g.seen[cid].store(true, std::memory_order_release);
+}
+
+static void core_entry_tls_is_per_core()
+{
+   while (!g.configured.load(std::memory_order_acquire)) {
+      cortos_port_cpu_relax();
+   }
+
+   const uint32_t cid = cortos_port_get_core_id();
+   ASSERT_LT(cid, CORTOS_PORT_CORE_COUNT);
+   ASSERT_LT(cid, g.use_cores);
+
+   void* unique = reinterpret_cast<void*>(uintptr_t(0xDEAD0000u + cid));
+   cortos_port_set_tls_pointer(unique);
+
+   g.barrier.arrive_and_wait();
+
+   void* rb = cortos_port_get_tls_pointer();
+   g.tls_readback[cid].store(rb, std::memory_order_release);
+}
+
+static void core_entry_pend_and_self_ipi_yield()
+{
+   while (!g.configured.load(std::memory_order_acquire)) {
+      cortos_port_cpu_relax();
+   }
+
+   const uint32_t cid = cortos_port_get_core_id();
+   ASSERT_LT(cid, CORTOS_PORT_CORE_COUNT);
+   ASSERT_LT(cid, g.use_cores);
+
+   constexpr size_t stack_size = 4096;
+   auto stack = std::make_unique<std::uint8_t[]>(stack_size);
+
+   alignas(CORTOS_PORT_CONTEXT_ALIGN) std::array<std::byte, CORTOS_PORT_CONTEXT_SIZE> ctx_storage{};
+   auto* ctx = reinterpret_cast<cortos_port_context_t*>(ctx_storage.data());
+
+   auto task_entry = +[](void* arg)
+   {
+      auto* s = static_cast<std::atomic<int>*>(arg);
+
+      s->store(1, std::memory_order_release);
+      cortos_port_pend_reschedule();
+
+      s->store(2, std::memory_order_release);
+      cortos_port_send_reschedule_ipi(cortos_port_get_core_id());
+
+      s->store(3, std::memory_order_release);
+   };
+
+   cortos_port_context_init(ctx, stack.get(), stack_size, task_entry, &g.step[cid]);
+
+   cortos_port_start_first(ctx);
+   EXPECT_EQ(g.step[cid].load(std::memory_order_acquire), 1);
+
+   cortos_port_switch(nullptr, ctx);
+   EXPECT_EQ(g.step[cid].load(std::memory_order_acquire), 2);
+
+   cortos_port_switch(nullptr, ctx);
+   EXPECT_EQ(g.step[cid].load(std::memory_order_acquire), 3);
+
+   cortos_port_context_destroy(ctx);
+
+   g.barrier.arrive_and_wait();
+}
+
+TEST_F(PortTest, StartCores_UsesConfiguredCoreCountAndSetsCoreId)
+{
+   // Pick something representative: if HW has >=2 cores, use 2, else 1.
+   const uint32_t use = (CORTOS_PORT_CORE_COUNT >= 2) ? 2u : 1u;
+
+   g.reset(use);
+
+   // New signature: (cores_to_use, entry)
+   cortos_port_start_cores(use, &core_entry_seen_and_coreid);
+
+   // Verify only [0..use-1] participated.
+   for (uint32_t i = 0; i < use; ++i) {
+      EXPECT_TRUE(g.seen[i].load(std::memory_order_acquire)) << "Core " << i << " did not run entry";
+      EXPECT_EQ(g.observed_core_id[i].load(std::memory_order_acquire), i);
+   }
+   for (uint32_t i = use; i < CORTOS_PORT_CORE_COUNT; ++i) {
+      EXPECT_FALSE(g.seen[i].load(std::memory_order_acquire)) << "Unexpected core " << i << " ran entry";
+   }
+}
+
+TEST_F(PortTest, StartCores_TlsPointerIsPerCoreThread)
+{
+   const uint32_t use = (CORTOS_PORT_CORE_COUNT >= 2) ? 2u : 1u;
+
+   g.reset(use);
+
+   cortos_port_start_cores(use, &core_entry_tls_is_per_core);
+
+   for (uint32_t i = 0; i < use; ++i) {
+      void* expected = reinterpret_cast<void*>(uintptr_t(0xDEAD0000u + i));
+      EXPECT_EQ(g.tls_readback[i].load(std::memory_order_acquire), expected)
+         << "TLS leaked or core-local TLS broken on core " << i;
+   }
+   for (uint32_t i = use; i < CORTOS_PORT_CORE_COUNT; ++i) {
+      EXPECT_EQ(g.tls_readback[i].load(std::memory_order_acquire), nullptr)
+         << "Non-participating core " << i << " should not have written TLS readback";
+   }
+}
+
+TEST_F(PortTest, StartCores_PendRescheduleAndSelfIpiWorkPerCore)
+{
+   const uint32_t use = (CORTOS_PORT_CORE_COUNT >= 2) ? 2u : 1u;
+
+   g.reset(use);
+
+   cortos_port_start_cores(use, &core_entry_pend_and_self_ipi_yield);
+
+   for (uint32_t i = 0; i < use; ++i) {
+      EXPECT_EQ(g.step[i].load(std::memory_order_acquire), 3)
+         << "Core " << i << " did not complete yield/resume sequence";
+   }
+   for (uint32_t i = use; i < CORTOS_PORT_CORE_COUNT; ++i) {
+      EXPECT_EQ(g.step[i].load(std::memory_order_acquire), 0)
+         << "Non-participating core " << i << " unexpectedly ran";
+   }
 }

@@ -849,6 +849,7 @@ namespace kernel
       k.started.store(true, std::memory_order_release);
 
       cortos_port_start_cores(
+         config::CORES,
          +[]() -> void
          {
             auto& sched = k.scheduler_for_this_core();
