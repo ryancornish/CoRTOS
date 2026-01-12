@@ -835,14 +835,10 @@ namespace kernel
    {
       assert(!k.initialised);
 
-      auto reschedule_callback = +[]{
-         k.scheduler_for_this_core().reschedule();
-      };
+      cortos_port_init();
 
-      cortos_port_init(reschedule_callback);
-
-      for (auto& s : k.schedulers) {
-         s.init_idle_task();
+      for (auto& sched : k.schedulers) {
+         sched.init_idle_task();
       }
       k.initialised = true;
    }
@@ -852,19 +848,21 @@ namespace kernel
       assert(k.initialised && "kernel::initialise() must be called first");
       k.started.store(true, std::memory_order_release);
 
-      cortos_port_start_cores(+[]
-      {
-         auto& sched = k.scheduler_for_this_core();
-         sched.start(); // picks first runnable (or idle) pinned to this core and port_start_first()
+      cortos_port_start_cores(
+         +[]() -> void
+         {
+            auto& sched = k.scheduler_for_this_core();
+            sched.start(); // picks first runnable (or idle) pinned to this core and port_start_first()
 
-         if constexpr(CORTOS_PORT_SIMULATION) {
-            while (true) {
-               sched.reschedule();
+            if constexpr(CORTOS_PORT_SIMULATION) {
+               while (true) {
+                  sched.reschedule();
+               }
+            } else {
+               __builtin_unreachable();
             }
-         } else {
-            __builtin_unreachable();
          }
-      });
+      );
    }
 
    std::uint32_t core_count() noexcept

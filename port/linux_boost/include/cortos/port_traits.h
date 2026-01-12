@@ -23,7 +23,7 @@
  *
  * Must be >= sizeof(port_context) - verified by static_assert in port implementation.
  */
-#define CORTOS_PORT_CONTEXT_SIZE  48
+#define CORTOS_PORT_CONTEXT_SIZE  40
 
 /**
  * @brief Alignment requirement for port_context_t

@@ -201,10 +201,8 @@ void* cortos_port_get_tls_pointer(void);
 
 /**
  * @brief Initialize the port layer
- * @param reschedule_cb Port uses this to invoke a reschedule
- * Called once at system startup before any threads are created.
  */
-void cortos_port_init(cortos_port_reschedule_t reschedule_cb);
+void cortos_port_init(void);
 
 /* ============================================================================
  * Idle Hook
