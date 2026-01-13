@@ -11,7 +11,8 @@ using namespace cortos;
 
 static void entry()
 {
-   while (true) {
+   //while (true)
+   {
       std::printf("core %d: entry()\n", this_thread::core_id());
       struct timespec req = {.tv_sec = 1, .tv_nsec = 1'000'000};
       nanosleep(&req, nullptr);

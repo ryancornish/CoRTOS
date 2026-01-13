@@ -293,6 +293,7 @@ static void thread_launcher(void* vtcb)
    cortos_port_set_tls_pointer(tcb);
    tcb->entry();
 
+   tcb->state = TaskControlBlock::State::Terminated;
    // Signal joiners
 
    cortos_port_thread_exit();
@@ -525,6 +526,7 @@ public:
    void enqueue_task(TaskControlBlock& tcb) noexcept
    {
       assert(tcb.effective_priority < config::MAX_PRIORITIES);
+      assert(tcb.state == TaskControlBlock::State::Ready && "Can only enqueue Ready tasks!");
       matrix[tcb.effective_priority].push_back(tcb);
       bitmap |= (1u << tcb.effective_priority);
    }
@@ -619,7 +621,6 @@ public:
 
    void block_current_task();
    void yield_to_peers();
-   void set_current_task(TaskControlBlock& tcb);
 
    void disable_preemption()
    {
@@ -647,7 +648,9 @@ void Scheduler::start() noexcept
       first = idle_task;
    }
    assert(first != nullptr);
-   set_current_task(*first);
+   assert(first->state == TaskControlBlock::State::Ready);
+   first->state = TaskControlBlock::State::Running;
+   current_task = first;
 
    //cortos_port_set_thread_pointer(current_task);
    cortos_port_start_first(current_task->context());
@@ -694,9 +697,15 @@ bool Scheduler::post_to_inbox(CrossCoreRequest request) noexcept
    return true;
 }
 
-
+// NOTE: current_task must be pre-set with the state before rescheduling.
+// "Ready"     : Re-enqueued
+// "Blocked"   : Not re-enqueued
+// "Terminated": Not re-enqueued
+// "Running"   : Invalid
 void Scheduler::reschedule() noexcept
 {
+   assert(current_task->state != TaskControlBlock::State::Running);
+
    drain_inbox();
 
    auto* next_task = ready_matrix.pop_best_task();
@@ -707,16 +716,11 @@ void Scheduler::reschedule() noexcept
    auto* prev_task = current_task;
    current_task = next_task;
 
-   prev_task->state = TaskControlBlock::State::Ready;
-   ready_matrix.enqueue_task(*prev_task);
-   cortos_port_switch(prev_task->context(), next_task->context());
-}
+   if (prev_task->state == TaskControlBlock::State::Ready) {
+      ready_matrix.enqueue_task(*prev_task);
+   }
 
-void Scheduler::set_current_task(TaskControlBlock& tcb)
-{
-   assert(tcb.state == TaskControlBlock::State::Ready);
-   tcb.state = TaskControlBlock::State::Running;
-   current_task = &tcb;
+   cortos_port_switch(prev_task->context(), next_task->context());
 }
 
 // Note: this is a template purely because it allows the compile-time index-sequence array initialiser for schedulers to work
@@ -794,17 +798,16 @@ private:
    template<std::size_t... Is>
    constexpr explicit Kernel(std::index_sequence<Is...>) noexcept : schedulers{ Scheduler{Is}... } {}
 };
-static constinit Kernel<config::CORES> k;
-
+static constinit Kernel<config::CORES> KERNEL;
 
 Thread::Thread(EntryFn&& entry, std::span<std::byte> stack, Priority priority, CoreAffinity affinity)
 {
-   auto id = k.thread_id_generator.fetch_add(1, std::memory_order_relaxed);
+   auto id = KERNEL.thread_id_generator.fetch_add(1, std::memory_order_relaxed);
 
    StackLayout slayout(stack, 0);
    tcb = ::new (slayout.tcb) TaskControlBlock(id, priority, affinity, slayout.user_stack, std::move(entry));
 
-   k.register_thread(*tcb);
+   KERNEL.register_thread(*tcb);
 }
 
 Thread::~Thread()
@@ -814,7 +817,7 @@ Thread::~Thread()
 
 void Spinlock::lock()
 {
-   k.scheduler_for_this_core().disable_preemption();
+   KERNEL.scheduler_for_this_core().disable_preemption();
    while (flag.test_and_set(std::memory_order_acquire)) {
       // Busy-wait with CPU yield hint
       cortos_port_cpu_relax();
@@ -824,7 +827,7 @@ void Spinlock::lock()
 void Spinlock::unlock()
 {
    flag.clear(std::memory_order_release);
-   k.scheduler_for_this_core().enable_preemption();
+   KERNEL.scheduler_for_this_core().enable_preemption();
 }
 
 /**** PUBLIC ****/
@@ -833,26 +836,26 @@ namespace kernel
 {
    void initialise()
    {
-      assert(!k.initialised);
+      assert(!KERNEL.initialised);
 
       cortos_port_init();
 
-      for (auto& sched : k.schedulers) {
+      for (auto& sched : KERNEL.schedulers) {
          sched.init_idle_task();
       }
-      k.initialised = true;
+      KERNEL.initialised = true;
    }
 
    START_NO_RETURN void start()
    {
-      assert(k.initialised && "kernel::initialise() must be called first");
-      k.started.store(true, std::memory_order_release);
+      assert(KERNEL.initialised && "kernel::initialise() must be called first");
+      KERNEL.started.store(true, std::memory_order_release);
 
       cortos_port_start_cores(
          config::CORES,
          +[]() -> void
          {
-            auto& sched = k.scheduler_for_this_core();
+            auto& sched = KERNEL.scheduler_for_this_core();
             sched.start(); // picks first runnable (or idle) pinned to this core and port_start_first()
 
             if constexpr(CORTOS_PORT_SIMULATION) {
@@ -888,12 +891,12 @@ namespace this_thread
 {
    [[nodiscard]] Thread::Id id()
    {
-      return k.scheduler_for_this_core().current_task_id();
+      return KERNEL.scheduler_for_this_core().current_task_id();
    }
 
    [[nodiscard]] Thread::Priority priority()
    {
-      return k.scheduler_for_this_core().current_task_priority();
+      return KERNEL.scheduler_for_this_core().current_task_priority();
    }
 
    [[nodiscard]] std::uint32_t core_id() noexcept

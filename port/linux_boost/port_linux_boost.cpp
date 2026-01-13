@@ -408,9 +408,9 @@ extern "C" void cortos_port_cpu_relax(void)
 
 extern "C" void cortos_port_idle(void)
 {
-   //std::printf("Core: %d: cortos_port_idle()\n", current_core.core_id);
+   std::printf("Core: %d: cortos_port_idle()\n", current_core.core_id);
    // Sleep 1ms to simulate power saving, then yield
-   struct timespec req = {.tv_sec = 0, .tv_nsec = 1'000'000};
+   struct timespec req = {.tv_sec = 1, .tv_nsec = 1'000'000};
    nanosleep(&req, nullptr);
    cortos_port_pend_reschedule();
 }
