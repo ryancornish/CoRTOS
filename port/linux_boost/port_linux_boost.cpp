@@ -23,8 +23,8 @@
 #include <csignal>
 #include <cstdint>
 #include <cstdlib>
+#include <ctime>
 #include <pthread.h>
-#include <time.h>
 
 /* ============================================================================
  * Port Context Structure
@@ -48,8 +48,13 @@ static_assert((CORTOS_STACK_ALIGN & (CORTOS_STACK_ALIGN - 1)) == 0,
               "CORTOS_STACK_ALIGN must be a power of two");
 
 /* ============================================================================
- * Global state
+ * Global & Thread-Local State
+ *
+ * For SMP simulation, each OS thread has its own state tracking using
+ * thread_local. This is NOT stored in cortos_port_context to prevent
+ * migration issues.
  * ========================================================================= */
+
 struct GlobalState
 {
    cortos_port_reschedule_t reschedule_cb{nullptr};
@@ -57,32 +62,66 @@ struct GlobalState
 [[maybe_unused]]
 static constinit GlobalState global;
 
-/* ============================================================================
- * Thread-Local State (Per OS thread, NOT boost fiber)
- * For SMP simulation, each OS thread has its own state tracking using thread_local
- * ========================================================================= */
 struct CurrentCoreState
 {
    uint32_t core_id{0};
    cortos_port_context* current_context{nullptr};
    // The "caller" fiber for the currently running task on *this OS thread*.
-   // This is NOT stored in the cortos_port_context, so it won't migrate.
    boost::context::fiber task_caller;
    void* tls_pointer{nullptr}; // Simulates pointing to fibers dedicated TLS block.
 };
 static thread_local constinit CurrentCoreState current_core;
 
 /* ============================================================================
- * Core Identification
+ * Platform Initialization
  * ========================================================================= */
 
-extern "C" uint32_t cortos_port_get_core_id(void)
+extern "C" void cortos_port_init(void)
 {
-   return current_core.core_id;
+
 }
 
 /* ============================================================================
- * Context Switching
+ * Critical Sections (Simulated)
+ * ========================================================================= */
+
+static thread_local uint32_t interrupt_disable_depth = 0;
+
+extern "C" void cortos_port_disable_interrupts(void)
+{
+   interrupt_disable_depth++;
+}
+
+extern "C" void cortos_port_enable_interrupts(void)
+{
+   if (interrupt_disable_depth > 0) {
+      interrupt_disable_depth--;
+   }
+}
+
+extern "C" bool cortos_port_interrupts_enabled(void)
+{
+   return interrupt_disable_depth == 0;
+}
+
+extern "C" uint32_t cortos_port_irq_save(void)
+{
+   // Return previous enabled-state as 1/0 (simple)
+   uint32_t prev_enabled = (interrupt_disable_depth == 0) ? 1u : 0u;
+   interrupt_disable_depth++;
+   return prev_enabled;
+}
+
+extern "C" void cortos_port_irq_restore(uint32_t state)
+{
+   // Unwind one nesting level
+   if (interrupt_disable_depth > 0) {
+      interrupt_disable_depth--;
+   }
+}
+
+/* ============================================================================
+ * Context Management & Switching
  * ========================================================================= */
 
 // No-op stack allocator for preallocated memory
@@ -145,20 +184,6 @@ extern "C" void cortos_port_context_init(cortos_port_context_t* context,
    );
 }
 
-
-extern "C" void cortos_port_pend_reschedule(void)
-{
-   // Only meaningful if we're currently inside a task fiber on this OS thread.
-   if (!current_core.current_context) return;
-
-   assert(current_core.task_caller && "pend_reschedule: no caller captured");
-
-   // Yield back to the current caller (scheduler/dispatcher).
-   // When the scheduler later resumes us again, Boost will pass us a fresh caller,
-   // and the lambda above will overwrite tls_task_caller accordingly.
-   current_core.task_caller = std::move(current_core.task_caller).resume();
-}
-
 extern "C" void cortos_port_context_destroy(cortos_port_context_t* context)
 {
    // Verify fiber has completed
@@ -186,6 +211,19 @@ extern "C" void cortos_port_start_first(cortos_port_context_t* first)
    cortos_port_switch(nullptr, first);
 }
 
+extern "C" void cortos_port_pend_reschedule(void)
+{
+   // Only meaningful if we're currently inside a task fiber on this OS thread.
+   if (!current_core.current_context) return;
+
+   assert(current_core.task_caller && "pend_reschedule: no caller captured");
+
+   // Yield back to the current caller (scheduler/dispatcher).
+   // When the scheduler later resumes us again, Boost will pass us a fresh caller,
+   // and the lambda above will overwrite tls_task_caller accordingly.
+   current_core.task_caller = std::move(current_core.task_caller).resume();
+}
+
 extern "C" void cortos_port_thread_exit(void)
 {
    cortos_port_pend_reschedule();
@@ -194,70 +232,11 @@ extern "C" void cortos_port_thread_exit(void)
 }
 
 /* ============================================================================
- * Critical Sections (Simulated)
+ * SMP & Multi-Core Support
+ *
+ * Each pthread represents a simulated "core". Core 0 runs on the calling
+ * thread, additional cores spawn as pthreads.
  * ========================================================================= */
-
-static thread_local uint32_t interrupt_disable_depth = 0;
-
-extern "C" void cortos_port_disable_interrupts(void)
-{
-   interrupt_disable_depth++;
-}
-
-extern "C" void cortos_port_enable_interrupts(void)
-{
-   if (interrupt_disable_depth > 0) {
-      interrupt_disable_depth--;
-   }
-}
-
-extern "C" bool cortos_port_interrupts_enabled(void)
-{
-   return interrupt_disable_depth == 0;
-}
-
-extern "C" uint32_t cortos_port_irq_save(void)
-{
-   // Return previous enabled-state as 1/0 (simple)
-   uint32_t prev_enabled = (interrupt_disable_depth == 0) ? 1u : 0u;
-   interrupt_disable_depth++;
-   return prev_enabled;
-}
-
-extern "C" void cortos_port_irq_restore(uint32_t state)
-{
-   // Unwind one nesting level
-   if (interrupt_disable_depth > 0) {
-      interrupt_disable_depth--;
-   }
-}
-
-
-/* ============================================================================
- * CPU Hints
- * ========================================================================= */
-
-extern "C" void cortos_port_cpu_relax(void)
-{
-   // CPU yield hint for busy-wait loops
-#if defined(__x86_64__) || defined(__i386__)
-   __builtin_ia32_pause();
-#elif defined(__aarch64__) || defined(__arm__)
-   __asm__ __volatile__("yield");
-#endif
-}
-
-/* ============================================================================
- * Inter-Processor Interrupts (SMP Simulation)
- * ========================================================================= */
-
-extern "C" void cortos_port_send_reschedule_ipi(uint32_t core_id)
-{
-   if (core_id == current_core.core_id) {
-      cortos_port_pend_reschedule();
-   }
-   // else: TODO when pthread-per-core exists
-}
 
 struct BackendCoreThread
 {
@@ -265,6 +244,11 @@ struct BackendCoreThread
    uint32_t  core_id{};
    cortos_port_core_entry_t entry{};
 };
+
+extern "C" uint32_t cortos_port_get_core_id(void)
+{
+   return current_core.core_id;
+}
 
 void cortos_port_start_cores(size_t cores_to_use, cortos_port_core_entry_t entry)
 {
@@ -301,6 +285,14 @@ void cortos_port_start_cores(size_t cores_to_use, cortos_port_core_entry_t entry
    delete[] thread_mem;
 }
 
+extern "C" void cortos_port_send_reschedule_ipi(uint32_t core_id)
+{
+   if (core_id == current_core.core_id) {
+      cortos_port_pend_reschedule();
+   }
+   // else: TODO when pthread-per-core exists
+}
+
 // Likely no-op on real targets.
 void cortos_port_on_core_returned()
 {
@@ -322,70 +314,14 @@ extern "C" void* cortos_port_get_tls_pointer(void)
 }
 
 /* ============================================================================
- * Platform Initialization
- * ========================================================================= */
-
-extern "C" void cortos_port_init(void)
-{
-
-}
-
-/* ============================================================================
- * Idle Hook
- * ========================================================================= */
-
-extern "C" void cortos_port_idle(void)
-{
-   //std::printf("Core: %d: cortos_port_idle()\n", current_core.core_id);
-   // Sleep 1ms to simulate power saving, then yield
-   struct timespec req = {.tv_sec = 0, .tv_nsec = 1'000'000};
-   nanosleep(&req, nullptr);
-   cortos_port_pend_reschedule();
-}
-
-/* ============================================================================
- * Debug / Diagnostics
- * ========================================================================= */
-
-extern "C" void cortos_port_breakpoint(void)
-{
-#if defined(__x86_64__) || defined(__i386__)
-   __asm__ __volatile__("int3");
-#elif defined(__aarch64__) || defined(__arm__)
-   __builtin_trap();
-#else
-   raise(SIGTRAP);
-#endif
-}
-
-extern "C" void* cortos_port_get_stack_pointer(void)
-{
-   void* sp;
-#if defined(__x86_64__)
-   __asm__ __volatile__("mov %%rsp, %0" : "=r"(sp));
-#elif defined(__i386__)
-   __asm__ __volatile__("mov %%esp, %0" : "=r"(sp));
-#elif defined(__aarch64__)
-   __asm__ __volatile__("mov %0, sp" : "=r"(sp));
-#elif defined(__arm__)
-   __asm__ __volatile__("mov %0, sp" : "=r"(sp));
-#else
-   int dummy;
-   sp = &dummy;
-#endif
-   return sp;
-}
-
-/* ============================================================================
- * Time Driver Port (Linux Boost)
+ * Time Driver Port
  *
- * Purpose:
- * - Provide monotonic time for real drivers (periodic / tickless) in unit tests
- * - Provide tickless one-shot arming and ISR delivery when pumped
+ * Provides monotonic time for real drivers (periodic / tickless) in unit
+ * tests, plus tickless one-shot arming and ISR delivery when pumped.
  *
  * Note:
  * - SimulationTimeDriver owns time and does NOT use this.
- * - Periodic driver unit tests call driver.on_timer_isr() directly
+ * - Periodic driver unit tests call driver.on_timer_isr() directly.
  * ========================================================================= */
 
 struct TimeState
@@ -454,4 +390,60 @@ extern "C" void cortos_port_time_advance(uint64_t delta)
 extern "C" void cortos_port_send_time_ipi(uint32_t /*core_id*/)
 {
    // SMP simulation TODO: poke target core thread.
+}
+
+/* ============================================================================
+ * CPU Hints & Idle
+ * ========================================================================= */
+
+extern "C" void cortos_port_cpu_relax(void)
+{
+   // CPU yield hint for busy-wait loops
+#if defined(__x86_64__) || defined(__i386__)
+   __builtin_ia32_pause();
+#elif defined(__aarch64__) || defined(__arm__)
+   __asm__ __volatile__("yield");
+#endif
+}
+
+extern "C" void cortos_port_idle(void)
+{
+   //std::printf("Core: %d: cortos_port_idle()\n", current_core.core_id);
+   // Sleep 1ms to simulate power saving, then yield
+   struct timespec req = {.tv_sec = 0, .tv_nsec = 1'000'000};
+   nanosleep(&req, nullptr);
+   cortos_port_pend_reschedule();
+}
+
+/* ============================================================================
+ * Debug & Diagnostics
+ * ========================================================================= */
+
+extern "C" void cortos_port_breakpoint(void)
+{
+#if defined(__x86_64__) || defined(__i386__)
+   __asm__ __volatile__("int3");
+#elif defined(__aarch64__) || defined(__arm__)
+   __builtin_trap();
+#else
+   raise(SIGTRAP);
+#endif
+}
+
+extern "C" void* cortos_port_get_stack_pointer(void)
+{
+   void* sp;
+#if defined(__x86_64__)
+   __asm__ __volatile__("mov %%rsp, %0" : "=r"(sp));
+#elif defined(__i386__)
+   __asm__ __volatile__("mov %%esp, %0" : "=r"(sp));
+#elif defined(__aarch64__)
+   __asm__ __volatile__("mov %0, sp" : "=r"(sp));
+#elif defined(__arm__)
+   __asm__ __volatile__("mov %0, sp" : "=r"(sp));
+#else
+   int dummy;
+   sp = &dummy;
+#endif
+   return sp;
 }
