@@ -25,10 +25,14 @@ extern "C" {
 /* ============================================================================
  * Port Configuration
  * ========================================================================= */
+
 #ifndef CORTOS_PORT_SIMULATION
 # define CORTOS_PORT_SIMULATION 0
 #endif
 
+/* ============================================================================
+ * Type Definitions
+ * ========================================================================= */
 
 /**
  * @brief Opaque context structure (platform-specific size/alignment)
@@ -58,20 +62,50 @@ typedef void (*cortos_port_core_entry_t)(void);
 typedef void (*cortos_port_isr_handler_t)(void* arg);
 
 /* ============================================================================
- * Core Identification (SMP Support)
+ * Platform Initialization
  * ========================================================================= */
 
 /**
- * @brief Get the ID of the current CPU core
- * @return Core ID (0-indexed)
- *
- * For single-core systems, always returns 0.
- * For SMP systems, returns which core is executing this code.
+ * @brief Initialize the port layer
  */
-uint32_t cortos_port_get_core_id(void);
+void cortos_port_init(void);
 
 /* ============================================================================
- * Context Switching
+ * Critical Sections (Interrupt Control)
+ * ========================================================================= */
+
+/**
+ * @brief Disable interrupts
+ *
+ * In simulation, this may be a no-op or track nesting depth.
+ */
+void cortos_port_disable_interrupts(void);
+
+/**
+ * @brief Enable interrupts
+ */
+void cortos_port_enable_interrupts(void);
+
+/**
+ * @brief Check if interrupts are currently enabled
+ * @return true if interrupts are enabled, false otherwise
+ */
+bool cortos_port_interrupts_enabled(void);
+
+/**
+ * @brief Save interrupt state and disable interrupts
+ * @return Previous interrupt state
+ */
+uint32_t cortos_port_irq_save(void);
+
+/**
+ * @brief Restore interrupt state
+ * @param state Previous state returned by cortos_port_irq_save()
+ */
+void cortos_port_irq_restore(uint32_t state);
+
+/* ============================================================================
+ * Context Management & Switching
  * ========================================================================= */
 
 /**
@@ -119,6 +153,13 @@ void cortos_port_switch(cortos_port_context_t* from, cortos_port_context_t* to);
 void cortos_port_start_first(cortos_port_context_t* first);
 
 /**
+ * @brief Request a reschedule
+ *
+ * Yields back to the scheduler/dispatcher from the current context.
+ */
+void cortos_port_pend_reschedule(void);
+
+/**
  * @brief Thread exit handler
  *
  * Called when a thread's entry function returns.
@@ -126,39 +167,32 @@ void cortos_port_start_first(cortos_port_context_t* first);
  */
 void cortos_port_thread_exit(void) __attribute__((noreturn));
 
-void cortos_port_pend_reschedule(void);
-
 /* ============================================================================
- * Critical Sections (Interrupt Control)
- * ========================================================================= */
-
-uint32_t cortos_port_irq_save(void);
-
-void cortos_port_irq_restore(uint32_t state);
-
-/**
- * @brief Disable interrupts
+ * SMP & Multi-Core Support
  *
- * In simulation, this may be a no-op or track nesting depth.
- */
-void cortos_port_disable_interrupts(void);
-
-/**
- * @brief Enable interrupts
- */
-void cortos_port_enable_interrupts(void);
-
-/**
- * @brief Check if interrupts are currently enabled
- * @return true if interrupts are enabled, false otherwise
- */
-bool cortos_port_interrupts_enabled(void);
-
-void cortos_port_cpu_relax(void);
-
-/* ============================================================================
- * Inter-Processor Interrupts (SMP Support)
+ * Each pthread represents a simulated "core". Core 0 runs on the calling
+ * thread, additional cores spawn as pthreads.
  * ========================================================================= */
+
+/**
+ * @brief Get the ID of the current CPU core
+ * @return Core ID (0-indexed)
+ *
+ * For single-core systems, always returns 0.
+ * For SMP systems, returns which core is executing this code.
+ */
+uint32_t cortos_port_get_core_id(void);
+
+/**
+ * @brief Start (or release) all secondary cores and run entry on every core.
+ * @param cores_to_use Number of cores to start
+ * @param entry Entry point to run on each core
+ *
+ * After this call returns on the bootstrap core:
+ *  - On embedded: typically never returns because entry will start the first thread.
+ *  - On simulation: may return if port_start_first returns (cooperative).
+ */
+void cortos_port_start_cores(size_t cores_to_use, cortos_port_core_entry_t entry);
 
 /**
  * @brief Send an IPI to another core to trigger a reschedule
@@ -167,20 +201,14 @@ void cortos_port_cpu_relax(void);
 void cortos_port_send_reschedule_ipi(uint32_t core_id);
 
 /**
- * @brief Start (or release) all secondary cores and run entry on every core.
+ * @brief Callback when a core's entry function returns
  *
- * After this call returns on the bootstrap core:
- *  - On embedded: typically never returns because entry will start the first thread.
- *  - On simulation: may return if port_start_first returns (cooperative).
+ * Likely no-op on real targets.
  */
-void cortos_port_start_cores(size_t cores_to_use, cortos_port_core_entry_t entry);
-
-// Likely no-op on real targets.
-void cortos_port_on_core_returned();
-
+void cortos_port_on_core_returned(void);
 
 /* ============================================================================
- * Thread-Local Storage (TLS)
+ * Thread-Local Storage
  * ========================================================================= */
 
 /**
@@ -195,48 +223,22 @@ void cortos_port_set_tls_pointer(void* tls_base);
  */
 void* cortos_port_get_tls_pointer(void);
 
-/* ============================================================================
- * Platform Initialization
- * ========================================================================= */
 
-/**
- * @brief Initialize the port layer
- */
-void cortos_port_init(void);
-
-/* ============================================================================
- * Idle Hook
- * ========================================================================= */
-
-/**
- * @brief Platform-specific idle behavior
- *
- * Called by the kernel's idle thread when no other threads are ready.
- * Can implement power-saving features or cooperative yielding.
- */
-void cortos_port_idle(void);
-
-/* ============================================================================
- * Debug / Diagnostics
- * ========================================================================= */
-
-/**
- * @brief Trigger a breakpoint (for debugging)
- */
-void cortos_port_breakpoint(void);
-
-/**
- * @brief Get the current stack pointer value
- * @return Current stack pointer
- */
-void* cortos_port_get_stack_pointer(void);
 
 /* ============================================================================
  * Time Driver Port
+ *
+ * Provides monotonic time for real drivers (periodic / tickless) in unit
+ * tests, plus tickless one-shot arming and ISR delivery when pumped.
+ *
+ * Note:
+ * - SimulationTimeDriver owns time and does NOT use this.
+ * - Periodic driver unit tests call driver.on_timer_isr() directly.
  * ========================================================================= */
 
 /**
  * @brief Configure the underlying timer peripheral(s) used for OS time.
+ * @param tick_hz Tick frequency (0 for tickless mode)
  *
  * If tick_hz > 0:
  *   Configure a periodic timer interrupt at tick_hz.
@@ -253,12 +255,15 @@ void cortos_port_time_setup(uint32_t tick_hz);
 
 /**
  * @brief Monotonic time source
+ * @return Current time in port ticks
+ *
  * Must be monotonic 64-bit in "port ticks" (opaque unit for whole system).
  */
 uint64_t cortos_port_time_now(void);
 
 /**
  * @brief Free-running counter frequency in Hz (ticks per second).
+ * @return Frequency in Hz
  *
  * For example:
  *  - DWT_CYCCNT at CPU clock: 168'000'000
@@ -268,7 +273,37 @@ uint64_t cortos_port_time_now(void);
 uint64_t cortos_port_time_freq_hz(void);
 
 /**
+ * @brief Reset any internal global time tracking state.
+ * @param time Initial time value
+ *
+ * On embedded targets this is typically meaningless or implemented
+ * implicitly by a system reset.
+ *
+ * Intended primarily for simulation and unit testing to provide
+ * deterministic startup conditions.
+ */
+void cortos_port_time_reset(uint64_t time);
+
+/**
+ * @brief Register an ISR handler for timer interrupts
+ * @param handler ISR callback function
+ * @param arg Argument to pass to handler
+ */
+void cortos_port_time_register_isr_handler(cortos_port_isr_handler_t handler, void* arg);
+
+/**
+ * @brief Enable timer interrupts
+ */
+void cortos_port_time_irq_enable(void);
+
+/**
+ * @brief Disable timer interrupts
+ */
+void cortos_port_time_irq_disable(void);
+
+/**
  * @brief Arm a one-shot interrupt for the given absolute deadline.
+ * @param deadline Absolute time in port ticks
  *
  * If called multiple times before the interrupt fires, the port must ensure
  * the earliest deadline is honored (i.e., effectively min(current, deadline)).
@@ -283,32 +318,45 @@ void cortos_port_time_arm(uint64_t deadline);
 void cortos_port_time_disarm(void);
 
 /**
- * @brief Interrupt enable/disable
- */
-void     cortos_port_time_irq_enable(void);
-void     cortos_port_time_irq_disable(void);
-
-void cortos_port_time_register_isr_handler(cortos_port_isr_handler_t handler, void* arg);
-
-/**
- * @brief Optional: notify the time core that there is pending time work.
+ * @brief Notify the time core that there is pending time work.
+ * @param core_id Target core ID
  *
  * If unimplemented on a platform, it may be an empty function.
  * Used for SMP policy where non-time cores enqueue requests for the time core.
  */
 void cortos_port_send_time_ipi(uint32_t core_id);
 
-/**
- * @brief Optional: reset any internal global time tracking state.
- *
- * On embedded targets this is typically meaningless or implemented
- * implicitly by a system reset.
- *
- * Intended primarily for simulation and unit testing to provide
- * deterministic startup conditions.
- */
-void cortos_port_time_reset(uint64_t time);
+/* ============================================================================
+ * CPU Hints & Idle
+ * ========================================================================= */
 
+/**
+ * @brief CPU yield hint for busy-wait loops
+ */
+void cortos_port_cpu_relax(void);
+
+/**
+ * @brief Platform-specific idle behavior
+ *
+ * Called by the kernel's idle thread when no other threads are ready.
+ * Can implement power-saving features or cooperative yielding.
+ */
+void cortos_port_idle(void);
+
+/* ============================================================================
+ * Debug & Diagnostics
+ * ========================================================================= */
+
+/**
+ * @brief Trigger a breakpoint (for debugging)
+ */
+void cortos_port_breakpoint(void);
+
+/**
+ * @brief Get the current stack pointer value
+ * @return Current stack pointer
+ */
+void* cortos_port_get_stack_pointer(void);
 
 #ifdef __cplusplus
 }
