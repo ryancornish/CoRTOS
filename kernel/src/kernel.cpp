@@ -698,13 +698,13 @@ bool Scheduler::post_to_inbox(CrossCoreRequest request) noexcept
 }
 
 // NOTE: current_task must be pre-set with the state before rescheduling.
-// "Ready"     : Re-enqueued
+// "Running"   : Re-enqueued
 // "Blocked"   : Not re-enqueued
 // "Terminated": Not re-enqueued
-// "Running"   : Invalid
+// "Ready"     : Invalid
 void Scheduler::reschedule() noexcept
 {
-   assert(current_task->state != TaskControlBlock::State::Running);
+   assert(current_task->state != TaskControlBlock::State::Ready);
 
    drain_inbox();
 
@@ -716,10 +716,14 @@ void Scheduler::reschedule() noexcept
    auto* prev_task = current_task;
    current_task = next_task;
 
-   if (prev_task->state == TaskControlBlock::State::Ready) {
-      ready_matrix.enqueue_task(*prev_task);
+   if (prev_task->state == TaskControlBlock::State::Running) {
+      prev_task->state = TaskControlBlock::State::Ready;
+      if (prev_task != idle_task) {
+         ready_matrix.enqueue_task(*prev_task);
+      }
    }
 
+   next_task->state = TaskControlBlock::State::Running;
    cortos_port_switch(prev_task->context(), next_task->context());
 }
 
