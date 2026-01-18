@@ -418,3 +418,8 @@ TEST_F(PortTest, StartCores_PendRescheduleAndSelfIpiWorkPerCore)
          << "Non-participating core " << i << " unexpectedly ran";
    }
 }
+
+TEST_F(PortTest, MakesError)
+{
+   CORTOS_ASSERT(false); // Blah
+}

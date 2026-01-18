@@ -1,5 +1,5 @@
 # Generic time driver tests (interface tests)
-add_cortos_test(test_time_driver test_time_driver.cpp)
+add_cortos_gtest(test_time_driver test_time_driver.cpp)
 
 # Simulation driver tests (always compiled, links against simulation driver)
 add_executable(test_time_driver_simulation test_time_driver_simulation.cpp)

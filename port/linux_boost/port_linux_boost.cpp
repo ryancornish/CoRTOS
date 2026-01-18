@@ -24,6 +24,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <ctime>
+#include <execinfo.h>
 #include <pthread.h>
 
 /* ============================================================================
@@ -57,7 +58,7 @@ static_assert((CORTOS_STACK_ALIGN & (CORTOS_STACK_ALIGN - 1)) == 0,
 
 struct GlobalState
 {
-   cortos_port_reschedule_t reschedule_cb{nullptr};
+   size_t cores_running{1};
 };
 [[maybe_unused]]
 static constinit GlobalState global;
@@ -226,9 +227,8 @@ extern "C" void cortos_port_pend_reschedule(void)
 
 extern "C" void cortos_port_thread_exit(void)
 {
-   cortos_port_pend_reschedule();
-   // Should be unreachable?
-   std::abort();
+   // Do nothing under boost. This will return then return from the thread_launcher, which will
+   // switch to the sched context and this thread context will no longer be captured, and be cleaned up.
 }
 
 /* ============================================================================
@@ -243,7 +243,14 @@ struct BackendCoreThread
    pthread_t pthread{};
    uint32_t  core_id{};
    cortos_port_core_entry_t entry{};
+
+   struct {
+      pthread_mutex_t mutex;
+      pthread_cond_t  cond_var;
+      std::atomic<bool> pending{false}; // Can be set by any core
+   } core_poke;
 };
+static std::span<BackendCoreThread> g_threads;
 
 extern "C" uint32_t cortos_port_get_core_id(void)
 {
@@ -253,9 +260,11 @@ extern "C" uint32_t cortos_port_get_core_id(void)
 void cortos_port_start_cores(size_t cores_to_use, cortos_port_core_entry_t entry)
 {
    if ( 1 > cores_to_use || cores_to_use > CORTOS_PORT_CORE_COUNT) throw;
+   global.cores_running = cores_to_use + 1;
    // Allocate init blocks on heap so lifetime survives even if start_cores returns.
    auto* thread_mem = new BackendCoreThread[cores_to_use - 1]{};
    std::span<BackendCoreThread> threads{thread_mem, cores_to_use - 1};
+   g_threads = threads;
 
    for (uint32_t core_id = 1; auto& thread : threads) {
       thread.core_id = core_id++;
@@ -287,10 +296,21 @@ void cortos_port_start_cores(size_t cores_to_use, cortos_port_core_entry_t entry
 
 extern "C" void cortos_port_send_reschedule_ipi(uint32_t core_id)
 {
+   assert(core_id < global.cores_running);
+
+   auto& core_poker = g_threads[core_id].core_poke;
+
+   // Set the pending bit first (release) so the woken core sees it.
+   core_poker.pending.store(true, std::memory_order_release);
+
+   // Wake the core if it is blocked in idle().
+   pthread_mutex_lock(&core_poker.mutex);
+   pthread_cond_signal(&core_poker.cond_var);
+   pthread_mutex_unlock(&core_poker.mutex);
+
    if (core_id == current_core.core_id) {
       cortos_port_pend_reschedule();
    }
-   // else: TODO when pthread-per-core exists
 }
 
 // Likely no-op on real targets.
@@ -409,15 +429,36 @@ extern "C" void cortos_port_cpu_relax(void)
 extern "C" void cortos_port_idle(void)
 {
    std::printf("Core: %d: cortos_port_idle()\n", current_core.core_id);
-   // Sleep 1ms to simulate power saving, then yield
-   struct timespec req = {.tv_sec = 1, .tv_nsec = 1'000'000};
-   nanosleep(&req, nullptr);
-   cortos_port_pend_reschedule();
+   auto& core_poker = g_threads[current_core.core_id].core_poke;
+
+   // Fast path: don’t sleep if already pending.
+   if (core_poker.pending.exchange(false, std::memory_order_acq_rel)) {
+      return;
+   }
+
+   pthread_mutex_lock(&core_poker.mutex);
+
+   // Re-check under lock (avoids missed wake if signal happens between fast-path and lock)
+   while (!core_poker.pending.exchange(false, std::memory_order_acq_rel)) {
+      pthread_cond_wait(&core_poker.cond_var, &core_poker.mutex);
+   }
+
+   pthread_mutex_unlock(&core_poker.mutex);
 }
 
 /* ============================================================================
  * Debug & Diagnostics
  * ========================================================================= */
+
+extern "C" void cortos_port_system_error(uintptr_t auxilary1, uintptr_t auxilary2)
+{
+   std::printf("KERNEL PANIC at:\n");
+   void* buffer[10];
+   int size = backtrace(buffer, 10);
+   backtrace_symbols_fd(buffer, size, 2); // Prints trace to stderr (fd 2)
+   std::printf("AUX1: %lx, AUX2: %lx\n", auxilary1, auxilary2);
+   std::terminate();
+}
 
 extern "C" void cortos_port_breakpoint(void)
 {

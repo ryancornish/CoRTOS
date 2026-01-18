@@ -21,12 +21,6 @@
 namespace cortos
 {
 
-#ifdef CORTOS_PORT_SIMULATION
-#define START_NO_RETURN
-#else
-#define START_NO_RETURN [[noreturn]]
-#endif
-
 static constexpr std::uintptr_t align_down(std::uintptr_t v, std::size_t a) { return v & ~(static_cast<std::uintptr_t>(a) - 1); }
 static constexpr std::uintptr_t   align_up(std::uintptr_t v, std::size_t a) { return (v + (a - 1)) & ~(static_cast<std::uintptr_t>(a) - 1); }
 
@@ -102,7 +96,7 @@ public:
     */
    WaitNode* alloc(WaitGroup& group, Waitable& waitable, uint8_t index) noexcept
    {
-      assert(index != WaitNode::INVALID_INDEX);
+      CORTOS_ASSERT(index != WaitNode::INVALID_INDEX);
 
       if (free_mask == 0) return nullptr;
 
@@ -113,7 +107,7 @@ public:
 
       // Node should be inactive if the mask said it was free.
       // If not, we have a bug in free()/mask management.
-      assert(node.active == false);
+      CORTOS_ASSERT(!node.active);
 
       node.reset();
       node.active   = true;
@@ -138,7 +132,7 @@ public:
       }
 
       auto& n = nodes[static_cast<std::size_t>(index)];
-      assert(n.active && "Freeing an inactive node");
+      CORTOS_ASSERT(n.active); // If error: You are freeing an inactive node.
 
       assert(n.slot == static_cast<uint8_t>(index));
       n.reset();
@@ -850,9 +844,10 @@ namespace kernel
       KERNEL.initialised = true;
    }
 
-   START_NO_RETURN void start()
+   void start()
    {
-      assert(KERNEL.initialised && "kernel::initialise() must be called first");
+      CORTOS_ASSERT(KERNEL.initialised); // kernel::initialise() must be called first
+
       KERNEL.started.store(true, std::memory_order_release);
 
       cortos_port_start_cores(
@@ -861,14 +856,7 @@ namespace kernel
          {
             auto& sched = KERNEL.scheduler_for_this_core();
             sched.start(); // picks first runnable (or idle) pinned to this core and port_start_first()
-
-            if constexpr(CORTOS_PORT_SIMULATION) {
-               while (true) {
-                  sched.reschedule();
-               }
-            } else {
-               __builtin_unreachable();
-            }
+            cortos_port_on_core_returned();
          }
       );
    }
@@ -880,8 +868,8 @@ namespace kernel
 
    Waitable::Result wait_for_any(std::span<Waitable* const> waitables)
    {
-      assert(waitables.size() > 0);
-      assert(waitables.size() <= config::MAX_WAIT_NODES);
+      CORTOS_ASSERT(waitables.size() > 0);
+      CORTOS_ASSERT(waitables.size() <= config::MAX_WAIT_NODES);
 
       // auto* tcb = scheduler_current_tcb();
       // return tcb->block_on(waitables);
@@ -916,3 +904,12 @@ namespace this_thread
 }  // namespace this_thread
 
 }  // namespace cortos
+
+
+// For cooperative systems, a hook to reschedule during a controllable point, is necessary
+#ifdef CORTOS_PORT_SIMULATION
+extern "C" void CORTOS_FORCE_RESCHEDULE(void)
+{
+   cortos::KERNEL.scheduler_for_this_core().reschedule();
+}
+#endif

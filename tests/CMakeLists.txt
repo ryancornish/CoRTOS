@@ -1,5 +1,5 @@
 # Helper function to create tests
-function(add_cortos_test name)
+function(add_cortos_gtest name)
    add_executable(${name} ${ARGN})
    target_link_libraries(${name} PRIVATE
       cortos::kernel
@@ -10,7 +10,17 @@ function(add_cortos_test name)
    add_test(NAME ${name} COMMAND ${name})
 endfunction()
 
-function(add_cortos_non_gtest_test name)
+function(add_cortos_gtest_no_main name)
+   add_executable(${name} ${ARGN})
+   target_link_libraries(${name} PRIVATE
+      cortos::kernel
+      cortos::libcortos
+      gtest
+   )
+   add_test(NAME ${name} COMMAND ${name})
+endfunction()
+
+function(add_cortos_standalone_test name)
    add_executable(${name} ${ARGN})
    target_link_libraries(${name} PRIVATE
       cortos::kernel

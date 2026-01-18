@@ -165,7 +165,7 @@ void cortos_port_pend_reschedule(void);
  * Called when a thread's entry function returns.
  * Should never return.
  */
-void cortos_port_thread_exit(void) __attribute__((noreturn));
+void cortos_port_thread_exit(void);// __attribute__((noreturn));
 
 /* ============================================================================
  * SMP & Multi-Core Support
@@ -346,6 +346,16 @@ void cortos_port_idle(void);
 /* ============================================================================
  * Debug & Diagnostics
  * ========================================================================= */
+
+/**
+ * @brief Internal Kernel asserts
+ * The Kernel has been setup incorrectly, or has hit an internal system error
+ */
+void cortos_port_system_error(uintptr_t auxilary1, uintptr_t auxilary2) __attribute__((noreturn));
+
+#define CORTOS_ASSERT(condition)              __builtin_expect(!!(condition), 1) ? (void)0 : cortos_port_system_error(0, 0)
+#define CORTOS_ASSERT1(condition, aux1)       __builtin_expect(!!(condition), 1) ? (void)0 : cortos_port_system_error((uintptr_t)(aux1), 0)
+#define CORTOS_ASSERT2(condition, aux1, aux2) __builtin_expect(!!(condition), 1) ? (void)0 : cortos_port_system_error((uintptr_t)(aux1), aux2)
 
 /**
  * @brief Trigger a breakpoint (for debugging)
