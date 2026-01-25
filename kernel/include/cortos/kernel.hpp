@@ -580,6 +580,9 @@ namespace this_thread
     * Note: If thread entry function returns, this is called automatically.
     */
    [[noreturn]] void thread_exit();
+
+   void yield();
+
 }  // namespace this_thread
 
 

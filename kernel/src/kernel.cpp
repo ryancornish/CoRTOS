@@ -914,6 +914,11 @@ namespace this_thread
       // TODO
       __builtin_unreachable();
    }
+
+   void yield()
+   {
+      cortos_port_pend_reschedule();
+   }
 }  // namespace this_thread
 
 
