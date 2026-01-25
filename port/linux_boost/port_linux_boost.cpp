@@ -24,8 +24,10 @@
 #include <cstdint>
 #include <cstdlib>
 #include <ctime>
-#include <execinfo.h>
+#include <fstream>
+#include <iostream>
 #include <pthread.h>
+#include <string>
 
 /* ============================================================================
  * Port Context Structure
@@ -450,13 +452,41 @@ extern "C" void cortos_port_idle(void)
  * Debug & Diagnostics
  * ========================================================================= */
 
-extern "C" void cortos_port_system_error(uintptr_t auxilary1, uintptr_t auxilary2)
+static void print_formatted_context(char const* file, int target_line, int range = 2)
 {
-   std::printf("KERNEL PANIC at:\n");
-   void* buffer[10];
-   int size = backtrace(buffer, 10);
-   backtrace_symbols_fd(buffer, size, 2); // Prints trace to stderr (fd 2)
-   std::printf("AUX1: %lx, AUX2: %lx\n", auxilary1, auxilary2);
+   // Colour Constants
+   static constexpr auto CLR_RESET  = "\033[0m";
+   static constexpr auto CLR_RED    = "\033[1;31m";
+   static constexpr auto CLR_ORANGE = "\033[38;5;208m";
+
+   std::ifstream fs(file);
+   if (!fs.is_open()) return;
+
+   std::string text;
+   int current = 0;
+   int start = (target_line - range > 0) ? target_line - range : 1;
+   int end = target_line + range;
+
+   while (std::getline(fs, text)) {
+      current++;
+      if (current >= start && current <= end) {
+         std::printf("├ ");
+         std::printf("%s%4d%s  ", CLR_ORANGE, current, CLR_RESET);
+         if (current == target_line) {
+            std::printf("%s>> %s%s\n", CLR_RED, text.c_str(), CLR_RESET);
+         } else {
+            std::printf("   %s\n", text.c_str());
+         }
+      }
+      if (current > end) break;
+   }
+}
+
+extern "C" void cortos_port_system_error(uintptr_t auxilary1, uintptr_t auxilary2, char const* file_optional, int line_optional)
+{
+   std::printf("KERNEL PANIC at %s:%d\n", file_optional, line_optional);
+   print_formatted_context(file_optional, line_optional);
+   std::printf("└ AUX1: %lx, AUX2: %lx\n", auxilary1, auxilary2);
    std::terminate();
 }
 

@@ -351,11 +351,19 @@ void cortos_port_idle(void);
  * @brief Internal Kernel asserts
  * The Kernel has been setup incorrectly, or has hit an internal system error
  */
-void cortos_port_system_error(uintptr_t auxilary1, uintptr_t auxilary2) __attribute__((noreturn));
+void cortos_port_system_error(uintptr_t auxilary1, uintptr_t auxilary2, char const* file_optional, int line_optional) __attribute__((noreturn));
 
-#define CORTOS_ASSERT(condition)              __builtin_expect(!!(condition), 1) ? (void)0 : cortos_port_system_error(0, 0)
-#define CORTOS_ASSERT1(condition, aux1)       __builtin_expect(!!(condition), 1) ? (void)0 : cortos_port_system_error((uintptr_t)(aux1), 0)
-#define CORTOS_ASSERT2(condition, aux1, aux2) __builtin_expect(!!(condition), 1) ? (void)0 : cortos_port_system_error((uintptr_t)(aux1), aux2)
+#ifdef CORTOS_PORT_SIMULATION
+ #define CORTOS_PORT_CAPTURE_FILE (__FILE__)
+ #define CORTOS_PORT_CAPTURE_LINE (__LINE__)
+#else
+ #define CORTOS_PORT_CAPTURE_FILE ""
+ #define CORTOS_PORT_CAPTURE_LINE 0
+#endif
+
+#define CORTOS_ASSERT2(condition, aux1, aux2) __builtin_expect(!!(condition), 1) ? (void)0 : cortos_port_system_error((uintptr_t)(aux1), (uintptr_t)(aux2), CORTOS_PORT_CAPTURE_FILE, CORTOS_PORT_CAPTURE_LINE)
+#define CORTOS_ASSERT1(condition, aux1)       CORTOS_ASSERT2(condition, aux1, 0)
+#define CORTOS_ASSERT(condition)              CORTOS_ASSERT2(condition, 0, 0)
 
 /**
  * @brief Trigger a breakpoint (for debugging)
