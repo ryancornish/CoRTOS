@@ -6,7 +6,7 @@ target_link_libraries(test_function PRIVATE
    cortos::kernel
 )
 
-add_cortos_standalone_test(test_single_thread test_single_thread.cpp)
+add_cortos_gtest_no_main(test_single_thread test_single_thread.cpp)
 target_link_libraries(test_single_thread PRIVATE
    cortos::kernel
 )

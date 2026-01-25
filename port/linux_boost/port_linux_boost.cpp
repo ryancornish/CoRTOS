@@ -47,8 +47,8 @@ static_assert(sizeof(cortos_port_context) == CORTOS_PORT_CONTEXT_SIZE,
               "CORTOS_PORT_CONTEXT_SIZE mismatch - adjust in port_traits.h");
 static_assert(alignof(cortos_port_context) == CORTOS_PORT_CONTEXT_ALIGN,
               "CORTOS_PORT_CONTEXT_ALIGN mismatch - adjust in port_traits.h");
-static_assert((CORTOS_STACK_ALIGN & (CORTOS_STACK_ALIGN - 1)) == 0,
-              "CORTOS_STACK_ALIGN must be a power of two");
+static_assert((CORTOS_PORT_STACK_ALIGN & (CORTOS_PORT_STACK_ALIGN - 1)) == 0,
+              "CORTOS_PORT_STACK_ALIGN must be a power of two");
 
 /* ============================================================================
  * Global & Thread-Local State
@@ -315,11 +315,8 @@ extern "C" void cortos_port_send_reschedule_ipi(uint32_t core_id)
    }
 }
 
-// Likely no-op on real targets.
-void cortos_port_on_core_returned()
-{
-
-}
+// Defined within the kernel itself under simulation
+//void cortos_port_on_core_returned() {}
 
 /* ============================================================================
  * Thread-Local Storage
@@ -486,7 +483,7 @@ extern "C" void cortos_port_system_error(uintptr_t auxilary1, uintptr_t auxilary
 {
    std::printf("KERNEL PANIC at %s:%d\n", file_optional, line_optional);
    print_formatted_context(file_optional, line_optional);
-   std::printf("└ AUX1: %lx, AUX2: %lx\n", auxilary1, auxilary2);
+   std::printf("└ AUX1: 0x%lX, AUX2: 0x%lX\n", auxilary1, auxilary2);
    std::terminate();
 }
 

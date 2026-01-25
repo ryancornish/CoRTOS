@@ -419,7 +419,23 @@ TEST_F(PortTest, StartCores_PendRescheduleAndSelfIpiWorkPerCore)
    }
 }
 
+TEST_F(PortTest, Asserts)
+{
+   CORTOS_ASSERT(true);
+   CORTOS_ASSERT1(true == true, 30);
+   CORTOS_ASSERT2(!false, 30, 20);
+   CORTOS_ASSERT_OP(1, <, 2);
+   int* i_am_null = nullptr;
+   CORTOS_ASSERT_NULL(i_am_null);
+}
+
+// Uncomment each line to test kernel panics
 TEST_F(PortTest, MakesError)
 {
-   CORTOS_ASSERT(false); // Blah
+   // CORTOS_ASSERT(false); // ...Some handy error diagnosis comment...
+   // CORTOS_ASSERT1(true == false, 30);
+   // CORTOS_ASSERT2(!true, 30, 20); // ...Some handy error diagnosis comment...
+   // CORTOS_ASSERT_OP(1, >, 2);  // ...Some handy error diagnosis comment...
+   // int x; CORTOS_ASSERT_NULL(&x);  // ...Some handy error diagnosis comment...
 }
+

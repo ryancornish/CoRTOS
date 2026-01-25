@@ -134,7 +134,7 @@ public:
       auto& n = nodes[static_cast<std::size_t>(index)];
       CORTOS_ASSERT(n.active); // If error: You are freeing an inactive node.
 
-      assert(n.slot == static_cast<uint8_t>(index));
+      CORTOS_ASSERT_OP(n.slot, ==, static_cast<uint8_t>(index));
       n.reset();
       free_mask |= (1u << static_cast<uint32_t>(index));
    }
@@ -249,10 +249,10 @@ struct TaskControlBlock
 
       // Allocate and enqueue nodes
       for (std::size_t i = 0; auto* waitable : waitables) {
-         assert(waitable != nullptr);
+         CORTOS_ASSERT(waitable != nullptr);
 
          WaitNode* wait_node = wait_nodes.alloc(wait_group, *waitable, i);
-         assert(wait_node != nullptr);
+         CORTOS_ASSERT(wait_node != nullptr);
 
          waitable->add(*wait_node);
          // w->on_thread_blocked(this_thread??)
@@ -280,24 +280,12 @@ struct TaskControlBlock
    }
 };
 
-static void thread_launcher(void* vtcb)
-{
-   auto* tcb = static_cast<TaskControlBlock*>(vtcb);
-   // For now point TLS to the TCB, but in future, TLS sits just after TCB
-   cortos_port_set_tls_pointer(tcb);
-   tcb->entry();
-
-   tcb->state = TaskControlBlock::State::Terminated;
-   // Signal joiners
-
-   cortos_port_thread_exit();
-}
-
 // TODO: Scheduler method? For now free standing is fine
 static void wake_node(WaitNode const& wait_node, bool acquired) noexcept
 {
-   assert(wait_node.tcb != nullptr && wait_node.group != nullptr);
-   assert(wait_node.tcb->state == TaskControlBlock::State::Blocked);
+   CORTOS_ASSERT(wait_node.tcb != nullptr);
+   CORTOS_ASSERT(wait_node.group != nullptr);
+   CORTOS_ASSERT_OP(wait_node.tcb->state, ==, TaskControlBlock::State::Blocked);
 
    if (!wait_node.group->try_win(static_cast<int>(wait_node.index), acquired)) {
       return; // lost
@@ -342,7 +330,7 @@ struct StackLayout
       auto const tls_top  = tcb_start;
       auto const tls_base = align_down(tls_top - tls_size, alignof(std::max_align_t));
 
-      assert(tls_base >= base && "Buffer too small for TLS+TCB");
+      CORTOS_ASSERT_OP(tls_base, >=, base); // Buffer too small for TLS+TCB
 
       auto const tls_offset = static_cast<std::size_t>(tls_base - base);
       auto const tls_length = static_cast<std::size_t>(tls_top  - tls_base);
@@ -350,7 +338,7 @@ struct StackLayout
 
       // User stack: everything below TLS
       auto const stack_len = static_cast<std::size_t>(tls_base - base);
-      assert(stack_len > 64 && "Buffer too small after carving TCB/TLS");
+      CORTOS_ASSERT_OP(stack_len, >, 64); // Buffer too small after carving TCB/TLS
 
       user_stack = buffer.subspan(0, stack_len);
    }
@@ -368,8 +356,9 @@ void Waitable::on_thread_removed(Thread*) {}
 
 void Waitable::add(WaitNode& wait_node) noexcept
 {
-   assert(wait_node.waitable == this || wait_node.waitable == nullptr);
-   assert(wait_node.next == nullptr && wait_node.prev == nullptr);
+   CORTOS_ASSERT1(wait_node.waitable == this || wait_node.waitable == nullptr, wait_node.waitable);
+   CORTOS_ASSERT_NULL(wait_node.next);
+   CORTOS_ASSERT_NULL(wait_node.prev);
 
    wait_node.waitable = this;
 
@@ -464,8 +453,9 @@ public:
 
    void push_back(TaskControlBlock& tcb) noexcept
    {
-      assert(tcb.next == nullptr && tcb.prev == nullptr && "TCB already linked");
-      assert(tcb.state == TaskControlBlock::State::Ready && "Task must be ready to be enqueued");
+      CORTOS_ASSERT_NULL(tcb.next); // TCB already linked
+      CORTOS_ASSERT_NULL(tcb.prev); // TCB already linked
+      CORTOS_ASSERT_OP(tcb.state, ==, TaskControlBlock::State::Ready); // Task must be ready to be enqueued
       tcb.next = nullptr;
       tcb.prev = tail;
       if (tail) tail->next = &tcb; else head = &tcb;
@@ -484,14 +474,14 @@ public:
 
    void remove(TaskControlBlock& tcb) noexcept
    {
-      assert(&tcb == head || tcb.prev != nullptr);
-      assert(&tcb == tail || tcb.next != nullptr);
+      CORTOS_ASSERT(&tcb == head || tcb.prev != nullptr);
+      CORTOS_ASSERT(&tcb == tail || tcb.next != nullptr);
 
       if (tcb.prev) tcb.prev->next = tcb.next; else head = tcb.next;
       if (tcb.next) tcb.next->prev = tcb.prev; else tail = tcb.prev;
       tcb.next = tcb.prev = nullptr;
       // Invariant: if one end is null, both are null
-      assert((head == nullptr) == (tail == nullptr));
+      CORTOS_ASSERT((head == nullptr) == (tail == nullptr));
    }
 };
 
@@ -519,8 +509,8 @@ public:
 
    void enqueue_task(TaskControlBlock& tcb) noexcept
    {
-      assert(tcb.effective_priority < config::MAX_PRIORITIES);
-      assert(tcb.state == TaskControlBlock::State::Ready && "Can only enqueue Ready tasks!");
+      CORTOS_ASSERT_OP(tcb.effective_priority, <, config::MAX_PRIORITIES);
+      CORTOS_ASSERT_OP(tcb.state, ==, TaskControlBlock::State::Ready); // Can only enqueue Ready tasks!
       matrix[tcb.effective_priority].push_back(tcb);
       bitmap |= (1u << tcb.effective_priority);
    }
@@ -556,7 +546,7 @@ class Scheduler
    std::atomic<uint32_t> pinned_task_counter{0};
    TaskControlBlock* current_task{nullptr};
    TaskControlBlock*    idle_task{nullptr};
-   alignas(CORTOS_STACK_ALIGN) std::array<std::byte, 4 * 1024> idle_stack{};
+   alignas(CORTOS_PORT_STACK_ALIGN) std::array<std::byte, 4 * 1024> idle_stack{};
 
    TaskReadyMatrix ready_matrix;
 
@@ -623,7 +613,7 @@ public:
 
    void enable_preemption()
    {
-      assert(preempt_disable_depth > 0);
+      CORTOS_ASSERT(preempt_disable_depth > 0);
       if (--preempt_disable_depth == 0) {
          if (need_reschedule.load(std::memory_order_acquire)) {
             // Defer to scheduler context
@@ -635,14 +625,14 @@ public:
 
 void Scheduler::start() noexcept
 {
-   assert(idle_task != nullptr && "init_idle_task() must run before start()");
+   CORTOS_ASSERT(idle_task != nullptr); // init_idle_task() must run before start()
 
    auto* first = ready_matrix.pop_best_task();
    if (first == nullptr) {
       first = idle_task;
    }
-   assert(first != nullptr);
-   assert(first->state == TaskControlBlock::State::Ready);
+   CORTOS_ASSERT(first != nullptr);
+   CORTOS_ASSERT_OP(first->state, ==, TaskControlBlock::State::Ready);
    first->state = TaskControlBlock::State::Running;
    current_task = first;
 
@@ -653,7 +643,7 @@ void Scheduler::start() noexcept
 // Core-local operations (only called on owning core)
 void Scheduler::set_task_ready_local(TaskControlBlock& tcb) noexcept
 {
-   assert(tcb.pinned_core == core_id);
+   CORTOS_ASSERT_OP(tcb.pinned_core, ==, core_id);
    // Preconditions to assert later:
    // - tcb not already in ready queue
    // - tcb->state is Blocked/Ready transition etc.
@@ -698,7 +688,7 @@ bool Scheduler::post_to_inbox(CrossCoreRequest request) noexcept
 // "Ready"     : Invalid
 void Scheduler::reschedule() noexcept
 {
-   assert(current_task->state != TaskControlBlock::State::Ready);
+   CORTOS_ASSERT(current_task->state != TaskControlBlock::State::Ready);
 
    drain_inbox();
 
@@ -731,6 +721,7 @@ struct Kernel
    std::atomic<bool> stop_requested{false};
    std::array<Scheduler, CORES> schedulers;
    std::atomic<uint32_t> thread_id_generator{1};
+   std::atomic<uint32_t> active_threads{0};
 
    constexpr Kernel() noexcept : Kernel(std::make_index_sequence<CORES>{}) {}
 
@@ -755,7 +746,7 @@ struct Kernel
             found = true;
          }
       }
-      assert(found && "Thread affinity mask allows no cores");
+      CORTOS_ASSERT(found); // Thread affinity mask allows no cores
 
       schedulers.at(best_core).pin_task(tcb);
       return best_core;
@@ -763,6 +754,8 @@ struct Kernel
 
    void register_thread(TaskControlBlock& tcb) noexcept
    {
+      active_threads.fetch_add(1, std::memory_order_seq_cst);
+
       uint32_t chosen_core = 0;
       {
          SpinlockGuard guard(lock);
@@ -789,7 +782,7 @@ struct Kernel
          .type = CrossCoreRequest::SetTaskReady,
          .tcb  = &tcb,
       });
-      assert(posted);
+      CORTOS_ASSERT(posted);
    }
 
 private:
@@ -797,6 +790,21 @@ private:
    constexpr explicit Kernel(std::index_sequence<Is...>) noexcept : schedulers{ Scheduler{Is}... } {}
 };
 static constinit Kernel<config::CORES> KERNEL;
+
+static void thread_launcher(void* vtcb)
+{
+   auto* tcb = static_cast<TaskControlBlock*>(vtcb);
+   // For now point TLS to the TCB, but in future, TLS sits just after TCB
+   cortos_port_set_tls_pointer(tcb);
+   tcb->entry();
+
+   tcb->state = TaskControlBlock::State::Terminated;
+   // Signal joiners
+
+   CORTOS_ASSERT(KERNEL.active_threads.load() != 0);
+   KERNEL.active_threads.fetch_sub(1, std::memory_order_seq_cst);
+   cortos_port_thread_exit();
+}
 
 Thread::Thread(EntryFn&& entry, std::span<std::byte> stack, Priority priority, CoreAffinity affinity)
 {
@@ -834,7 +842,7 @@ namespace kernel
 {
    void initialise()
    {
-      assert(!KERNEL.initialised);
+      CORTOS_ASSERT(!KERNEL.initialised); // Cannot invoke kernel::initialise twice (without shutting down in between)
 
       cortos_port_init();
 
@@ -866,10 +874,15 @@ namespace kernel
       return config::CORES;
    }
 
+   std::uint32_t active_threads() noexcept
+   {
+      return KERNEL.active_threads.load(std::memory_order_seq_cst);
+   }
+
    Waitable::Result wait_for_any(std::span<Waitable* const> waitables)
    {
       CORTOS_ASSERT(waitables.size() > 0);
-      CORTOS_ASSERT(waitables.size() <= config::MAX_WAIT_NODES);
+      CORTOS_ASSERT_OP(waitables.size(), <=, config::MAX_WAIT_NODES);
 
       // auto* tcb = scheduler_current_tcb();
       // return tcb->block_on(waitables);
@@ -903,13 +916,19 @@ namespace this_thread
    }
 }  // namespace this_thread
 
-}  // namespace cortos
-
 
 // For cooperative systems, a hook to reschedule during a controllable point, is necessary
 #ifdef CORTOS_PORT_SIMULATION
-extern "C" void CORTOS_FORCE_RESCHEDULE(void)
+extern "C" void cortos_port_on_core_returned(void)
 {
-   cortos::KERNEL.scheduler_for_this_core().reschedule();
+   // Although the core has returned, other cores, OR itself may still have active threads.
+   // This means there is the potential for either another core to start a thread on this one,
+   // OR a thread on this core to become runnable. Therefore under cooperation, we
+   // must reschedule until the system is basically dead.
+   while (KERNEL.active_threads.load(std::memory_order_seq_cst) > 0) {
+      KERNEL.scheduler_for_this_core().reschedule();
+   }
 }
 #endif
+
+}  // namespace cortos

@@ -428,12 +428,19 @@ namespace kernel
     */
    void start();
 
-
    /**
     * @brief Get total number of CPU cores
     * @return Number of cores (1 for single-core)
     */
    [[nodiscard]] std::uint32_t core_count() noexcept;
+
+   /**
+    * @brief Get total number of currently registered threads
+    *
+    * Intended for diagnosis only. All threads that register add to the tally.
+    * All threads that terminate substract from the tally.
+    */
+   [[nodiscard]] std::uint32_t active_threads() noexcept;
 
    /**
    * @brief Block current thread until ANY of the given waitables is signalled.

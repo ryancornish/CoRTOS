@@ -364,6 +364,8 @@ void cortos_port_system_error(uintptr_t auxilary1, uintptr_t auxilary2, char con
 #define CORTOS_ASSERT2(condition, aux1, aux2) __builtin_expect(!!(condition), 1) ? (void)0 : cortos_port_system_error((uintptr_t)(aux1), (uintptr_t)(aux2), CORTOS_PORT_CAPTURE_FILE, CORTOS_PORT_CAPTURE_LINE)
 #define CORTOS_ASSERT1(condition, aux1)       CORTOS_ASSERT2(condition, aux1, 0)
 #define CORTOS_ASSERT(condition)              CORTOS_ASSERT2(condition, 0, 0)
+#define CORTOS_ASSERT_OP(lhs, op, rhs)        CORTOS_ASSERT2((lhs) op (rhs), lhs, rhs)
+#define CORTOS_ASSERT_NULL(pointer)           CORTOS_ASSERT2(!(pointer), pointer, 0);
 
 /**
  * @brief Trigger a breakpoint (for debugging)
