@@ -532,6 +532,8 @@ public:
    }
 };
 
+static void idle_thread();
+
 struct CrossCoreRequest
 {
    enum : uint8_t {
@@ -573,12 +575,13 @@ public:
    void init_idle_task()
    {
       StackLayout slayout(idle_stack, 0);
-      idle_task = ::new (slayout.tcb) TaskControlBlock(0, config::MAX_PRIORITIES-1, CoreAffinity::from_id(core_id), slayout.user_stack,
-      +[]{
-         while (true) {
-            cortos_port_idle();
-         }
-      });
+      idle_task = ::new (slayout.tcb) TaskControlBlock(
+         0,
+         config::MAX_PRIORITIES-1,
+         CoreAffinity::from_id(core_id),
+         slayout.user_stack,
+         idle_thread
+      );
    }
 
    // Core-local operations (only called on owning core)
@@ -620,6 +623,11 @@ public:
             cortos_port_pend_reschedule();
          }
       }
+   }
+
+   void reset()
+   {
+      CORTOS_ASSERT_OP(inbox.approx_size(), ==, 0); // Cannot reset whilst inbox is not empty
    }
 };
 
@@ -717,8 +725,7 @@ struct Kernel
 {
    Spinlock lock;
    std::atomic<bool>    initialised{false};
-   std::atomic<bool>        started{false};
-   std::atomic<bool> stop_requested{false};
+   std::atomic<bool>        running{false};
    std::array<Scheduler, CORES> schedulers;
    std::atomic<uint32_t> thread_id_generator{1};
    std::atomic<uint32_t> active_threads{0};
@@ -765,7 +772,7 @@ struct Kernel
       auto& scheduler = scheduler_for_core(chosen_core);
 
       // If cores are not running yet, enqueue directly (even for remote cores)
-      if (!started.load(std::memory_order_acquire)) {
+      if (!running.load(std::memory_order_acquire)) {
          scheduler.set_task_ready_local(tcb);   // direct, no inbox
          return;
       }
@@ -791,6 +798,8 @@ private:
 };
 static constinit Kernel<config::CORES> KERNEL;
 
+[[maybe_unused]] constexpr auto STATIC_SIZEOF_KERNEL = sizeof(KERNEL);
+
 static void thread_launcher(void* vtcb)
 {
    auto* tcb = static_cast<TaskControlBlock*>(vtcb);
@@ -806,12 +815,25 @@ static void thread_launcher(void* vtcb)
    cortos_port_thread_exit();
 }
 
+static void idle_thread()
+{
+   while (KERNEL.running.load(std::memory_order_acquire)) {
+      cortos_port_idle();
+   }
+}
+
 Thread::Thread(EntryFn&& entry, std::span<std::byte> stack, Priority priority, CoreAffinity affinity)
 {
    auto id = KERNEL.thread_id_generator.fetch_add(1, std::memory_order_relaxed);
 
    StackLayout slayout(stack, 0);
-   tcb = ::new (slayout.tcb) TaskControlBlock(id, priority, affinity, slayout.user_stack, std::move(entry));
+   tcb = ::new (slayout.tcb) TaskControlBlock(
+      id,
+      priority,
+      affinity,
+      slayout.user_stack,
+      std::move(entry)
+   );
 
    KERNEL.register_thread(*tcb);
 }
@@ -842,7 +864,7 @@ namespace kernel
 {
    void initialise()
    {
-      CORTOS_ASSERT(!KERNEL.initialised); // Cannot invoke kernel::initialise twice (without shutting down in between)
+      CORTOS_ASSERT(!KERNEL.initialised); // Cannot invoke kernel::initialise twice (without finalising down in between)
 
       cortos_port_init();
 
@@ -856,7 +878,7 @@ namespace kernel
    {
       CORTOS_ASSERT(KERNEL.initialised); // kernel::initialise() must be called first
 
-      KERNEL.started.store(true, std::memory_order_release);
+      KERNEL.running.store(true, std::memory_order_release);
 
       cortos_port_start_cores(
          config::CORES,
@@ -867,6 +889,15 @@ namespace kernel
             cortos_port_on_core_returned();
          }
       );
+   }
+
+   void finalise()
+   {
+      CORTOS_ASSERT(KERNEL.initialised);
+      CORTOS_ASSERT(KERNEL.running.load(std::memory_order_relaxed) == false); // System must be quiescent to shutdown cleanly
+      KERNEL.thread_id_generator = 1;
+
+      KERNEL.initialised = false;
    }
 
    std::uint32_t core_count() noexcept
@@ -932,6 +963,14 @@ extern "C" void cortos_port_on_core_returned(void)
    // must reschedule until the system is basically dead.
    while (KERNEL.active_threads.load(std::memory_order_seq_cst) > 0) {
       KERNEL.scheduler_for_this_core().reschedule();
+   }
+
+   // First core to observe quiescence initiates shutdown.
+   bool expected = true;
+   if (KERNEL.running.compare_exchange_strong(expected, false, std::memory_order_acq_rel)) {
+      for (uint32_t core_id = 0; core_id < config::CORES; ++core_id) {
+         cortos_port_send_reschedule_ipi(core_id);
+      }
    }
 }
 #endif

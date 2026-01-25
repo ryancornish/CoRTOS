@@ -58,9 +58,27 @@ static_assert((CORTOS_PORT_STACK_ALIGN & (CORTOS_PORT_STACK_ALIGN - 1)) == 0,
  * migration issues.
  * ========================================================================= */
 
+struct BackendCore
+{
+   pthread_t pthread{}; // NOTE: This is null/unused for Core0
+   uint32_t  core_id{};
+   cortos_port_core_entry_t entry{};
+
+   struct CorePoke
+   {
+      pthread_mutex_t mutex{};
+      pthread_cond_t  cond_var{};
+      std::atomic<bool> pending{false}; // Can be set by any core
+      CorePoke()  { pthread_mutex_init(&mutex, nullptr); pthread_cond_init(&cond_var, nullptr); }
+      ~CorePoke() { pthread_cond_destroy(&cond_var); pthread_mutex_destroy(&mutex); }
+   } core_poke;
+};
+
 struct GlobalState
 {
-   size_t cores_running{1};
+   size_t cores_running{0};
+   std::span<BackendCore> core_view;
+   void reset() { cores_running = 0; core_view = {}; }
 };
 [[maybe_unused]]
 static constinit GlobalState global;
@@ -240,20 +258,6 @@ extern "C" void cortos_port_thread_exit(void)
  * thread, additional cores spawn as pthreads.
  * ========================================================================= */
 
-struct BackendCoreThread
-{
-   pthread_t pthread{};
-   uint32_t  core_id{};
-   cortos_port_core_entry_t entry{};
-
-   struct {
-      pthread_mutex_t mutex;
-      pthread_cond_t  cond_var;
-      std::atomic<bool> pending{false}; // Can be set by any core
-   } core_poke;
-};
-static std::span<BackendCoreThread> g_threads;
-
 extern "C" uint32_t cortos_port_get_core_id(void)
 {
    return current_core.core_id;
@@ -261,27 +265,30 @@ extern "C" uint32_t cortos_port_get_core_id(void)
 
 void cortos_port_start_cores(size_t cores_to_use, cortos_port_core_entry_t entry)
 {
-   if ( 1 > cores_to_use || cores_to_use > CORTOS_PORT_CORE_COUNT) throw;
-   global.cores_running = cores_to_use + 1;
-   // Allocate init blocks on heap so lifetime survives even if start_cores returns.
-   auto* thread_mem = new BackendCoreThread[cores_to_use - 1]{};
-   std::span<BackendCoreThread> threads{thread_mem, cores_to_use - 1};
-   g_threads = threads;
+   CORTOS_ASSERT(cores_to_use > 0); // Invoking with 0 cores_to_use is invalid
+   CORTOS_ASSERT(cores_to_use <= CORTOS_PORT_CORE_COUNT);
 
-   for (uint32_t core_id = 1; auto& thread : threads) {
-      thread.core_id = core_id++;
-      thread.entry   = entry;
+   global.cores_running = cores_to_use;
+
+   auto cores = std::make_unique<BackendCore[]>(cores_to_use);
+   global.core_view = {cores.get(), cores_to_use};
+    // No need to spawn the first core/thread as that is assigned to this current calling core/thread
+   auto cores_to_spawn = global.core_view.subspan(1);
+
+   for (uint32_t core_id = 1; auto& core : cores_to_spawn) {
+      core.core_id = core_id++;
+      core.entry   = entry;
       pthread_create(
-         &thread.pthread,
+         &core.pthread,
          nullptr,
          +[](void* arg)-> void*
          {
-            auto* init = static_cast<BackendCoreThread*>(arg);
+            auto* init = static_cast<BackendCore*>(arg);
             current_core.core_id = init->core_id;
             init->entry();
             return nullptr;
          },
-         &thread
+         &core
       );
    }
 
@@ -290,17 +297,17 @@ void cortos_port_start_cores(size_t cores_to_use, cortos_port_core_entry_t entry
    entry();
 
    // If entry returns, join children to avoid leaks/dangling behavior
-   for (auto& thread : threads) {
-      pthread_join(thread.pthread, nullptr);
+   for (auto& core : cores_to_spawn) {
+      pthread_join(core.pthread, nullptr);
    }
-   delete[] thread_mem;
+   global.reset();
 }
 
 extern "C" void cortos_port_send_reschedule_ipi(uint32_t core_id)
 {
-   assert(core_id < global.cores_running);
+   CORTOS_ASSERT_OP(core_id, <, global.cores_running);
 
-   auto& core_poker = g_threads[core_id].core_poke;
+   auto& core_poker = global.core_view[core_id].core_poke;
 
    // Set the pending bit first (release) so the woken core sees it.
    core_poker.pending.store(true, std::memory_order_release);
@@ -428,7 +435,7 @@ extern "C" void cortos_port_cpu_relax(void)
 extern "C" void cortos_port_idle(void)
 {
    std::printf("Core: %d: cortos_port_idle()\n", current_core.core_id);
-   auto& core_poker = g_threads[current_core.core_id].core_poke;
+   auto& core_poker = global.core_view[current_core.core_id].core_poke;
 
    // Fast path: don’t sleep if already pending.
    if (core_poker.pending.exchange(false, std::memory_order_acq_rel)) {
