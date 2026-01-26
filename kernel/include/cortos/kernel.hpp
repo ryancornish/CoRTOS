@@ -428,6 +428,8 @@ namespace kernel
     */
    void start();
 
+   void finalise();
+
    /**
     * @brief Get total number of CPU cores
     * @return Number of cores (1 for single-core)

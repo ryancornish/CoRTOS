@@ -58,61 +58,65 @@ TEST(Given_a_single_core_and_two_threads_of_equal_priority, When_the_system_star
    EXPECT_EQ(entry_order.size(), 2u)        << "Diagnosis: Not all threads started";
    EXPECT_EQ(entry_order[0], Thread::Id(1)) << "Diagnosis: 't1' did not run first";
    EXPECT_EQ(entry_order[1], Thread::Id(2)) << "Diagnosis: 't2' did not run second";
+
+   kernel::finalise();
 }
 
-// Can't uncomment until I figure out how to shutdown the kernel cleanly
-// TEST(Given_a_single_core_and_two_threads_of_equal_priority, When_the_system_starts_and_each_thread_yeilds_to_each_other_over_time_Then_threads_cooperatively_progress)
-// {
-//    // GIVEN:
 
-//    kernel::initialise();
+TEST(Given_a_single_core_and_two_threads_of_equal_priority, When_the_system_starts_and_each_thread_yeilds_to_each_other_over_time_Then_threads_cooperatively_progress)
+{
+   // GIVEN:
 
-//    alignas(CORTOS_PORT_STACK_ALIGN) static std::array<std::byte, 16 * 1024> stack1;
-//    alignas(CORTOS_PORT_STACK_ALIGN) static std::array<std::byte, 16 * 1024> stack2;
+   kernel::initialise();
 
-//    std::vector<Thread::Id> entry_order;
+   alignas(CORTOS_PORT_STACK_ALIGN) static std::array<std::byte, 16 * 1024> stack1;
+   alignas(CORTOS_PORT_STACK_ALIGN) static std::array<std::byte, 16 * 1024> stack2;
 
-//    Thread t1(
-//       [&entry_order]{
-//          for (int stage = 0; stage < 3; stage++) {
-//             entry_order.push_back(this_thread::id());
-//             this_thread::yield();
-//          }
-//       },
-//       stack1,
-//       Thread::Priority(0),
-//       Core0
-//    );
+   std::vector<Thread::Id> entry_order;
 
-//    Thread t2(
-//       [&entry_order]{
-//          for (int stage = 0; stage < 3; stage++) {
-//             entry_order.push_back(this_thread::id());
-//             this_thread::yield();
-//          }
-//       },
-//       stack2,
-//       Thread::Priority(0),
-//       Core0
-//    );
+   Thread t1(
+      [&entry_order]{
+         for (int stage = 0; stage < 3; stage++) {
+            entry_order.push_back(this_thread::id());
+            this_thread::yield();
+         }
+      },
+      stack1,
+      Thread::Priority(0),
+      Core0
+   );
 
-//    EXPECT_EQ(kernel::active_threads(), 2u) << "Diagnosis: Not all threads registered";
+   Thread t2(
+      [&entry_order]{
+         for (int stage = 0; stage < 3; stage++) {
+            entry_order.push_back(this_thread::id());
+            this_thread::yield();
+         }
+      },
+      stack2,
+      Thread::Priority(0),
+      Core0
+   );
 
-//    // WHEN:
+   EXPECT_EQ(kernel::active_threads(), 2u) << "Diagnosis: Not all threads registered";
 
-//    kernel::start();
+   // WHEN:
 
-//    // THEN:
+   kernel::start();
 
-//    EXPECT_EQ(kernel::active_threads(), 0u)  << "Diagnosis: Not all threads terminated";
-//    EXPECT_EQ(entry_order.size(), 6u)        << "Diagnosis: Not all threads completed stages";
-//    EXPECT_EQ(entry_order[0], Thread::Id(1)) << "Diagnosis: 't1' did not run first";
-//    EXPECT_EQ(entry_order[1], Thread::Id(2)) << "Diagnosis: 't2' did not run second";
-//    EXPECT_EQ(entry_order[2], Thread::Id(1)) << "Diagnosis: 't1' did not run third";
-//    EXPECT_EQ(entry_order[3], Thread::Id(2)) << "Diagnosis: 't2' did not run fourth";
-//    EXPECT_EQ(entry_order[4], Thread::Id(1)) << "Diagnosis: 't1' did not run fifth";
-//    EXPECT_EQ(entry_order[5], Thread::Id(2)) << "Diagnosis: 't2' did not run sixth";
-// }
+   // THEN:
+
+   EXPECT_EQ(kernel::active_threads(), 0u)  << "Diagnosis: Not all threads terminated";
+   EXPECT_EQ(entry_order.size(), 6u)        << "Diagnosis: Not all threads completed stages";
+   EXPECT_EQ(entry_order[0], Thread::Id(1)) << "Diagnosis: 't1' did not run first";
+   EXPECT_EQ(entry_order[1], Thread::Id(2)) << "Diagnosis: 't2' did not run second";
+   EXPECT_EQ(entry_order[2], Thread::Id(1)) << "Diagnosis: 't1' did not run third";
+   EXPECT_EQ(entry_order[3], Thread::Id(2)) << "Diagnosis: 't2' did not run fourth";
+   EXPECT_EQ(entry_order[4], Thread::Id(1)) << "Diagnosis: 't1' did not run fifth";
+   EXPECT_EQ(entry_order[5], Thread::Id(2)) << "Diagnosis: 't2' did not run sixth";
+
+   kernel::finalise();
+}
 
 
 

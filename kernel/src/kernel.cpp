@@ -628,6 +628,16 @@ public:
    void reset()
    {
       CORTOS_ASSERT_OP(inbox.approx_size(), ==, 0); // Cannot reset whilst inbox is not empty
+      CORTOS_ASSERT(ready_matrix.empty()); // Cannot reset whilst tasks still in the queue
+
+      pinned_task_counter.store(0, std::memory_order_relaxed);
+      inbox_poke_pending.store(false, std::memory_order_relaxed);
+      need_reschedule.store(false, std::memory_order_relaxed);
+      preempt_disable_depth = 0;
+      current_task = nullptr;
+      idle_task    = nullptr;
+
+      idle_stack.fill(std::byte(0)); // Probably not necessary
    }
 };
 
@@ -893,11 +903,16 @@ namespace kernel
 
    void finalise()
    {
-      CORTOS_ASSERT(KERNEL.initialised);
-      CORTOS_ASSERT(KERNEL.running.load(std::memory_order_relaxed) == false); // System must be quiescent to shutdown cleanly
-      KERNEL.thread_id_generator = 1;
+      CORTOS_ASSERT(!KERNEL.running.load(std::memory_order_relaxed)); // System must be quiescent to reset cleanly
+      CORTOS_ASSERT(KERNEL.initialised.load(std::memory_order_relaxed)); // In theory there shouldn't be anything to reset yet... so why was this invoked? smells buggy
 
-      KERNEL.initialised = false;
+      KERNEL.thread_id_generator.store(1, std::memory_order_relaxed);
+      KERNEL.active_threads.store(0, std::memory_order_relaxed);;
+      KERNEL.initialised.store(false, std::memory_order_relaxed);
+
+      for (auto& sched : KERNEL.schedulers) {
+         sched.reset();
+      }
    }
 
    std::uint32_t core_count() noexcept
