@@ -1,49 +1,73 @@
 /**
- * @file port_traits.h
- * @brief Port-specific compile-time constants
+ * @file cortos/port_traits.h
+ * @brief Port-specific compile-time traits.
  *
- * Each port must provide this header defining:
- * - CORTOS_PORT_CONTEXT_SIZE: Size of port_context_t in bytes
- * - CORTOS_PORT_CONTEXT_ALIGN: Alignment requirement for port_context_t
- * - CORTOS_PORT_STACK_ALIGN: Stack alignment requirement
+ * Each port must provide exactly one `port_traits.h` defining the constants
+ * below. This header:
+ *  - must not include any other headers
+ *  - must contain only macros
  *
- * These values are used by the kernel to allocate context storage.
- * The port implementation must static_assert that the actual sizes match.
+ * The kernel relies on these values at compile time. The port implementation
+ * must statically verify that its actual types and behaviour match them.
  */
 
 #ifndef CORTOS_PORT_TRAITS_H
 #define CORTOS_PORT_TRAITS_H
 
-/* ============================================================================
- * Boost.Context Port (Linux Simulation)
- * ========================================================================= */
-
 /**
- * @brief Size of port_context_t structure in bytes
- *
- * Must be >= sizeof(port_context) - verified by static_assert in port implementation.
+ * @def CORTOS_PORT_CONTEXT_SIZE
+ * @brief Size of `port_context_t` in bytes.
  */
 #define CORTOS_PORT_CONTEXT_SIZE  40
 
 /**
- * @brief Alignment requirement for port_context_t
+ * @def CORTOS_PORT_CONTEXT_ALIGN
+ * @brief Alignment requirement of `port_context_t` in bytes.
  *
- * Must be >= alignof(port_context) - verified by static_assert in port implementation.
+ * Must be a power of two.
  */
 #define CORTOS_PORT_CONTEXT_ALIGN 8
 
 /**
- * @brief Stack alignment requirement in bytes
+ * @def CORTOS_PORT_STACK_ALIGN
+ * @brief Required alignment of all thread stacks in bytes.
  *
- * All thread stacks must be aligned to this boundary.
  * Must be a power of two.
  */
 #define CORTOS_PORT_STACK_ALIGN 16
 
+/**
+ * @def CORTOS_PORT_CACHE_LINE
+ * @brief Cache line size in bytes.
+ *
+ * Used for false-sharing avoidance.
+ */
 #define CORTOS_PORT_CACHE_LINE 64
 
+/**
+ * @def CORTOS_PORT_CORE_COUNT
+ * @brief Number of cores supported by this port.
+ */
 #define CORTOS_PORT_CORE_COUNT 2
 
-#define CORTOS_PORT_SIMULATION 1
+/**
+ * @def CORTOS_PORT_SCHEDULING_TYPE
+ * @brief Scheduling model implemented by this port.
+ *
+ * Must be one of:
+ *  - `CORTOS_PORT_SCHED_PREEMPTIVE`  (1)
+ *  - `CORTOS_PORT_SCHED_COOPERATIVE` (2)
+ */
+#define CORTOS_PORT_SCHEDULING_TYPE  2 /* cooperative */
 
-#endif // CORTOS_PORT_TRAITS_H
+/**
+ * @def CORTOS_PORT_ENVIRONMENT
+ * @brief Execution environment for this port.
+ *
+ * Must be one of:
+ *  - `CORTOS_PORT_ENV_BARE_METAL` (1)
+ *  - `CORTOS_PORT_ENV_SIMULATION` (2)
+ */
+#define CORTOS_PORT_ENVIRONMENT  2 /* simulation */
+
+#endif /* CORTOS_PORT_TRAITS_H */

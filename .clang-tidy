@@ -39,8 +39,9 @@ Checks:
   - -misc-unused-using-decls
   - -misc-use-anonymous-namespace
   - -modernize-redundant-void-arg
-  - -modernize-use-trailing-return-type
   - -modernize-use-std-print
+  - -modernize-use-trailing-return-type
+  - -modernize-use-using
   - -performance-enum-size
   - -performance-no-int-to-ptr
   - -readability-avoid-return-with-void-value

@@ -23,11 +23,83 @@ extern "C" {
 #endif
 
 /* ============================================================================
- * Port Configuration
+ * Port Configuration Validation
  * ========================================================================= */
 
-#ifndef CORTOS_PORT_SIMULATION
-# define CORTOS_PORT_SIMULATION 0
+#define CORTOS_PORT_SCHED_PREEMPTIVE    1
+#define CORTOS_PORT_SCHED_COOPERATIVE   2
+
+#define CORTOS_PORT_ENV_BARE_METAL      1
+#define CORTOS_PORT_ENV_SIMULATION      2
+
+#ifndef CORTOS_PORT_CONTEXT_SIZE
+# error "Port must define CORTOS_PORT_CONTEXT_SIZE"
+#endif
+
+#ifndef CORTOS_PORT_CONTEXT_ALIGN
+# error "Port must define CORTOS_PORT_CONTEXT_ALIGN"
+#endif
+
+#ifndef CORTOS_PORT_STACK_ALIGN
+# error "Port must define CORTOS_PORT_STACK_ALIGN"
+#endif
+
+#ifndef CORTOS_PORT_CACHE_LINE
+# error "Port must define CORTOS_PORT_CACHE_LINE"
+#endif
+
+#ifndef CORTOS_PORT_CORE_COUNT
+# error "Port must define CORTOS_PORT_CORE_COUNT"
+#endif
+
+#ifndef CORTOS_PORT_SCHEDULING_TYPE
+# error "Port must define CORTOS_PORT_SCHEDULING_TYPE (CORTOS_PORT_SCHED_PREEMPTIVE or CORTOS_PORT_SCHED_COOPERATIVE)"
+#endif
+
+#ifndef CORTOS_PORT_ENVIRONMENT
+# error "Port must define CORTOS_PORT_ENVIRONMENT (CORTOS_PORT_ENV_BARE_METAL or CORTOS_PORT_ENV_SIMULATION)"
+#endif
+
+#if (CORTOS_PORT_CONTEXT_SIZE) <= 0
+# error "CORTOS_PORT_CONTEXT_SIZE must be > 0"
+#endif
+
+#if (CORTOS_PORT_CONTEXT_ALIGN) <= 0
+# error "CORTOS_PORT_CONTEXT_ALIGN must be > 0"
+#endif
+
+#if (CORTOS_PORT_STACK_ALIGN) <= 0
+# error "CORTOS_PORT_STACK_ALIGN must be > 0"
+#endif
+
+#if (CORTOS_PORT_CACHE_LINE) <= 0
+# error "CORTOS_PORT_CACHE_LINE must be > 0"
+#endif
+
+#if (CORTOS_PORT_CORE_COUNT) <= 0
+# error "CORTOS_PORT_CORE_COUNT must be > 0"
+#endif
+
+#if ((CORTOS_PORT_CONTEXT_ALIGN & (CORTOS_PORT_CONTEXT_ALIGN - 1)) != 0)
+# error "CORTOS_PORT_CONTEXT_ALIGN must be a power of two"
+#endif
+
+#if ((CORTOS_PORT_STACK_ALIGN & (CORTOS_PORT_STACK_ALIGN - 1)) != 0)
+# error "CORTOS_PORT_STACK_ALIGN must be a power of two"
+#endif
+
+#if ((CORTOS_PORT_CACHE_LINE & (CORTOS_PORT_CACHE_LINE - 1)) != 0)
+# error "CORTOS_PORT_CACHE_LINE must be a power of two"
+#endif
+
+#if (CORTOS_PORT_SCHEDULING_TYPE != CORTOS_PORT_SCHED_PREEMPTIVE) && \
+    (CORTOS_PORT_SCHEDULING_TYPE != CORTOS_PORT_SCHED_COOPERATIVE)
+# error "Invalid CORTOS_PORT_SCHEDULING_TYPE. Use CORTOS_SCHED_PREEMPTIVE (1) or CORTOS_SCHED_COOPERATIVE (2)."
+#endif
+
+#if (CORTOS_PORT_ENVIRONMENT != CORTOS_PORT_ENV_BARE_METAL) && \
+    (CORTOS_PORT_ENVIRONMENT != CORTOS_PORT_ENV_SIMULATION)
+# error "Invalid CORTOS_PORT_ENVIRONMENT. Use CORTOS_ENV_BARE_METAL (1) or CORTOS_ENV_SIMULATION (2)."
 #endif
 
 /* ============================================================================
@@ -199,13 +271,6 @@ void cortos_port_start_cores(size_t cores_to_use, cortos_port_core_entry_t entry
  * @param core_id Target core ID
  */
 void cortos_port_send_reschedule_ipi(uint32_t core_id);
-
-/**
- * @brief Callback when a core's entry function returns
- *
- * Likely no-op on real targets.
- */
-void cortos_port_on_core_returned(void);
 
 /* ============================================================================
  * Thread-Local Storage

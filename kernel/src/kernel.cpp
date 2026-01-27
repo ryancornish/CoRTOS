@@ -59,8 +59,12 @@ struct WaitNode
 
 class WaitNodePool
 {
-public:
    static constexpr std::size_t N = config::MAX_WAIT_NODES;
+   static constexpr uint32_t ALL_NODES_FREE = (N == 32) ? std::numeric_limits<uint32_t>::max() : (1u << static_cast<uint32_t>(N)) - 1u;
+   std::array<WaitNode, N> nodes{};
+   uint32_t free_mask{ALL_NODES_FREE};
+
+public:
    static_assert(N > 0, "MAX_WAIT_NODES must be > 0");
    static_assert(N <= std::numeric_limits<uint32_t>::digits, "WaitNodePool currently supports up to 32 nodes via uint32_t mask");
 
@@ -162,11 +166,6 @@ public:
       if (slot >= N) return nullptr;
       return &nodes[slot];
    }
-
-private:
-   static constexpr uint32_t ALL_NODES_FREE = (N == 32) ? std::numeric_limits<uint32_t>::max() : (1u << static_cast<uint32_t>(N)) - 1u;
-   std::array<WaitNode, N> nodes{};
-   uint32_t free_mask{ALL_NODES_FREE};
 };
 
 struct WaitGroup
@@ -198,7 +197,7 @@ struct WaitGroup
 };
 
 
-static void thread_launcher(void* vtcb);
+static void thread_launcher(void* tcb_ptr);
 
 struct TaskControlBlock
 {
@@ -729,22 +728,65 @@ void Scheduler::reschedule() noexcept
    cortos_port_switch(prev_task->context(), next_task->context());
 }
 
+static void core_launcher();
+
 // Note: this is a template purely because it allows the compile-time index-sequence array initialiser for schedulers to work
 template<std::size_t CORES>
-struct Kernel
+class Kernel
 {
    Spinlock lock;
+   std::array<Scheduler, CORES> schedulers;
    std::atomic<bool>    initialised{false};
    std::atomic<bool>        running{false};
-   std::array<Scheduler, CORES> schedulers;
-   std::atomic<uint32_t> thread_id_generator{1};
    std::atomic<uint32_t> active_threads{0};
+   std::atomic<uint32_t> thread_id_generator{1};
 
+public:
    constexpr Kernel() noexcept : Kernel(std::make_index_sequence<CORES>{}) {}
 
-   Scheduler& scheduler_for_core(std::uint32_t core_id) noexcept { return schedulers.at(core_id); }
-   Scheduler& scheduler_for_this_core()                 noexcept { return scheduler_for_core(cortos_port_get_core_id()); }
-   Scheduler& scheduler_for_time_core()                 noexcept { return scheduler_for_core(config::TIME_CORE_ID); }
+   [[nodiscard]] bool          is_running()         const noexcept { return running.load(std::memory_order_acquire); }
+   [[nodiscard]] std::uint32_t get_active_threads() const noexcept { return active_threads.load(std::memory_order_seq_cst); }
+
+   [[nodiscard]] Scheduler& scheduler_for_core(std::uint32_t core_id) noexcept { return schedulers.at(core_id); }
+   [[nodiscard]] Scheduler& scheduler_for_this_core()                 noexcept { return scheduler_for_core(cortos_port_get_core_id()); }
+   [[nodiscard]] Scheduler& scheduler_for_time_core()                 noexcept { return scheduler_for_core(config::TIME_CORE_ID); }
+
+   [[nodiscard]] std::uint32_t generate_thread_id() { return thread_id_generator.fetch_add(1, std::memory_order_relaxed); }
+
+   void initialise() noexcept
+   {
+      CORTOS_ASSERT(!initialised); // Cannot invoke kernel::initialise twice (without finalising down in between)
+
+      cortos_port_init();
+
+      for (auto& sched : schedulers) {
+         sched.init_idle_task();
+      }
+      initialised = true;
+   }
+
+   void start() noexcept
+   {
+      CORTOS_ASSERT(initialised); // kernel::initialise() must be called first
+
+      running.store(true, std::memory_order_release);
+
+      cortos_port_start_cores(config::CORES, core_launcher);
+   }
+
+   void finalise() noexcept
+   {
+      CORTOS_ASSERT(!running.load(std::memory_order_relaxed)); // System must be quiescent to reset cleanly
+      CORTOS_ASSERT(initialised.load(std::memory_order_relaxed)); // In theory there shouldn't be anything to reset yet... so why was this invoked? smells buggy
+
+      thread_id_generator.store(1, std::memory_order_relaxed);
+      active_threads.store(0, std::memory_order_relaxed);;
+      initialised.store(false, std::memory_order_relaxed);
+
+      for (auto& sched : schedulers) {
+         sched.reset();
+      }
+   }
 
    // Load-balancing pinner
    std::uint32_t pin_thread_to_core(TaskControlBlock& tcb) noexcept
@@ -802,6 +844,36 @@ struct Kernel
       CORTOS_ASSERT(posted);
    }
 
+   void unregister_thread() noexcept
+   {
+      CORTOS_ASSERT(active_threads.load(std::memory_order_relaxed) != 0);
+      active_threads.fetch_sub(1, std::memory_order_seq_cst);
+   }
+
+   void cooperative_scheduler()
+   {
+      // For cooperative systems, a hook to reschedule during a controllable point, is necessary.
+      // Although the core has returned, other cores, OR itself may still have active threads.
+      // This means there is the potential for either another core to start a thread on this one,
+      // OR a thread on this core to become runnable. Therefore under cooperation, we
+      // must reschedule until the system is basically dead.
+      while (active_threads.load(std::memory_order_seq_cst) > 0) {
+         scheduler_for_this_core().reschedule();
+      }
+   }
+
+   void initiate_shutdown()
+   {
+      // First core to observe quiescence initiates shutdown.
+      bool expected = true;
+      if (running.compare_exchange_strong(expected, false, std::memory_order_acq_rel)) {
+         for (uint32_t core_id = 0; core_id < config::CORES; ++core_id) {
+            cortos_port_send_reschedule_ipi(core_id);
+         }
+      }
+   }
+
+
 private:
    template<std::size_t... Is>
    constexpr explicit Kernel(std::index_sequence<Is...>) noexcept : schedulers{ Scheduler{Is}... } {}
@@ -810,35 +882,48 @@ static constinit Kernel<config::CORES> KERNEL;
 
 [[maybe_unused]] constexpr auto STATIC_SIZEOF_KERNEL = sizeof(KERNEL);
 
-static void thread_launcher(void* vtcb)
+static void core_launcher()
 {
-   auto* tcb = static_cast<TaskControlBlock*>(vtcb);
-   // For now point TLS to the TCB, but in future, TLS sits just after TCB
-   cortos_port_set_tls_pointer(tcb);
+   auto& sched = KERNEL.scheduler_for_this_core();
+
+   sched.start();
+
+#if CORTOS_PORT_SCHEDULING_TYPE == CORTOS_PORT_SCHED_COOPERATIVE
+   KERNEL.cooperative_scheduler();
+#endif
+
+#if CORTOS_PORT_ENVIRONMENT == CORTOS_PORT_ENV_SIMULATION
+   KERNEL.initiate_shutdown();
+#endif
+}
+
+static void thread_launcher(void* tcb_ptr)
+{
+   auto* tcb = static_cast<TaskControlBlock*>(tcb_ptr);
+
+   cortos_port_set_tls_pointer(tcb); // For now point TLS to the TCB, but in future, TLS sits just after TCB
+
    tcb->entry();
 
    tcb->state = TaskControlBlock::State::Terminated;
    // Signal joiners
 
-   CORTOS_ASSERT(KERNEL.active_threads.load() != 0);
-   KERNEL.active_threads.fetch_sub(1, std::memory_order_seq_cst);
+   KERNEL.unregister_thread();
    cortos_port_thread_exit();
 }
 
 static void idle_thread()
 {
-   while (KERNEL.running.load(std::memory_order_acquire)) {
+   while (KERNEL.is_running()) {
       cortos_port_idle();
    }
 }
 
 Thread::Thread(EntryFn&& entry, std::span<std::byte> stack, Priority priority, CoreAffinity affinity)
 {
-   auto id = KERNEL.thread_id_generator.fetch_add(1, std::memory_order_relaxed);
-
    StackLayout slayout(stack, 0);
    tcb = ::new (slayout.tcb) TaskControlBlock(
-      id,
+      KERNEL.generate_thread_id(),
       priority,
       affinity,
       slayout.user_stack,
@@ -874,45 +959,17 @@ namespace kernel
 {
    void initialise()
    {
-      CORTOS_ASSERT(!KERNEL.initialised); // Cannot invoke kernel::initialise twice (without finalising down in between)
-
-      cortos_port_init();
-
-      for (auto& sched : KERNEL.schedulers) {
-         sched.init_idle_task();
-      }
-      KERNEL.initialised = true;
+      KERNEL.initialise();
    }
 
    void start()
    {
-      CORTOS_ASSERT(KERNEL.initialised); // kernel::initialise() must be called first
-
-      KERNEL.running.store(true, std::memory_order_release);
-
-      cortos_port_start_cores(
-         config::CORES,
-         +[]() -> void
-         {
-            auto& sched = KERNEL.scheduler_for_this_core();
-            sched.start(); // picks first runnable (or idle) pinned to this core and port_start_first()
-            cortos_port_on_core_returned();
-         }
-      );
+      KERNEL.start();
    }
 
    void finalise()
    {
-      CORTOS_ASSERT(!KERNEL.running.load(std::memory_order_relaxed)); // System must be quiescent to reset cleanly
-      CORTOS_ASSERT(KERNEL.initialised.load(std::memory_order_relaxed)); // In theory there shouldn't be anything to reset yet... so why was this invoked? smells buggy
-
-      KERNEL.thread_id_generator.store(1, std::memory_order_relaxed);
-      KERNEL.active_threads.store(0, std::memory_order_relaxed);;
-      KERNEL.initialised.store(false, std::memory_order_relaxed);
-
-      for (auto& sched : KERNEL.schedulers) {
-         sched.reset();
-      }
+      KERNEL.finalise();
    }
 
    std::uint32_t core_count() noexcept
@@ -922,7 +979,7 @@ namespace kernel
 
    std::uint32_t active_threads() noexcept
    {
-      return KERNEL.active_threads.load(std::memory_order_seq_cst);
+      return KERNEL.get_active_threads();
    }
 
    Waitable::Result wait_for_any(std::span<Waitable* const> waitables)
