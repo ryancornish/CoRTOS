@@ -26,12 +26,6 @@ extern "C" {
  * Port Configuration Validation
  * ========================================================================= */
 
-#define CORTOS_PORT_SCHED_PREEMPTIVE    1
-#define CORTOS_PORT_SCHED_COOPERATIVE   2
-
-#define CORTOS_PORT_ENV_BARE_METAL      1
-#define CORTOS_PORT_ENV_SIMULATION      2
-
 #ifndef CORTOS_PORT_CONTEXT_SIZE
 # error "Port must define CORTOS_PORT_CONTEXT_SIZE"
 #endif
@@ -92,13 +86,11 @@ extern "C" {
 # error "CORTOS_PORT_CACHE_LINE must be a power of two"
 #endif
 
-#if (CORTOS_PORT_SCHEDULING_TYPE != CORTOS_PORT_SCHED_PREEMPTIVE) && \
-    (CORTOS_PORT_SCHEDULING_TYPE != CORTOS_PORT_SCHED_COOPERATIVE)
+#if (CORTOS_PORT_SCHEDULING_TYPE != 1) && (CORTOS_PORT_SCHEDULING_TYPE != 2)
 # error "Invalid CORTOS_PORT_SCHEDULING_TYPE. Use CORTOS_SCHED_PREEMPTIVE (1) or CORTOS_SCHED_COOPERATIVE (2)."
 #endif
 
-#if (CORTOS_PORT_ENVIRONMENT != CORTOS_PORT_ENV_BARE_METAL) && \
-    (CORTOS_PORT_ENVIRONMENT != CORTOS_PORT_ENV_SIMULATION)
+#if (CORTOS_PORT_ENVIRONMENT != 1) && (CORTOS_PORT_ENVIRONMENT != 2)
 # error "Invalid CORTOS_PORT_ENVIRONMENT. Use CORTOS_ENV_BARE_METAL (1) or CORTOS_ENV_SIMULATION (2)."
 #endif
 
@@ -418,7 +410,7 @@ void cortos_port_idle(void);
  */
 void cortos_port_system_error(uintptr_t auxilary1, uintptr_t auxilary2, char const* file_optional, int line_optional) __attribute__((noreturn));
 
-#ifdef CORTOS_PORT_SIMULATION
+#if CORTOS_PORT_ENVIRONMENT == 2
  #define CORTOS_PORT_CAPTURE_FILE (__FILE__)
  #define CORTOS_PORT_CAPTURE_LINE (__LINE__)
 #else

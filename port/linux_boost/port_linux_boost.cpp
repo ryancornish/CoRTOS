@@ -49,8 +49,8 @@ static_assert(alignof(cortos_port_context) == CORTOS_PORT_CONTEXT_ALIGN,
               "CORTOS_PORT_CONTEXT_ALIGN mismatch - adjust in port_traits.h");
 static_assert((CORTOS_PORT_STACK_ALIGN & (CORTOS_PORT_STACK_ALIGN - 1)) == 0,
               "CORTOS_PORT_STACK_ALIGN must be a power of two");
-static_assert(CORTOS_PORT_SCHEDULING_TYPE == CORTOS_PORT_SCHED_COOPERATIVE);
-static_assert(CORTOS_PORT_ENVIRONMENT == CORTOS_PORT_ENV_SIMULATION);
+static_assert(CORTOS_PORT_SCHEDULING_TYPE == 2);
+static_assert(CORTOS_PORT_ENVIRONMENT == 2);
 
 /* ============================================================================
  * Global & Thread-Local State

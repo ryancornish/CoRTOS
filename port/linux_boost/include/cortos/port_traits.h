@@ -55,8 +55,8 @@
  * @brief Scheduling model implemented by this port.
  *
  * Must be one of:
- *  - `CORTOS_PORT_SCHED_PREEMPTIVE`  (1)
- *  - `CORTOS_PORT_SCHED_COOPERATIVE` (2)
+ *  - `SchedulerFlavour::Preemptive`  (1)
+ *  - `SchedulerFlavour::Cooperative` (2)
  */
 #define CORTOS_PORT_SCHEDULING_TYPE  2 /* cooperative */
 
@@ -65,8 +65,8 @@
  * @brief Execution environment for this port.
  *
  * Must be one of:
- *  - `CORTOS_PORT_ENV_BARE_METAL` (1)
- *  - `CORTOS_PORT_ENV_SIMULATION` (2)
+ *  - `Environment::BareMetal`      (1)
+ *  - `Environment::BareSimulation` (2)
  */
 #define CORTOS_PORT_ENVIRONMENT  2 /* simulation */
 

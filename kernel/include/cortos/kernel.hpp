@@ -24,7 +24,7 @@ namespace config
    /**
     * @brief How many cores for SMP
     */
-   static constexpr std::size_t CORES = 1;
+   static constexpr std::size_t CORES = 2;
    static_assert(1 <= CORES && CORES <= CORTOS_PORT_CORE_COUNT, "Port does not support configured amount of cores.");
 
    static constexpr std::size_t MAX_WAIT_NODES = 8;
