@@ -593,6 +593,7 @@ public:
          slayout.user_stack,
          idle_thread
       );
+      idle_task->pinned_core = core_id;
    }
 
    // Core-local operations (only called on owning core)
@@ -935,7 +936,20 @@ Thread::Thread(EntryFn&& entry, std::span<std::byte> stack, Priority priority, C
 
 Thread::~Thread()
 {
+   if (tcb == nullptr) return; // Thread handle has been moved from, or is otherwise empty
    CORTOS_ASSERT(tcb->state == TaskControlBlock::State::Terminated);
+}
+
+Thread::Thread(Thread&& other) noexcept : tcb(other.tcb)
+{
+   other.tcb = nullptr;
+}
+
+Thread& Thread::operator=(Thread&& other) noexcept
+{
+   tcb = other.tcb;
+   other.tcb = nullptr;
+   return *this;
 }
 
 void Spinlock::lock()

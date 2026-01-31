@@ -35,25 +35,24 @@ class MultiCoreMultiThread_Test : public ::testing::Test
 };
 
 
-/* ============================================================================
- * Multicore tests
- * ========================================================================= */
 
 TEST_F(MultiCoreMultiThread_Test,
-     GivenTwoCoresAndOneThreadPinnedToEach_WhenKernelStarts_ThenBothThreadsRunOnExpectedCore)
+       GivenTwoCoresAndOneThreadPinnedToEach_WhenKernelStarts_ThenBothThreadsRunOnExpectedCore)
 {
    alignas(CORTOS_PORT_STACK_ALIGN) std::array<std::byte, 16 * 1024> s0{};
    alignas(CORTOS_PORT_STACK_ALIGN) std::array<std::byte, 16 * 1024> s1{};
 
-   std::atomic<bool> ran0{false};
-   std::atomic<bool> ran1{false};
-   std::atomic<std::uint32_t> seen_core0{0xFFFFFFFFu};
-   std::atomic<std::uint32_t> seen_core1{0xFFFFFFFFu};
+   bool ran0 = false;
+   bool ran1 = false;
+   uint32_t seen_core0 = std::numeric_limits<uint32_t>::max();
+   uint32_t seen_core1 = std::numeric_limits<uint32_t>::max();
+
+   // GIVEN:
 
    Thread t0(
       [&]{
-         seen_core0.store(this_thread::core_id(), std::memory_order_release);
-         ran0.store(true, std::memory_order_release);
+         seen_core0 = this_thread::core_id();
+         ran0 = true;
       },
       s0,
       Thread::Priority(0),
@@ -62,8 +61,8 @@ TEST_F(MultiCoreMultiThread_Test,
 
    Thread t1(
       [&]{
-         seen_core1.store(this_thread::core_id(), std::memory_order_release);
-         ran1.store(true, std::memory_order_release);
+         seen_core1 = this_thread::core_id();
+         ran1 = true;
       },
       s1,
       Thread::Priority(0),
@@ -72,80 +71,79 @@ TEST_F(MultiCoreMultiThread_Test,
 
    EXPECT_EQ(kernel::active_threads(), 2u);
 
+   // WHEN:
+
    kernel::start();
 
-   EXPECT_EQ(kernel::active_threads(), 0u);
-   EXPECT_TRUE(ran0.load(std::memory_order_acquire));
-   EXPECT_TRUE(ran1.load(std::memory_order_acquire));
+   // THEN:
 
-   EXPECT_EQ(seen_core0.load(std::memory_order_acquire), 0u);
-   EXPECT_EQ(seen_core1.load(std::memory_order_acquire), 1u);
+   EXPECT_EQ(kernel::active_threads(), 0u);
+   EXPECT_TRUE(ran0);
+   EXPECT_TRUE(ran1);
+
+   EXPECT_EQ(seen_core0, 0u);
+   EXPECT_EQ(seen_core1, 1u);
 }
 
 
 TEST_F(MultiCoreMultiThread_Test,
-     GivenTwoCores_WhenCore0CreatesAThreadPinnedToCore1AfterStart_ThenCore1RunsIt)
+       GivenTwoCores_WhenCore0CreatesAThreadPinnedToCore1AfterStart_ThenCore1RunsIt)
 {
-   // Stacks must outlive kernel::start() execution.
-   alignas(CORTOS_PORT_STACK_ALIGN) std::array<std::byte, 16 * 1024> s_creator{};
-   alignas(CORTOS_PORT_STACK_ALIGN) std::array<std::byte, 16 * 1024> s_remote{};
+   alignas(CORTOS_PORT_STACK_ALIGN) static std::array<std::byte, 16 * 1024> s_creator{};
+   alignas(CORTOS_PORT_STACK_ALIGN) static std::array<std::byte, 16 * 1024> s_remote{};
 
-   std::atomic<bool> remote_ran{false};
-   std::atomic<std::uint32_t> remote_seen_core{0xFFFFFFFFu};
+   bool remote_ran = false;
+   uint32_t remote_seen_core = std::numeric_limits<uint32_t>::max();
 
-   // Thread on Core0 that creates a new thread pinned to Core1 *after* system is running.
+   Thread remote_thread;
+
    Thread creator(
       [&]{
-         // Ensure we're actually on core0.
          EXPECT_EQ(this_thread::core_id(), 0u);
 
-         // Create a thread pinned to Core1 while running: this should go via
-         // Scheduler::post_to_inbox() + cortos_port_send_reschedule_ipi(1).
-         Thread remote(
+         remote_thread = Thread(
             [&]{
-               remote_seen_core.store(this_thread::core_id(), std::memory_order_release);
-               remote_ran.store(true, std::memory_order_release);
+               remote_seen_core = this_thread::core_id();
+               remote_ran = true;
             },
             s_remote,
             Thread::Priority(0),
             Core1
          );
-
-         // Yield to allow Core1 to be poked / drain inbox / run remote task.
-         // In cooperative sim this is necessary.
-         for (int i = 0; i < 5; ++i) this_thread::yield();
-
-         // Keep creator alive long enough for remote to run, then return.
+         // We can happily terminate here as remote_thread will be started on Core1
       },
       s_creator,
       Thread::Priority(0),
       Core0
    );
 
+   // Only one thread should be registered (creator) as remote_thread handle is empty
+   EXPECT_EQ(kernel::active_threads(), 1u);
+
    kernel::start();
 
-   EXPECT_TRUE(remote_ran.load(std::memory_order_acquire))
-      << "Remote thread never ran (possible missing inbox poke / IPI / idle wake)";
-   EXPECT_EQ(remote_seen_core.load(std::memory_order_acquire), 1u);
+   EXPECT_TRUE(remote_ran)
+      << "Remote thread never ran (missing inbox poke / IPI / idle wake)";
+   EXPECT_EQ(remote_seen_core, 1u);
 }
 
+
 TEST_F(MultiCoreMultiThread_Test,
-     GivenUpToFourCoresWithOneThreadEach_WhenKernelStarts_ThenAllCoresMakeProgress)
+       GivenUpToFourCoresWithOneThreadEach_WhenKernelStarts_ThenAllCoresMakeProgress)
 {
    alignas(CORTOS_PORT_STACK_ALIGN) std::array<std::byte, 16 * 1024> s0{};
    alignas(CORTOS_PORT_STACK_ALIGN) std::array<std::byte, 16 * 1024> s1{};
    alignas(CORTOS_PORT_STACK_ALIGN) std::array<std::byte, 16 * 1024> s2{};
    alignas(CORTOS_PORT_STACK_ALIGN) std::array<std::byte, 16 * 1024> s3{};
 
-   std::array<std::atomic<int>, 4> stages{};
-   for (auto& a : stages) a.store(0, std::memory_order_relaxed);
+   std::array<int, 4> stages{0};
 
-   auto make_thread = [&](std::uint32_t cid, std::array<std::byte, 16 * 1024>& st)
+   auto make_thread = [&](uint32_t core_id, std::array<std::byte, 16 * 1024>& stack) -> Thread
    {
-      Thread(
-         [&, cid]{
+      return {
+         [&, core_id]{
             // stage 1: started
-            stages[cid].store(1, std::memory_order_release);
+            stages[core_id] = 1;
 
             // Do some cooperative stepping so reschedule/rotation is exercised.
             for (int i = 0; i < 3; ++i) {
@@ -153,35 +151,38 @@ TEST_F(MultiCoreMultiThread_Test,
             }
 
             // stage 2: finished
-            stages[cid].store(2, std::memory_order_release);
+            stages[core_id] = 2;
          },
-         st,
+         stack,
          Thread::Priority(0),
-         CoreAffinity::from_id(cid)
-      );
+         CoreAffinity::from_id(core_id)
+      };
    };
 
-   make_thread(0, s0);
-   make_thread(1, s1);
-   make_thread(2, s2);
-   make_thread(3, s3);
+   auto t1 = make_thread(0, s0);
+   auto t2 = make_thread(1, s1);
+   auto t3 = make_thread(2, s2);
+   auto t4 = make_thread(3, s3);
 
    kernel::start();
 
-   for (std::uint32_t cid = 0; cid < kernel::core_count(); ++cid) {
-      EXPECT_EQ(stages[cid].load(std::memory_order_acquire), 2)
-         << "Core " << cid << " did not complete its thread";
+   for (std::uint32_t core_id = 0; core_id < kernel::core_count(); ++core_id) {
+      EXPECT_EQ(stages[core_id], 2)
+         << "Core " << core_id << " did not complete its thread";
    }
    EXPECT_EQ(kernel::active_threads(), 0u);
 }
 
 TEST_F(MultiCoreMultiThread_Test,
-     GivenTwoCores_WhenCore0PokesCore1WhileCore1IsIdle_ThenCore1WakesAndRunsQueuedWork)
+       GivenTwoCores_WhenCore0PokesCore1WhileCore1IsIdle_ThenCore1WakesAndRunsQueuedWork)
 {
    alignas(CORTOS_PORT_STACK_ALIGN) std::array<std::byte, 16 * 1024> s_core0{};
    alignas(CORTOS_PORT_STACK_ALIGN) std::array<std::byte, 16 * 1024> s_core1_work{};
 
-   std::atomic<bool> core1_work_ran{false};
+   bool core1_work_ran = false;
+   Thread core1_work; // Empty handle
+
+   // GIVEN:
 
    // Make Core1 have *no* initial tasks queued pre-start by creating the core1 work post-start.
    // Core1 will start in idle unless/until it receives inbox work + IPI.
@@ -192,9 +193,9 @@ TEST_F(MultiCoreMultiThread_Test,
          // Give Core1 a chance to enter idle first (cooperative).
          for (int i = 0; i < 3; ++i) this_thread::yield();
 
-         Thread t_on_1(
+         core1_work = Thread(
             [&]{
-               core1_work_ran.store(true, std::memory_order_release);
+               core1_work_ran = true;
             },
             s_core1_work,
             Thread::Priority(0),
@@ -209,8 +210,14 @@ TEST_F(MultiCoreMultiThread_Test,
       Core0
    );
 
+   EXPECT_EQ(kernel::active_threads(), 1u);
+
+   // WHEN:
+
    kernel::start();
 
-   EXPECT_TRUE(core1_work_ran.load(std::memory_order_acquire))
+   // THEN:
+
+   EXPECT_TRUE(core1_work_ran)
       << "Core1 did not wake from idle to run queued work (possible missing condvar poke)";
 }

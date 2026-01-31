@@ -511,6 +511,14 @@ static constexpr CoreAffinity Core3 = CoreAffinity{0x08};
 static constexpr CoreAffinity AnyCore = CoreAffinity{0xFFFFFFFF};
 
 
+/**
+ * @brief Joinable CoRTOS thread handle.
+ *
+ * Owns a running kernel task. The task's TCB is constructed inside the user-provided
+ * stack buffer, so both the @c Thread object and the stack buffer must outlive the task.
+ *
+ * The destructor asserts the thread is terminated (i.e. no implicit detach).
+ */
 class Thread
 {
 public:
@@ -524,8 +532,23 @@ public:
       constexpr operator uint8_t() const { return val; } // Intentionally implicit
    };
 
+
+   /**
+    * @brief Create empty thread handle.
+    * A registered Thread can be moved into this.
+    */
+   constexpr Thread() = default;
+   /**
+    * @brief Create and register a new thread.
+    * @param entry Thread entry function.
+    * @param stack User-owned stack buffer (must remain valid until termination).
+    * @param priority Initial priority.
+    * @param affinity Core affinity (defaults to AnyCore).
+    */
    Thread(EntryFn&& entry, std::span<std::byte> stack, Priority priority, CoreAffinity affinity = AnyCore);
    ~Thread();
+   Thread(Thread&&) noexcept;
+   Thread& operator=(Thread&&) noexcept;
    Thread(Thread const&)            = delete;
    Thread& operator=(Thread const&) = delete;
 
@@ -553,7 +576,7 @@ public:
    static std::size_t reserved_stack_size();
 
 private:
-   struct TaskControlBlock* tcb;
+   struct TaskControlBlock* tcb{nullptr};
 };
 
 namespace this_thread
