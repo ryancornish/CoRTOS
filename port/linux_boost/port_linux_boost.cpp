@@ -433,7 +433,7 @@ extern "C" void cortos_port_cpu_relax(void)
 
 extern "C" void cortos_port_idle(void)
 {
-   std::printf("Core: %d: cortos_port_idle()\n", current_core.core_id);
+   std::printf("(CORE %d) cortos_port_idle()\n", current_core.core_id);
    auto& core_poker = global.core_view[current_core.core_id].core_poke;
 
    // Fast path: don’t sleep if already pending.

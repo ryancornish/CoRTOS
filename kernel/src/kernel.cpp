@@ -565,7 +565,6 @@ class Scheduler
 
    TaskReadyMatrix ready_matrix;
 
-   std::atomic<bool> need_reschedule{false};
    uint32_t    preempt_disable_depth{0};
 
    std::atomic<bool> inbox_poke_pending{false};
@@ -617,17 +616,17 @@ public:
       cortos_port_start_first(current_task->context());
    }
 
-   void set_task_ready_local(TaskControlBlock& tcb) noexcept
+   void set_task_ready(TaskControlBlock& tcb) noexcept
    {
       CORTOS_ASSERT_OP(tcb.pinned_core, ==, core_id);
-      // Preconditions to assert later:
-      // - tcb not already in ready queue
-      // - tcb->state is Blocked/Ready transition etc.
 
       tcb.state = TaskControlBlock::State::Ready;
-      ready_matrix.enqueue_task(tcb);
 
-      request_reschedule_local(); // optional (only if it beats current?)
+      // Idle task does not belong in the ready_matrix,
+      // but DOES follow state transition semantics
+      if (&tcb == idle_task) return;
+
+      ready_matrix.enqueue_task(tcb);
    }
 
    void drain_inbox() noexcept
@@ -638,7 +637,7 @@ public:
       while (inbox.pop(request)) {
          switch (request.type) {
             case CrossCoreRequest::SetTaskReady:
-               set_task_ready_local(*request.tcb);
+               set_task_ready(*request.tcb);
                break;
          }
       }
@@ -657,50 +656,50 @@ public:
       return true;
    }
 
-   // Reschedule request entrypoints
-   void request_reschedule_local()     noexcept
-   {
-      need_reschedule.store(true, std::memory_order_release);
-      cortos_port_pend_reschedule();
-   }
-
-   void request_reschedule_ipi() const noexcept
-   {
-      cortos_port_send_reschedule_ipi(core_id);
-   }
-
-   // NOTE: current_task must be pre-set with the state before rescheduling.
-   // "Running"   : Re-enqueued
-   // "Blocked"   : Not re-enqueued
-   // "Terminated": Not re-enqueued
-   // "Ready"     : Invalid
+   /**
+   * @brief Selects the next runnable task for this core and performs a context switch.
+   *
+   * Invariants / contract:
+   * - Called only by the owning core of this Scheduler (no cross-core mutation).
+   * - @c current_task is non-null and is the task currently executing on this core.
+   * - On entry, @c current_task->state is NEVER Ready:
+   *     - Running    => treated as preempted/rotated and re-enqueued as Ready (except idle).
+   *     - Blocked    => must already be removed from ready structures - not re-enqueued.
+   *     - Terminated => must not be re-enqueued.
+   * - The currently running task is not present in the ready matrix on entry.
+   * - Any cross-core readying requests must be visible via @c drain_inbox() before selection.
+   */
    void reschedule() noexcept
    {
+      CORTOS_ASSERT(current_task);
       CORTOS_ASSERT(current_task->state != TaskControlBlock::State::Ready);
 
       drain_inbox();
 
+      auto* previous_task = current_task;
+
+      switch (previous_task->state) {
+         case TaskControlBlock::State::Running:
+            set_task_ready(*previous_task);
+            break;
+
+         case TaskControlBlock::State::Blocked:
+         case TaskControlBlock::State::Terminated:
+            break;
+
+         case TaskControlBlock::State::Ready:
+            __builtin_unreachable();
+      }
+
       auto* next_task = ready_matrix.pop_best_task();
-      if (next_task == nullptr) {
-         next_task = idle_task;
-      }
+      if (!next_task) next_task = idle_task;
 
-      auto* prev_task = current_task;
       current_task = next_task;
-
-      if (prev_task->state == TaskControlBlock::State::Running) {
-         prev_task->state = TaskControlBlock::State::Ready;
-         if (prev_task != idle_task) {
-            ready_matrix.enqueue_task(*prev_task);
-         }
-      }
-
       next_task->state = TaskControlBlock::State::Running;
-      cortos_port_switch(prev_task->context(), next_task->context());
+      cortos_port_switch(previous_task->context(), next_task->context());
    }
 
    void block_current_task();
-   void yield_to_peers(); // TODO: Needed?
 
    void disable_preemption()
    {
@@ -711,10 +710,7 @@ public:
    {
       CORTOS_ASSERT(preempt_disable_depth > 0);
       if (--preempt_disable_depth == 0) {
-         if (need_reschedule.load(std::memory_order_acquire)) {
-            // Defer to scheduler context
-            cortos_port_pend_reschedule();
-         }
+         cortos_port_pend_reschedule();
       }
    }
 
@@ -725,7 +721,6 @@ public:
 
       pinned_task_counter.store(0, std::memory_order_relaxed);
       inbox_poke_pending.store(false, std::memory_order_relaxed);
-      need_reschedule.store(false, std::memory_order_relaxed);
       preempt_disable_depth = 0;
       current_task = nullptr;
    }
@@ -830,15 +825,14 @@ public:
 
       // If cores are not running yet, enqueue directly (even for remote cores)
       if (!running.load(std::memory_order_acquire)) {
-         scheduler.set_task_ready_local(tcb);   // direct, no inbox
+         scheduler.set_task_ready(tcb);   // direct, no inbox
          return;
       }
 
       // Post-start: must respect per-core ownership
       auto this_core = cortos_port_get_core_id();
       if (this_core == chosen_core) {
-         scheduler.set_task_ready_local(tcb);
-         scheduler.request_reschedule_local();
+         scheduler.set_task_ready(tcb);
          return;
       }
 
@@ -855,7 +849,7 @@ public:
       active_threads.fetch_sub(1, std::memory_order_seq_cst);
    }
 
-   void cooperative_background_loop()
+   void cooperative_scheduler_loop()
    {
       // For cooperative systems, a hook to reschedule during a controllable point, is necessary.
       // Although the core has returned, other cores, OR itself may still have active threads.
@@ -893,7 +887,7 @@ static void core_entry()
    sched.start();
 
    if constexpr (CORTOS_PORT_SCHEDULING_TYPE == SchedulerFlavour::Cooperative) {
-      KERNEL.cooperative_background_loop();
+      KERNEL.cooperative_scheduler_loop();
    }
 
    if constexpr (CORTOS_PORT_ENVIRONMENT == Environment::Simulation) {
