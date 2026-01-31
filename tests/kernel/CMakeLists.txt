@@ -6,16 +6,20 @@ target_link_libraries(test_function PRIVATE
    cortos::kernel
 )
 
-add_cortos_gtest_no_main(test_single_thread test_single_thread.cpp)
-target_link_libraries(test_single_thread PRIVATE
+add_cortos_gtest_no_main(test_singlecore_singlethreading test_singlecore_singlethreading.cpp)
+target_link_libraries(test_singlecore_singlethreading PRIVATE
    cortos::kernel
 )
 
-add_cortos_gtest_no_main(test_simple_multi_threading test_simple_multi_threading.cpp)
-target_link_libraries(test_simple_multi_threading PRIVATE
+add_cortos_gtest_no_main(test_singlecore_multithreading test_singlecore_multithreading.cpp)
+target_link_libraries(test_singlecore_multithreading PRIVATE
    cortos::kernel
 )
 
+add_cortos_gtest_no_main(test_multicore_multithreading test_multicore_multithreading.cpp)
+target_link_libraries(test_multicore_multithreading PRIVATE
+   cortos::kernel
+)
 
 # Spinlock tests
 # add_cortos_test(test_spinlock test_spinlock.cpp)

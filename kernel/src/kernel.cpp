@@ -143,11 +143,8 @@ public:
    void free(WaitNode& node) noexcept
    {
       std::ptrdiff_t index = &node - nodes.data();
-      // Ensure pointer belongs to this pool.
-      if (index < 0 || static_cast<std::size_t>(index) >= N) {
-         // WaitNodePool::free: node not from this pool
-         std::abort();
-      }
+
+      CORTOS_ASSERT1(0 <= index && static_cast<std::size_t>(index) < N, index); // Node not from this pool
 
       auto& n = nodes[static_cast<std::size_t>(index)];
       CORTOS_ASSERT(n.active); // If error: You are freeing an inactive node.
@@ -920,6 +917,7 @@ static void idle_thread()
    }
 }
 
+/**** PUBLIC ****/
 
 Thread::Thread(EntryFn&& entry, std::span<std::byte> stack, Priority priority, CoreAffinity affinity)
 {
@@ -937,7 +935,7 @@ Thread::Thread(EntryFn&& entry, std::span<std::byte> stack, Priority priority, C
 
 Thread::~Thread()
 {
-
+   CORTOS_ASSERT(tcb->state == TaskControlBlock::State::Terminated);
 }
 
 void Spinlock::lock()
@@ -954,8 +952,6 @@ void Spinlock::unlock()
    flag.clear(std::memory_order_release);
    KERNEL.scheduler_for_this_core().enable_preemption();
 }
-
-/**** PUBLIC ****/
 
 namespace kernel
 {
