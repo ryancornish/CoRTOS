@@ -10,7 +10,7 @@ if(ENABLE_COVERAGE)
       # Coverage flags
       add_compile_options(
          --coverage              # Instruments code for coverage
-         -O0                     # No optimization
+         -Og                     # Works better for recognising ternary operator jumps
          -fno-inline            # Don't inline functions
          -fno-inline-small-functions
          -fno-default-inline
@@ -60,6 +60,8 @@ function(setup_coverage)
          --filter ${FILTER_TIME}
          --filter ${FILTER_PORT}
          --filter ${FILTER_LIBCORTOS}
+         --exclude-lines-by-pattern ".*CORTOS_ASSERT.*"
+         --exclude-unreachable-branches
          --html-details ${CMAKE_BINARY_DIR}/coverage_html/index.html
          --print-summary
 

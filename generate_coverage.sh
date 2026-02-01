@@ -3,13 +3,6 @@
 
 set -e
 
-# Check for gcovr
-if ! command -v gcovr &> /dev/null; then
-   echo "Installing gcovr..."
-   pip install gcovr --user
-   export PATH="$HOME/.local/bin:$PATH"
-fi
-
 # Create build directory
 BUILD_DIR="build_coverage"
 rm -rf "$BUILD_DIR"
@@ -18,7 +11,7 @@ cd "$BUILD_DIR"
 
 echo "=== Configuring with coverage ==="
 cmake .. \
-   -DCMAKE_BUILD_TYPE=Debug \
+   -DCMAKE_BUILD_TYPE=None \
    -DENABLE_COVERAGE=ON \
    -DCORTOS_TIME_DRIVER=simulation
 
