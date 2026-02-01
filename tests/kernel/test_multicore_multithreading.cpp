@@ -24,7 +24,7 @@ class MultiCoreMultiThread_Test : public ::testing::Test
 {
    void SetUp() override
    {
-      if (kernel::core_count() < 2)  GTEST_SKIP() << "Need at least 2 cores for these test";
+      if (kernel::core_count() < 2)  GTEST_SKIP() << "Need at least 2 cores for these tests";
       kernel::initialise();
    }
 
@@ -137,6 +137,8 @@ TEST_F(MultiCoreMultiThread_Test,
 TEST_F(MultiCoreMultiThread_Test,
        GivenUpToFourCoresWithOneThreadEach_WhenKernelStarts_ThenAllCoresMakeProgress)
 {
+   if (kernel::core_count() < 4)  GTEST_SKIP() << "Need at least 4 cores for this test";
+
    alignas(CORTOS_PORT_STACK_ALIGN) std::array<std::byte, 16 * 1024> s0{};
    alignas(CORTOS_PORT_STACK_ALIGN) std::array<std::byte, 16 * 1024> s1{};
    alignas(CORTOS_PORT_STACK_ALIGN) std::array<std::byte, 16 * 1024> s2{};

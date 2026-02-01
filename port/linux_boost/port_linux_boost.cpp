@@ -62,9 +62,13 @@ static_assert(CORTOS_PORT_ENVIRONMENT == 2);
 
 struct BackendCore
 {
-   pthread_t pthread{}; // NOTE: This is null/unused for Core0
+   pthread_t pthread{}; ///< @note This is null/unused for Core0
    uint32_t  core_id{};
    cortos_port_core_entry_t entry{};
+
+   static constexpr auto SCHED_STACK_SIZE = 64 * 1024; // 64KB might be a bit overkill but I'll tune it down later
+   // Scheduler stack + prealloc context for scheduler fiber.
+   alignas(CORTOS_PORT_STACK_ALIGN) std::array<std::byte, SCHED_STACK_SIZE> sched_stack{};
 
    struct CorePoke
    {
@@ -78,20 +82,31 @@ struct BackendCore
 
 struct GlobalState
 {
-   size_t cores_running{0};
+   std::atomic<bool>        shutdown_requested{false};
+   std::atomic<uint32_t>    registered_threads{0};
+   cortos_port_reschedule_t reschedule_hook{nullptr};
    std::span<BackendCore> core_view;
-   void reset() { cores_running = 0; core_view = {}; }
+
+   void reset() { shutdown_requested.store(false); reschedule_hook = nullptr; core_view = {}; registered_threads.store(0); }
 };
-[[maybe_unused]]
 static constinit GlobalState global;
 
 struct CurrentCoreState
 {
    uint32_t core_id{0};
+
+   // Non-null when we are currently executing inside a task fiber.
    cortos_port_context* current_context{nullptr};
+
    // The "caller" fiber for the currently running task on *this OS thread*.
    boost::context::fiber task_caller;
-   void* tls_pointer{nullptr}; // Simulates pointing to fibers dedicated TLS block.
+   // Dedicated scheduler fiber (per core). Executes reschedule hook
+   boost::context::fiber scheduler_fiber;
+
+   boost::context::fiber os_caller; // TODO: Needed?
+
+   // Simulates pointing to fibers dedicated TLS block.
+   void* tls_pointer{nullptr};
 };
 static thread_local constinit CurrentCoreState current_core;
 
@@ -99,9 +114,9 @@ static thread_local constinit CurrentCoreState current_core;
  * Platform Initialization
  * ========================================================================= */
 
-extern "C" void cortos_port_init(cortos_port_reschedule_t /*UNUSED*/)
+extern "C" void cortos_port_init(cortos_port_reschedule_t reschedule_hook)
 {
-
+   global.reschedule_hook = reschedule_hook;
 }
 
 /* ============================================================================
@@ -161,6 +176,8 @@ extern "C" void cortos_port_context_init(cortos_port_context_t* context,
                                          cortos_port_entry_t entry,
                                          void* arg)
 {
+   global.registered_threads.fetch_add(1, std::memory_order_seq_cst);
+
    // Construct cortos_port_context_t in place
    ::new (context) cortos_port_context{
       .thread     = {},
@@ -190,7 +207,6 @@ extern "C" void cortos_port_context_init(cortos_port_context_t* context,
       stack_allocator,
       [context](boost::context::fiber&& caller) mutable -> boost::context::fiber
       {
-         // Store scheduler continuation so we can jump back
          current_core.task_caller     = std::move(caller);
          current_core.current_context = context;
 
@@ -221,7 +237,7 @@ extern "C" void cortos_port_context_destroy(cortos_port_context_t* context)
 
 extern "C" void cortos_port_switch(cortos_port_context_t* /*from*/, cortos_port_context_t* to)
 {
-   assert(to->thread && "No context to switch to");
+   CORTOS_ASSERT(to->thread); // No context to switch to
 
    current_core.current_context = to;
    to->thread = std::move(to->thread).resume();
@@ -239,18 +255,14 @@ extern "C" void cortos_port_pend_reschedule(void)
    // Only meaningful if we're currently inside a task fiber on this OS thread.
    if (!current_core.current_context) return;
 
-   assert(current_core.task_caller && "pend_reschedule: no caller captured");
-
-   // Yield back to the current caller (scheduler/dispatcher).
-   // When the scheduler later resumes us again, Boost will pass us a fresh caller,
-   // and the lambda above will overwrite tls_task_caller accordingly.
+   CORTOS_ASSERT(current_core.task_caller);
    current_core.task_caller = std::move(current_core.task_caller).resume();
 }
 
 extern "C" void cortos_port_thread_exit(void)
 {
-   // Do nothing under boost. This will return then return from the thread_launcher, which will
-   // switch to the sched context and this thread context will no longer be captured, and be cleaned up.
+   CORTOS_ASSERT(global.registered_threads.load(std::memory_order_relaxed) != 0);
+   global.registered_threads.fetch_sub(1, std::memory_order_seq_cst);
 }
 
 /* ============================================================================
@@ -259,6 +271,60 @@ extern "C" void cortos_port_thread_exit(void)
  * Each pthread represents a simulated "core". Core 0 runs on the calling
  * thread, additional cores spawn as pthreads.
  * ========================================================================= */
+
+static boost::context::fiber build_scheduler_fiber(BackendCore& core)
+{
+   // Build a fiber bound to the core-provided stack
+   boost::context::stack_context boost_stack_context{
+      .size = core.sched_stack.size(),
+      .sp   = core.sched_stack.data() + core.sched_stack.size(),
+   };
+
+   boost::context::preallocated boost_prealloc(
+      boost_stack_context.sp,
+      boost_stack_context.size,
+      boost_stack_context
+   );
+
+   preallocated_stack_noop stack_allocator;
+
+   return {
+      std::allocator_arg,
+      boost_prealloc,
+      stack_allocator,
+      [&core](boost::context::fiber&& caller) mutable -> boost::context::fiber
+      {
+         current_core.os_caller = std::move(caller);
+
+         core.entry();
+
+         // Returning from core.entry() means the first user-thread executed on this core
+         // paused, and then resumed this cores scheduler context... which is this.
+         // Since we are under a cooperative system, we must keep rescheduling so
+         // long as there are active threads about.
+         // Note: Each active core registers the idle thread, therefore there are no user-threads
+         // left when registered_threads <= NUM_CORES
+         while (global.registered_threads.load(std::memory_order_acquire) > global.core_view.size()) {
+            global.reschedule_hook();
+         }
+
+         // No threads are active anymore, this means all other cores MUST be in idle_task
+         // Lets wake everyone up to signal the shutdown
+         // Note: first core to observe quiescence initiates shutdown
+         bool expected = false;
+         if (global.shutdown_requested.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
+            // wake everyone out of idle so they can pend_reschedule back to their scheduler fibers
+            for (auto& core : global.core_view) {
+               cortos_port_send_reschedule_ipi(core.core_id);
+            }
+         }
+
+         // Now this returns us back to the pthread creator we terminate and join with any other cores
+         return std::move(current_core.os_caller);
+      }
+   };
+}
+
 
 extern "C" uint32_t cortos_port_get_core_id(void)
 {
@@ -269,8 +335,6 @@ void cortos_port_start_cores(size_t cores_to_use, cortos_port_core_entry_t entry
 {
    CORTOS_ASSERT(cores_to_use > 0); // Invoking with 0 cores_to_use is invalid
    CORTOS_ASSERT(cores_to_use <= CORTOS_PORT_CORE_COUNT);
-
-   global.cores_running = cores_to_use;
 
    auto cores = std::make_unique<BackendCore[]>(cores_to_use);
    global.core_view = {cores.get(), cores_to_use};
@@ -287,7 +351,9 @@ void cortos_port_start_cores(size_t cores_to_use, cortos_port_core_entry_t entry
          {
             auto* init = static_cast<BackendCore*>(arg);
             current_core.core_id = init->core_id;
-            init->entry();
+
+            current_core.scheduler_fiber = build_scheduler_fiber(*init).resume();
+
             return nullptr;
          },
          &core
@@ -295,10 +361,12 @@ void cortos_port_start_cores(size_t cores_to_use, cortos_port_core_entry_t entry
    }
 
    // Core0 runs on calling thread
-   current_core.core_id = 0;
-   entry();
+   auto& core0 = global.core_view[0];
+   core0.core_id = current_core.core_id = 0;
+   core0.entry = entry;
+   current_core.scheduler_fiber = std::move(build_scheduler_fiber(core0)).resume();
 
-   // If entry returns, join children to avoid leaks/dangling behavior
+   // If/when core0 returns, join children to avoid leaks/dangling behavior
    for (auto& core : cores_to_spawn) {
       pthread_join(core.pthread, nullptr);
    }
@@ -307,7 +375,7 @@ void cortos_port_start_cores(size_t cores_to_use, cortos_port_core_entry_t entry
 
 extern "C" void cortos_port_send_reschedule_ipi(uint32_t core_id)
 {
-   CORTOS_ASSERT_OP(core_id, <, global.cores_running);
+   CORTOS_ASSERT_OP(core_id, <, global.core_view.size());
 
    auto& core_poker = global.core_view[core_id].core_poke;
 
@@ -319,7 +387,7 @@ extern "C" void cortos_port_send_reschedule_ipi(uint32_t core_id)
    pthread_cond_signal(&core_poker.cond_var);
    pthread_mutex_unlock(&core_poker.mutex);
 
-   if (core_id == current_core.core_id) {
+   if (core_id == current_core.core_id && current_core.current_context) {
       cortos_port_pend_reschedule();
    }
 }

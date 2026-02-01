@@ -756,8 +756,8 @@ public:
 
       cortos_port_init(reschedule_this_core);
 
-      for (auto& sched : schedulers) {
-         sched.init_idle_task();
+      for (auto& scheduler : schedulers) {
+         scheduler.init_idle_task();
       }
       initialised = true;
    }
@@ -774,15 +774,15 @@ public:
 
    void finalise() noexcept
    {
-      CORTOS_ASSERT(!running.load(std::memory_order_relaxed)); // System must be quiescent to reset cleanly
       CORTOS_ASSERT(initialised.load(std::memory_order_relaxed)); // In theory there shouldn't be anything to reset yet... so why was this invoked? smells buggy
 
+      running.store(false, std::memory_order_relaxed);
       thread_id_generator.store(1, std::memory_order_relaxed);
       active_threads.store(0, std::memory_order_relaxed);;
       initialised.store(false, std::memory_order_relaxed);
 
-      for (auto& sched : schedulers) {
-         sched.reset();
+      for (auto& scheduler : schedulers) {
+         scheduler.reset();
       }
    }
 
@@ -847,29 +847,6 @@ public:
       active_threads.fetch_sub(1, std::memory_order_seq_cst);
    }
 
-   void cooperative_scheduler_loop()
-   {
-      // For cooperative systems, a hook to reschedule during a controllable point, is necessary.
-      // Although the core has returned, other cores, OR itself may still have active threads.
-      // This means there is the potential for either another core to start a thread on this one,
-      // OR a thread on this core to become runnable. Therefore under cooperation, we
-      // must reschedule until the system is basically dead.
-      while (active_threads.load(std::memory_order_seq_cst) > 0) {
-         reschedule_this_core();
-      }
-   }
-
-   void try_initiate_shutdown() noexcept
-   {
-      // First core to observe quiescence initiates shutdown.
-      bool expected = true;
-      if (running.compare_exchange_strong(expected, false, std::memory_order_acq_rel)) {
-         for (uint32_t core_id = 0; core_id < config::CORES; ++core_id) {
-            cortos_port_send_reschedule_ipi(core_id);
-         }
-      }
-   }
-
 private:
    template<std::size_t... Is>
    constexpr explicit Kernel(std::index_sequence<Is...>) noexcept : schedulers{ Scheduler{Is}... } {}
@@ -881,22 +858,16 @@ static constinit Kernel<config::CORES> KERNEL;
 // Registered as ISR handler for preemptive scheduling
 static void reschedule_this_core()
 {
-   KERNEL.scheduler_for_this_core().reschedule();
+   auto& scheduler = KERNEL.scheduler_for_this_core();
+
+   scheduler.reschedule();
 }
 
 static void core_entry()
 {
-   auto& sched = KERNEL.scheduler_for_this_core();
+   auto& scheduler = KERNEL.scheduler_for_this_core();
 
-   sched.start();
-
-   if constexpr (CORTOS_PORT_SCHEDULING_TYPE == SchedulerFlavour::Cooperative) {
-      KERNEL.cooperative_scheduler_loop();
-   }
-
-   if constexpr (CORTOS_PORT_ENVIRONMENT == Environment::Simulation) {
-      KERNEL.try_initiate_shutdown();
-   }
+   scheduler.start();
 }
 
 static void thread_launcher(void* tcb_ptr)
