@@ -708,7 +708,7 @@ public:
    {
       CORTOS_ASSERT(preempt_disable_depth > 0);
       if (--preempt_disable_depth == 0) {
-         cortos_port_pend_reschedule();
+         cortos_port_pend_reschedule(); // TODO: Should this really be here?
       }
    }
 
@@ -724,7 +724,7 @@ public:
    }
 };
 
-
+static void reschedule_this_core();
 static void core_entry();
 
 // Note: this is a template purely because it allows the compile-time index-sequence array initialiser for schedulers to work
@@ -754,7 +754,7 @@ public:
    {
       CORTOS_ASSERT(!initialised); // Cannot invoke kernel::initialise twice (without finalising down in between)
 
-      cortos_port_init();
+      cortos_port_init(reschedule_this_core);
 
       for (auto& sched : schedulers) {
          sched.init_idle_task();
@@ -855,7 +855,7 @@ public:
       // OR a thread on this core to become runnable. Therefore under cooperation, we
       // must reschedule until the system is basically dead.
       while (active_threads.load(std::memory_order_seq_cst) > 0) {
-         scheduler_for_this_core().reschedule();
+         reschedule_this_core();
       }
    }
 
@@ -877,6 +877,12 @@ private:
 static constinit Kernel<config::CORES> KERNEL;
 
 [[maybe_unused]] constexpr auto STATIC_SIZEOF_KERNEL = sizeof(KERNEL);
+
+// Registered as ISR handler for preemptive scheduling
+static void reschedule_this_core()
+{
+   KERNEL.scheduler_for_this_core().reschedule();
+}
 
 static void core_entry()
 {

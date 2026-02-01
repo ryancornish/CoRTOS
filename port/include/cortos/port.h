@@ -132,7 +132,7 @@ typedef void (*cortos_port_isr_handler_t)(void* arg);
 /**
  * @brief Initialize the port layer
  */
-void cortos_port_init(void);
+void cortos_port_init(cortos_port_reschedule_t pend_reschedule_handler);
 
 /* ============================================================================
  * Critical Sections (Interrupt Control)

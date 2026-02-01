@@ -97,6 +97,8 @@ TEST_F(MultiCoreMultiThread_Test,
 
    Thread remote_thread;
 
+   // GIVEN:
+
    Thread creator(
       [&]{
          EXPECT_EQ(this_thread::core_id(), 0u);
@@ -120,7 +122,11 @@ TEST_F(MultiCoreMultiThread_Test,
    // Only one thread should be registered (creator) as remote_thread handle is empty
    EXPECT_EQ(kernel::active_threads(), 1u);
 
+   // WHEN:
+
    kernel::start();
+
+   // THEN:
 
    EXPECT_TRUE(remote_ran)
       << "Remote thread never ran (missing inbox poke / IPI / idle wake)";
@@ -159,12 +165,18 @@ TEST_F(MultiCoreMultiThread_Test,
       };
    };
 
+   // GIVEN:
+
    auto t1 = make_thread(0, s0);
    auto t2 = make_thread(1, s1);
    auto t3 = make_thread(2, s2);
    auto t4 = make_thread(3, s3);
 
+   // WHEN:
+
    kernel::start();
+
+   // THEN:
 
    for (std::uint32_t core_id = 0; core_id < kernel::core_count(); ++core_id) {
       EXPECT_EQ(stages[core_id], 2)

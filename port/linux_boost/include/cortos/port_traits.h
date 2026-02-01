@@ -48,7 +48,7 @@
  * @def CORTOS_PORT_CORE_COUNT
  * @brief Number of cores supported by this port.
  */
-#define CORTOS_PORT_CORE_COUNT 2
+#define CORTOS_PORT_CORE_COUNT 4
 
 /**
  * @def CORTOS_PORT_SCHEDULING_TYPE

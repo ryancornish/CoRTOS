@@ -19,7 +19,7 @@ class PortTest : public ::testing::Test
 protected:
    void SetUp() override
    {
-      cortos_port_init();
+      cortos_port_init(nullptr);
    }
 };
 

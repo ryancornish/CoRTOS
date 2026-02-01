@@ -99,7 +99,7 @@ static thread_local constinit CurrentCoreState current_core;
  * Platform Initialization
  * ========================================================================= */
 
-extern "C" void cortos_port_init(void)
+extern "C" void cortos_port_init(cortos_port_reschedule_t /*UNUSED*/)
 {
 
 }
