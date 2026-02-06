@@ -100,10 +100,10 @@ struct CurrentCoreState
 
    // The "caller" fiber for the currently running task on *this OS thread*.
    boost::context::fiber task_caller;
-   // Dedicated scheduler fiber (per core). Executes reschedule hook
+   // Dedicated scheduler fiber (per core). Executes reschedule hook.
    boost::context::fiber scheduler_fiber;
-
-   boost::context::fiber os_caller; // TODO: Needed?
+   // The outermost fiber that returns us back out of the scheduler fibers when they are finished.
+   boost::context::fiber os_caller;
 
    // Simulates pointing to fibers dedicated TLS block.
    void* tls_pointer{nullptr};
@@ -325,12 +325,6 @@ static boost::context::fiber build_scheduler_fiber(BackendCore& core)
    };
 }
 
-
-extern "C" uint32_t cortos_port_get_core_id(void)
-{
-   return current_core.core_id;
-}
-
 void cortos_port_start_cores(size_t cores_to_use, cortos_port_core_entry_t entry)
 {
    CORTOS_ASSERT(cores_to_use > 0); // Invoking with 0 cores_to_use is invalid
@@ -352,7 +346,9 @@ void cortos_port_start_cores(size_t cores_to_use, cortos_port_core_entry_t entry
             auto* init = static_cast<BackendCore*>(arg);
             current_core.core_id = init->core_id;
 
+            // Enter the scheduler-fiber
             current_core.scheduler_fiber = build_scheduler_fiber(*init).resume();
+            // On exit, we finish this os-thread instance and Core0's os-thread can join with us
 
             return nullptr;
          },
@@ -364,13 +360,19 @@ void cortos_port_start_cores(size_t cores_to_use, cortos_port_core_entry_t entry
    auto& core0 = global.core_view[0];
    core0.core_id = current_core.core_id = 0;
    core0.entry = entry;
+   // Enter the scheduler-fiber for Core0
    current_core.scheduler_fiber = std::move(build_scheduler_fiber(core0)).resume();
 
-   // If/when core0 returns, join children to avoid leaks/dangling behavior
+   // When Core0's scheduler-fiber returns, join to any other active Core os-thread
    for (auto& core : cores_to_spawn) {
       pthread_join(core.pthread, nullptr);
    }
    global.reset();
+}
+
+extern "C" uint32_t cortos_port_get_core_id(void)
+{
+   return current_core.core_id;
 }
 
 extern "C" void cortos_port_send_reschedule_ipi(uint32_t core_id)
