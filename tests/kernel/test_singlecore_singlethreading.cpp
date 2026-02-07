@@ -1,4 +1,6 @@
 #include "cortos/kernel.hpp"
+#include "cortos/config.hpp"
+#include "cortos/port_traits.h"
 
 #include "gtest/gtest.h"
 
@@ -8,6 +10,8 @@
 #include <cstdio>
 
 using namespace cortos;
+
+static_assert(config::CORES == 1, "Test suite is designed for single core configuration only");
 
 int main(int argc, char** argv)
 {

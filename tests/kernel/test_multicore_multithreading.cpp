@@ -1,5 +1,8 @@
 // test_multicore.cpp
 #include "cortos/kernel.hpp"
+#include "cortos/config.hpp"
+#include "cortos/port_traits.h"
+
 #include "gtest/gtest.h"
 
 #include <array>
@@ -9,6 +12,8 @@
 #include <vector>
 
 using namespace cortos;
+
+static_assert(config::CORES >= 4, "Test suite is designed for (atleast) quad core configuration only");
 
 int main(int argc, char** argv)
 {
@@ -24,7 +29,6 @@ class MultiCoreMultiThread_Test : public ::testing::Test
 {
    void SetUp() override
    {
-      if (kernel::core_count() < 2)  GTEST_SKIP() << "Need at least 2 cores for these tests";
       kernel::initialise();
    }
 

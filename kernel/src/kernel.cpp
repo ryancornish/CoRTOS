@@ -1,7 +1,9 @@
 // Add doxygen comment here
 
 #include "cortos/kernel.hpp"
+#include "cortos/config.hpp"
 #include "cortos/port.h"
+#include "cortos/port_traits.h"
 #include "mpsc_ring_buffer.hpp"
 
 #include <bit>
@@ -21,19 +23,15 @@
 namespace cortos
 {
 
-struct Environment {
-   enum : unsigned {
-      BareMetal  = 1,
-      Simulation = 2,
-   };
-};
-
-struct SchedulerFlavour {
-   enum : unsigned {
-      Preemptive  = 1,
-      Cooperative = 2,
-   };
-};
+/* ============================================================================
+ * Configuration validation
+ * ========================================================================= */
+static_assert(1 <= config::CORES && config::CORES <= CORTOS_PORT_CORE_COUNT,
+              "Port does not support configured amount of cores.");
+static_assert(config::TIME_CORE_ID < config::CORES,
+              "Time core set to non-existent core.");
+static_assert(config::MAX_PRIORITIES < std::numeric_limits<uint32_t>::digits,
+              "Priorities unsupported by kernel implementation.");
 
 static constexpr std::uintptr_t align_down(std::uintptr_t v, std::size_t a) { return v & ~(static_cast<std::uintptr_t>(a) - 1); }
 static constexpr std::uintptr_t   align_up(std::uintptr_t v, std::size_t a) { return (v + (a - 1)) & ~(static_cast<std::uintptr_t>(a) - 1); }

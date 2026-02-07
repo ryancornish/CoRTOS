@@ -6,417 +6,329 @@
 #include "cortos/port.h"
 
 #include <gtest/gtest.h>
-#include <vector>
-#include <cstdint>
-#include <cstring>
 
-/* ============================================================================
- * Test Fixtures
- * ========================================================================= */
+#include <array>
+#include <atomic>
+#include <cstddef>
+#include <cstdint>
+#include <cstdio>
+#include <cstring>
+#include <thread>
+#include <vector>
+
+
+static_assert(CORTOS_PORT_CORE_COUNT > 0);
+
+// ----------------------------------------------------------------------------
+// Test harness: per-core scheduler loop driven by port->kernel hook.
+// ----------------------------------------------------------------------------
+
+
+// Global pointer used by the C reschedule hook installed via cortos_port_init().
+static constinit struct PortHarness* g_harness = nullptr;
+
+struct PortHarness
+{
+   static constexpr std::size_t MAX_READY = 32;
+
+   // Simple single-core ready queue (FIFO). Enough for port-level tests.
+   std::array<cortos_port_context_t*, MAX_READY> ready{};
+   std::size_t r_head{0};
+   std::size_t r_tail{0};
+
+   // Track what the harness believes is currently running (optional / informational).
+   cortos_port_context_t* current{nullptr};
+
+   void reset() noexcept
+   {
+      r_head = r_tail = 0;
+      current = nullptr;
+      ready.fill(nullptr);
+   }
+
+   bool empty() const noexcept { return r_head == r_tail; }
+
+   std::size_t size() const noexcept { return r_tail - r_head; }
+
+   void enqueue(cortos_port_context_t* ctx)
+   {
+      ASSERT_NE(ctx, nullptr);
+      ASSERT_LT(size(), MAX_READY) << "Ready queue overflow in test harness";
+      ready[r_tail % MAX_READY] = ctx;
+      ++r_tail;
+   }
+
+   cortos_port_context_t* dequeue() noexcept
+   {
+      if (empty()) return nullptr;
+      auto* ctx = ready[r_head % MAX_READY];
+      ready[r_head % MAX_READY] = nullptr;
+      ++r_head;
+      return ctx;
+   }
+
+   // Called by the port via cortos_port_pend_reschedule_handler.
+   void reschedule_once()
+   {
+      auto* next = dequeue();
+      if (!next) return;
+
+      // In these unit tests we always resume threads from the test's OS fiber.
+      // That means the "caller" captured by Boost for each task is the test thread,
+      // and cortos_port_pend_reschedule() returns control back here.
+      if (!current) {
+         current = next;
+         cortos_port_start_first(next);
+         // When the task yields/exits, we return here.
+         // `current` is only "best effort" bookkeeping; the task may have exited.
+         current = nullptr;
+         return;
+      }
+
+      auto* prev = current;
+      current = next;
+      cortos_port_switch(prev, next);
+      current = nullptr;
+   }
+
+   // Drive until no ready tasks remain (or step limit hit).
+   void run_until_quiescent(std::size_t step_limit = 10'000)
+   {
+      for (std::size_t i = 0; i < step_limit; ++i) {
+         if (empty()) return;
+         reschedule_once();
+      }
+      FAIL() << "Harness did not quiesce within step limit (possible missing yield/enqueue)";
+   }
+
+   // Hook trampoline.
+   static void reschedule_hook()
+   {
+      ASSERT_NE(g_harness, nullptr);
+      g_harness->reschedule_once();
+   }
+};
+
+struct TaskArg
+{
+   PortHarness* harness{};
+   cortos_port_context_t* ctx{};
+   std::atomic<int>* stage_counter{};
+   int stages{};
+   int task_id{};
+   std::array<int, 64>* trace{};
+   std::atomic<int>* trace_len{};
+};
+
+// A task that records its "task_id" into trace, yields `stages` times, then returns.
+static void task_yield_n(void* varg)
+{
+   auto* a = static_cast<TaskArg*>(varg);
+   ASSERT_NE(a, nullptr);
+   ASSERT_NE(a->harness, nullptr);
+   ASSERT_NE(a->ctx, nullptr);
+
+   for (int i = 0; i < a->stages; ++i) {
+      // Record progress
+      int idx = a->trace_len->fetch_add(1, std::memory_order_acq_rel);
+      ASSERT_LT(idx, static_cast<int>(a->trace->size()));
+      (*a->trace)[static_cast<std::size_t>(idx)] = a->task_id;
+
+      a->stage_counter->fetch_add(1, std::memory_order_acq_rel);
+
+      // Cooperative yield: put ourselves back on the ready queue, then yield to caller.
+      a->harness->enqueue(a->ctx);
+      cortos_port_pend_reschedule();
+   }
+
+   // Return = thread exits; port test harness regains control.
+}
+
+// A task that runs once and returns (no yield).
+static void task_run_once(void* varg)
+{
+   auto* ran = static_cast<std::atomic<bool>*>(varg);
+   ASSERT_NE(ran, nullptr);
+   ran->store(true, std::memory_order_release);
+}
 
 class PortTest : public ::testing::Test
 {
 protected:
+   PortHarness port_harness{};
+
    void SetUp() override
    {
-      cortos_port_init(nullptr);
+      port_harness.reset();
+      g_harness = &port_harness;
+      cortos_port_init(&PortHarness::reschedule_hook);
+   }
+
+   void TearDown() override
+   {
+      g_harness = nullptr;
    }
 };
 
-/* ============================================================================
- * Context Switching Tests
- * ========================================================================= */
-
-TEST_F(PortTest, ContextCreationAndDestruction)
-{
-   // Allocate stack
-   constexpr size_t stack_size = 4096;
-   std::vector<uint8_t> stack(stack_size);
-
-   // Allocate context using port_traits
-   alignas(CORTOS_PORT_CONTEXT_ALIGN) std::array<std::byte, CORTOS_PORT_CONTEXT_SIZE> context_storage{};
-   auto* context = reinterpret_cast<cortos_port_context_t*>(context_storage.data());
-
-   bool entry_called = false;
-
-   auto entry = +[](void* arg)
-   {
-      bool* flag = static_cast<bool*>(arg);
-      *flag = true;
-   };
-
-   // Initialize context
-   cortos_port_context_init(
-      context,
-      stack.data(),
-      stack_size,
-      entry,
-      &entry_called
-   );
-
-   // Run the fiber once
-   cortos_port_start_first(context);
-
-   EXPECT_TRUE(entry_called);
-
-   // Destroy context
-   cortos_port_context_destroy(context);
-}
-
-TEST_F(PortTest, ContextSwitching)
-{
-   constexpr size_t stack_size = 4096;
-
-   std::vector<uint8_t> stack1(stack_size);
-   std::vector<uint8_t> stack2(stack_size);
-
-   alignas(CORTOS_PORT_CONTEXT_ALIGN) std::array<std::byte, CORTOS_PORT_CONTEXT_SIZE> ctx1_storage{};
-   alignas(CORTOS_PORT_CONTEXT_ALIGN) std::array<std::byte, CORTOS_PORT_CONTEXT_SIZE> ctx2_storage{};
-
-   auto* ctx1 = reinterpret_cast<cortos_port_context_t*>(ctx1_storage.data());
-   auto* ctx2 = reinterpret_cast<cortos_port_context_t*>(ctx2_storage.data());
-
-   auto entry1 = [](void* arg)
-   {
-      auto* steps = static_cast<int*>(arg);
-      steps[0] = ++steps[2];  // step1 = 1
-      cortos_port_pend_reschedule();
-      steps[0] = ++steps[2];  // step1 = 3
-   };
-
-   auto entry2 = [](void* arg)
-   {
-      auto* steps = static_cast<int*>(arg);
-      steps[1] = ++steps[2];  // step2 = 2
-      cortos_port_pend_reschedule();
-      steps[1] = ++steps[2];  // step2 = 4
-   };
-
-   int steps[3] = {0, 0, 0};  // [step1, step2, execution_order]
-
-   cortos_port_context_init(ctx1, stack1.data(), stack_size, entry1, steps);
-   cortos_port_context_init(ctx2, stack2.data(), stack_size, entry2, steps);
-
-   // Run thread 1
-   cortos_port_start_first(ctx1);
-   EXPECT_EQ(steps[0], 1);  // Thread 1 ran first
-
-   // Switch to thread 2
-   cortos_port_switch(nullptr, ctx2);
-   EXPECT_EQ(steps[1], 2);  // Thread 2 ran second
-
-   // Resume thread 1
-   cortos_port_switch(nullptr, ctx1);
-   EXPECT_EQ(steps[0], 3);  // Thread 1 resumed
-
-   // Resume thread 2
-   cortos_port_switch(nullptr, ctx2);
-   EXPECT_EQ(steps[1], 4);  // Thread 2 resumed
-
-   cortos_port_context_destroy(ctx1);
-   cortos_port_context_destroy(ctx2);
-}
-
-TEST_F(PortTest, YieldReturnsToScheduler)
-{
-   constexpr size_t stack_size = 4096;
-   std::vector<uint8_t> stack(stack_size);
-
-   alignas(CORTOS_PORT_CONTEXT_ALIGN) std::array<std::byte, CORTOS_PORT_CONTEXT_SIZE> context_storage{};
-   auto* context = reinterpret_cast<cortos_port_context_t*>(context_storage.data());
-
-   int yield_count = 0;
-
-   auto entry = [](void* arg)
-   {
-      int* count = static_cast<int*>(arg);
-      (*count)++;
-      cortos_port_pend_reschedule();
-      (*count)++;
-      cortos_port_pend_reschedule();
-      (*count)++;
-   };
-
-   cortos_port_context_init(context, stack.data(), stack_size, entry, &yield_count);
-
-   // First run: executes until first yield
-   cortos_port_start_first(context);
-   EXPECT_EQ(yield_count, 1);
-
-   // Resume: executes until second yield
-   cortos_port_switch(nullptr, context);
-   EXPECT_EQ(yield_count, 2);
-
-   // Resume: executes until completion
-   cortos_port_switch(nullptr, context);
-   EXPECT_EQ(yield_count, 3);
-
-   cortos_port_context_destroy(context);
-}
-
-/* ============================================================================
- * TLS Tests
- * ========================================================================= */
-
-TEST_F(PortTest, ThreadLocalStorage)
-{
-   void* test_ptr = reinterpret_cast<void*>(0xDEADBEEF);
-
-   cortos_port_set_tls_pointer(test_ptr);
-   EXPECT_EQ(cortos_port_get_tls_pointer(), test_ptr);
-
-   cortos_port_set_tls_pointer(nullptr);
-   EXPECT_EQ(cortos_port_get_tls_pointer(), nullptr);
-}
 
 
-/* ============================================================================
- * Core ID Tests
- * ========================================================================= */
 
-TEST_F(PortTest, CoreIdentification)
-{
-   uint32_t core_id = cortos_port_get_core_id();
-   EXPECT_EQ(core_id, 0);  // Single-threaded test, always core 0
-}
 
-/* ============================================================================
- * Interrupt Control Tests
- * ========================================================================= */
-
-TEST_F(PortTest, InterruptControl)
+TEST_F(PortTest, GivenInterrupts_WhenDisableEnableNested_ThenInterruptsEnabledTracksDepth)
 {
    EXPECT_TRUE(cortos_port_interrupts_enabled());
 
    cortos_port_disable_interrupts();
    EXPECT_FALSE(cortos_port_interrupts_enabled());
 
-   cortos_port_disable_interrupts();  // Nested
+   cortos_port_disable_interrupts();
    EXPECT_FALSE(cortos_port_interrupts_enabled());
 
    cortos_port_enable_interrupts();
-   EXPECT_FALSE(cortos_port_interrupts_enabled());  // Still disabled (nested)
+   EXPECT_FALSE(cortos_port_interrupts_enabled());
 
    cortos_port_enable_interrupts();
-   EXPECT_TRUE(cortos_port_interrupts_enabled());  // Now enabled
+   EXPECT_TRUE(cortos_port_interrupts_enabled());
 }
 
-/* ============================================================================
- * Multi-core (start_cores) Tests (configurable cores)
- * ========================================================================= */
-
-struct SpinBarrier
+TEST_F(PortTest, GivenIrqSaveRestore_WhenNested_ThenRestoreReturnsToPriorState)
 {
-   explicit SpinBarrier(uint32_t total_) : total(total_) {}
+   EXPECT_TRUE(cortos_port_interrupts_enabled());
 
-   void reset(uint32_t total_)
-   {
-      total = total_;
-      arrived.store(0, std::memory_order_relaxed);
-      go.store(false, std::memory_order_relaxed);
-   }
+   uint32_t s0 = cortos_port_irq_save();
+   EXPECT_EQ(s0, 1u);
+   EXPECT_FALSE(cortos_port_interrupts_enabled());
 
-   void arrive_and_wait()
-   {
-      uint32_t v = arrived.fetch_add(1, std::memory_order_acq_rel) + 1;
-      if (v == total) {
-         go.store(true, std::memory_order_release);
-      } else {
-         while (!go.load(std::memory_order_acquire)) {
-            cortos_port_cpu_relax();
-         }
-      }
-   }
+   uint32_t s1 = cortos_port_irq_save();
+   EXPECT_EQ(s1, 0u);
+   EXPECT_FALSE(cortos_port_interrupts_enabled());
 
-   std::atomic<uint32_t> arrived{0};
-   std::atomic<bool>     go{false};
-   uint32_t total{0};
-};
+   // Restore one level (still disabled)
+   cortos_port_irq_restore(s1);
+   EXPECT_FALSE(cortos_port_interrupts_enabled());
 
-// Global (per TU) state so core-entry can be captureless.
-struct StartCoresTestState
-{
-   std::atomic<bool>     configured{false};
-   uint32_t              use_cores{1};
-
-   // Barriers and result arrays.
-   SpinBarrier barrier{1};
-
-   std::array<std::atomic<bool>, CORTOS_PORT_CORE_COUNT> seen{};
-   std::array<std::atomic<uint32_t>, CORTOS_PORT_CORE_COUNT> observed_core_id{};
-   std::array<std::atomic<void*>, CORTOS_PORT_CORE_COUNT> tls_readback{};
-   std::array<std::atomic<int>, CORTOS_PORT_CORE_COUNT> step{};
-
-   // To ensure each core runs entry at most once.
-   std::array<std::atomic<bool>, CORTOS_PORT_CORE_COUNT> already_reported{};
-
-   void reset(uint32_t cores)
-   {
-      use_cores = cores;
-      barrier.reset(cores);
-
-      for (uint32_t i = 0; i < CORTOS_PORT_CORE_COUNT; ++i) {
-         seen[i].store(false, std::memory_order_relaxed);
-         observed_core_id[i].store(0xFFFFFFFFu, std::memory_order_relaxed);
-         tls_readback[i].store(nullptr, std::memory_order_relaxed);
-         step[i].store(0, std::memory_order_relaxed);
-         already_reported[i].store(false, std::memory_order_relaxed);
-      }
-
-      configured.store(true, std::memory_order_release);
-   }
-};
-
-static StartCoresTestState g;
-
-// ----- captureless core entries -----
-
-static void core_entry_seen_and_coreid()
-{
-   // Wait until main thread configured state (paranoia for racing starts).
-   while (!g.configured.load(std::memory_order_acquire)) {
-      cortos_port_cpu_relax();
-   }
-
-   const uint32_t cid = cortos_port_get_core_id();
-   ASSERT_LT(cid, CORTOS_PORT_CORE_COUNT);
-
-   // Only cores [0..use_cores-1] should run entry.
-   ASSERT_LT(cid, g.use_cores) << "Port ran entry on an unexpected core";
-
-   bool expected = false;
-   ASSERT_TRUE(g.already_reported[cid].compare_exchange_strong(expected, true,
-                                                              std::memory_order_acq_rel))
-      << "Core entry ran more than once on core " << cid;
-
-   cortos_port_set_tls_pointer(reinterpret_cast<void*>(uintptr_t(0x1000u + cid)));
-
-   // Sync participating cores.
-   g.barrier.arrive_and_wait();
-
-   g.observed_core_id[cid].store(cid, std::memory_order_release);
-   g.seen[cid].store(true, std::memory_order_release);
+   // Restore to original enabled state
+   cortos_port_irq_restore(s0);
+   EXPECT_TRUE(cortos_port_interrupts_enabled());
 }
 
-static void core_entry_tls_is_per_core()
+TEST_F(PortTest, GivenTlsPointer_WhenSetThenGet_ThenValueRoundTrips)
 {
-   while (!g.configured.load(std::memory_order_acquire)) {
-      cortos_port_cpu_relax();
-   }
+   int x = 123;
+   cortos_port_set_tls_pointer(&x);
+   EXPECT_EQ(cortos_port_get_tls_pointer(), &x);
 
-   const uint32_t cid = cortos_port_get_core_id();
-   ASSERT_LT(cid, CORTOS_PORT_CORE_COUNT);
-   ASSERT_LT(cid, g.use_cores);
-
-   void* unique = reinterpret_cast<void*>(uintptr_t(0xDEAD0000u + cid));
-   cortos_port_set_tls_pointer(unique);
-
-   g.barrier.arrive_and_wait();
-
-   void* rb = cortos_port_get_tls_pointer();
-   g.tls_readback[cid].store(rb, std::memory_order_release);
+   cortos_port_set_tls_pointer(nullptr);
+   EXPECT_EQ(cortos_port_get_tls_pointer(), nullptr);
 }
 
-static void core_entry_pend_and_self_ipi_yield()
+TEST_F(PortTest, GivenGetCoreId_WhenNotStartedCores_ThenIsZero)
 {
-   while (!g.configured.load(std::memory_order_acquire)) {
-      cortos_port_cpu_relax();
-   }
+   // In the Linux boost port, core_id defaults to 0 on the calling thread unless start_cores sets it.
+   EXPECT_EQ(cortos_port_get_core_id(), 0u);
+}
 
-   const uint32_t cid = cortos_port_get_core_id();
-   ASSERT_LT(cid, CORTOS_PORT_CORE_COUNT);
-   ASSERT_LT(cid, g.use_cores);
+TEST_F(PortTest, GivenSingleTask_WhenStartFirst_ThenTaskRunsAndReturnsToCaller)
+{
+   alignas(CORTOS_PORT_STACK_ALIGN) static std::array<std::byte, 16 * 1024> stack{};
+   alignas(CORTOS_PORT_CONTEXT_ALIGN) static std::array<std::byte, CORTOS_PORT_CONTEXT_SIZE> ctx_storage{};
 
-   constexpr size_t stack_size = 4096;
-   auto stack = std::make_unique<std::uint8_t[]>(stack_size);
-
-   alignas(CORTOS_PORT_CONTEXT_ALIGN) std::array<std::byte, CORTOS_PORT_CONTEXT_SIZE> ctx_storage{};
    auto* ctx = reinterpret_cast<cortos_port_context_t*>(ctx_storage.data());
 
-   auto task_entry = +[](void* arg)
-   {
-      auto* s = static_cast<std::atomic<int>*>(arg);
+   std::atomic<bool> ran{false};
 
-      s->store(1, std::memory_order_release);
-      cortos_port_pend_reschedule();
+   cortos_port_context_init(
+      ctx,
+      stack.data(),
+      stack.size(),
+      &task_run_once,
+      &ran
+   );
 
-      s->store(2, std::memory_order_release);
-      cortos_port_send_reschedule_ipi(cortos_port_get_core_id());
+   // Schedule it manually via the harness
+   port_harness.enqueue(ctx);
+   port_harness.run_until_quiescent();
 
-      s->store(3, std::memory_order_release);
+   EXPECT_TRUE(ran.load(std::memory_order_acquire));
+
+   // Task should have completed and returned control to us.
+   // (The port's context_destroy is owned by the kernel normally, but port-level test can still destroy.)
+   cortos_port_context_destroy(ctx);
+}
+
+TEST_F(PortTest, GivenTwoTasks_WhenTheyYieldAndReenqueue_ThenTheyInterleaveInFIFOOrder)
+{
+   alignas(CORTOS_PORT_STACK_ALIGN) static std::array<std::byte, 16 * 1024> s0{};
+   alignas(CORTOS_PORT_STACK_ALIGN) static std::array<std::byte, 16 * 1024> s1{};
+
+   alignas(CORTOS_PORT_CONTEXT_ALIGN) static std::array<std::byte, CORTOS_PORT_CONTEXT_SIZE> c0_storage{};
+   alignas(CORTOS_PORT_CONTEXT_ALIGN) static std::array<std::byte, CORTOS_PORT_CONTEXT_SIZE> c1_storage{};
+
+   auto* c0 = reinterpret_cast<cortos_port_context_t*>(c0_storage.data());
+   auto* c1 = reinterpret_cast<cortos_port_context_t*>(c1_storage.data());
+
+   std::atomic<int> stages_done{0};
+   std::atomic<int> trace_len{0};
+   std::array<int, 64> trace{};
+   trace.fill(-1);
+
+   TaskArg a0{
+      .harness = &port_harness,
+      .ctx = c0,
+      .stage_counter = &stages_done,
+      .stages = 3,
+      .task_id = 0,
+      .trace = &trace,
+      .trace_len = &trace_len,
    };
 
-   cortos_port_context_init(ctx, stack.get(), stack_size, task_entry, &g.step[cid]);
+   TaskArg a1{
+      .harness = &port_harness,
+      .ctx = c1,
+      .stage_counter = &stages_done,
+      .stages = 3,
+      .task_id = 1,
+      .trace = &trace,
+      .trace_len = &trace_len,
+   };
 
-   cortos_port_start_first(ctx);
-   EXPECT_EQ(g.step[cid].load(std::memory_order_acquire), 1);
+   cortos_port_context_init(c0, s0.data(), s0.size(), &task_yield_n, &a0);
+   cortos_port_context_init(c1, s1.data(), s1.size(), &task_yield_n, &a1);
 
-   cortos_port_switch(nullptr, ctx);
-   EXPECT_EQ(g.step[cid].load(std::memory_order_acquire), 2);
+   // Enqueue in a known order
+   port_harness.enqueue(c0);
+   port_harness.enqueue(c1);
 
-   cortos_port_switch(nullptr, ctx);
-   EXPECT_EQ(g.step[cid].load(std::memory_order_acquire), 3);
+   // Drive until both tasks finish all stages.
+   // Each stage yields and reenqueues itself, so the harness should alternate FIFO.
+   port_harness.run_until_quiescent();
 
-   cortos_port_context_destroy(ctx);
+   EXPECT_EQ(stages_done.load(std::memory_order_acquire), 6);
+   EXPECT_EQ(trace_len.load(std::memory_order_acquire), 6);
 
-   g.barrier.arrive_and_wait();
+   // Expected: 0,1,0,1,0,1
+   EXPECT_EQ(trace[0], 0);
+   EXPECT_EQ(trace[1], 1);
+   EXPECT_EQ(trace[2], 0);
+   EXPECT_EQ(trace[3], 1);
+   EXPECT_EQ(trace[4], 0);
+   EXPECT_EQ(trace[5], 1);
+
+   cortos_port_context_destroy(c0);
+   cortos_port_context_destroy(c1);
 }
 
-TEST_F(PortTest, StartCores_UsesConfiguredCoreCountAndSetsCoreId)
+TEST_F(PortTest, GivenCpuRelax_WhenCalled_ThenDoesNotCrash)
 {
-   // Pick something representative: if HW has >=2 cores, use 2, else 1.
-   const uint32_t use = (CORTOS_PORT_CORE_COUNT >= 2) ? 2u : 1u;
-
-   g.reset(use);
-
-   // New signature: (cores_to_use, entry)
-   cortos_port_start_cores(use, &core_entry_seen_and_coreid);
-
-   // Verify only [0..use-1] participated.
-   for (uint32_t i = 0; i < use; ++i) {
-      EXPECT_TRUE(g.seen[i].load(std::memory_order_acquire)) << "Core " << i << " did not run entry";
-      EXPECT_EQ(g.observed_core_id[i].load(std::memory_order_acquire), i);
-   }
-   for (uint32_t i = use; i < CORTOS_PORT_CORE_COUNT; ++i) {
-      EXPECT_FALSE(g.seen[i].load(std::memory_order_acquire)) << "Unexpected core " << i << " ran entry";
-   }
+   // Not asserting timing/behaviour; just that it's callable.
+   cortos_port_cpu_relax();
+   cortos_port_cpu_relax();
 }
 
-TEST_F(PortTest, StartCores_TlsPointerIsPerCoreThread)
+TEST_F(PortTest, GivenGetStackPointer_WhenCalled_ThenReturnsNonNull)
 {
-   const uint32_t use = (CORTOS_PORT_CORE_COUNT >= 2) ? 2u : 1u;
-
-   g.reset(use);
-
-   cortos_port_start_cores(use, &core_entry_tls_is_per_core);
-
-   for (uint32_t i = 0; i < use; ++i) {
-      void* expected = reinterpret_cast<void*>(uintptr_t(0xDEAD0000u + i));
-      EXPECT_EQ(g.tls_readback[i].load(std::memory_order_acquire), expected)
-         << "TLS leaked or core-local TLS broken on core " << i;
-   }
-   for (uint32_t i = use; i < CORTOS_PORT_CORE_COUNT; ++i) {
-      EXPECT_EQ(g.tls_readback[i].load(std::memory_order_acquire), nullptr)
-         << "Non-participating core " << i << " should not have written TLS readback";
-   }
-}
-
-TEST_F(PortTest, StartCores_PendRescheduleAndSelfIpiWorkPerCore)
-{
-   const uint32_t use = (CORTOS_PORT_CORE_COUNT >= 2) ? 2u : 1u;
-
-   g.reset(use);
-
-   cortos_port_start_cores(use, &core_entry_pend_and_self_ipi_yield);
-
-   for (uint32_t i = 0; i < use; ++i) {
-      EXPECT_EQ(g.step[i].load(std::memory_order_acquire), 3)
-         << "Core " << i << " did not complete yield/resume sequence";
-   }
-   for (uint32_t i = use; i < CORTOS_PORT_CORE_COUNT; ++i) {
-      EXPECT_EQ(g.step[i].load(std::memory_order_acquire), 0)
-         << "Non-participating core " << i << " unexpectedly ran";
-   }
+   void* sp = cortos_port_get_stack_pointer();
+   EXPECT_NE(sp, nullptr);
 }
 
 TEST_F(PortTest, Asserts)

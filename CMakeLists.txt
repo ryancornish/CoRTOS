@@ -37,6 +37,8 @@ include_directories(
    ${CMAKE_SOURCE_DIR}/libcortos/include
 )
 
+add_subdirectory(config)
+
 # Build port layer (must provide cortos::port target)
 add_subdirectory(port/${CORTOS_PORT})
 
