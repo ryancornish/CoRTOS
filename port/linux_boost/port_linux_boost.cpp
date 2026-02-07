@@ -53,23 +53,26 @@ static_assert(CORTOS_PORT_SCHEDULING_TYPE == 2);
 static_assert(CORTOS_PORT_ENVIRONMENT == 2);
 
 /* ============================================================================
- * Global & Thread-Local State
- *
- * For SMP simulation, each OS thread has its own state tracking using
- * thread_local. This is NOT stored in cortos_port_context to prevent
- * migration issues.
+ * Port MultiCore Structure
  * ========================================================================= */
 
-struct BackendCore
+/**
+ * For simulating the SMP schedulers on top of linux, we
+ * spawn a new pthread (AKA OS-thread) for each configured core - (Except Core0 because that is the initial thread).
+ * Each OS-thread encapsulates a scheduler fiber that is ther "outer-context" for each user-thread pinned to a core.
+ * When the user-thread "pends reschedule", the context is switched to this outer fiber so that scheduling can happen
+ * on a separate stack and context to the threads.
+ */
+struct CpuCore
 {
-   pthread_t pthread{}; ///< @note This is null/unused for Core0
-   uint32_t  core_id{};
+   pthread_t pthread{}; // @note This is null/unused for Core0
+   uint32_t  core_id{}; // Index from 0... num cores
    cortos_port_core_entry_t entry{};
+   boost::context::fiber scheduler_fiber;
 
-   static constexpr auto SCHED_STACK_SIZE = 64 * 1024; // 64KB might be a bit overkill but I'll tune it down later
-   // Scheduler stack + prealloc context for scheduler fiber.
-   alignas(CORTOS_PORT_STACK_ALIGN) std::array<std::byte, SCHED_STACK_SIZE> sched_stack{};
-
+   /**
+    * @brief Primitives to signal/communicate with other cores
+    */
    struct CorePoke
    {
       pthread_mutex_t mutex{};
@@ -78,33 +81,91 @@ struct BackendCore
       CorePoke()  { pthread_mutex_init(&mutex, nullptr); pthread_cond_init(&cond_var, nullptr); }
       ~CorePoke() { pthread_cond_destroy(&cond_var); pthread_mutex_destroy(&mutex); }
    } core_poke;
+
+   void start_scheduler();
 };
+
+/**
+ * @brief Dynamically-sized array/container wrapper for CpuCore's
+ *
+ * Using a std::vector _would_ be preferable, but impossible as a CpuCore is non-copyable
+ */
+class CpuCoreArray
+{
+public:
+   using iterator = CpuCore*;
+   using const_iterator = const CpuCore*;
+
+   constexpr CpuCoreArray() = default;
+   explicit CpuCoreArray(size_t count, cortos_port_core_entry_t core_entry)
+      : cores(std::make_unique<CpuCore[]>(count)), count(count)
+   {
+      for (uint32_t i = 0; i < count; ++i) {
+         cores[i].core_id = i;
+         cores[i].entry = core_entry;
+      }
+   }
+   CpuCoreArray(CpuCoreArray&&) noexcept            = default;
+   CpuCoreArray& operator=(CpuCoreArray&&) noexcept = default;
+   CpuCoreArray(CpuCoreArray const&)            = delete;
+   CpuCoreArray& operator=(CpuCoreArray const&) = delete;
+
+   CpuCore&       operator[](size_t index)       { return cores[index]; }
+   CpuCore const& operator[](size_t index) const { return cores[index]; }
+
+   [[nodiscard]] size_t size() const { return count; }
+
+   iterator begin() { return cores.get(); }
+   iterator end()   { return cores.get() + count; }
+
+   [[nodiscard]] const_iterator begin() const { return cores.get(); }
+   [[nodiscard]] const_iterator end()   const { return cores.get() + count; }
+
+private:
+   std::unique_ptr<CpuCore[]> cores;
+   size_t count{0};
+};
+
+/* ============================================================================
+ * Global & Thread-Local State
+ *
+ * For SMP simulation, each OS-thread has its own state tracking using
+ * thread_local. This is NOT stored in cortos_port_context to prevent
+ * migration issues.
+ * ========================================================================= */
+
 
 struct GlobalState
 {
    std::atomic<bool>        shutdown_requested{false};
-   std::atomic<uint32_t>    registered_threads{0};
-   cortos_port_reschedule_t reschedule_hook{nullptr};
-   std::span<BackendCore> core_view;
+   std::atomic<uint32_t>    active_contexts{0};
+   cortos_port_reschedule_t pend_reschedule_handler{nullptr};
+   CpuCoreArray cores;
 
-   void reset() { shutdown_requested.store(false); reschedule_hook = nullptr; core_view = {}; registered_threads.store(0); }
+   /// @brief Have any cores been started?
+   [[nodiscard]] bool cores_launched() const { return cores.size() > 0; }
+
+   void reset()
+   {
+      shutdown_requested.store(false);
+      active_contexts.store(0);
+      pend_reschedule_handler = nullptr;
+      cores = {};
+   }
 };
 static constinit GlobalState global;
 
 struct CurrentCoreState
 {
-   uint32_t core_id{0};
+   CpuCore* core{nullptr};
 
    // Non-null when we are currently executing inside a task fiber.
    cortos_port_context* current_context{nullptr};
 
-   // The "caller" fiber for the currently running task on *this OS thread*.
+   // The "caller" fiber for the currently running task on *this OS-thread*.
    boost::context::fiber task_caller;
-   // Dedicated scheduler fiber (per core). Executes reschedule hook.
-   boost::context::fiber scheduler_fiber;
    // The outermost fiber that returns us back out of the scheduler fibers when they are finished.
    boost::context::fiber os_caller;
-
    // Simulates pointing to fibers dedicated TLS block.
    void* tls_pointer{nullptr};
 };
@@ -114,9 +175,9 @@ static thread_local constinit CurrentCoreState current_core;
  * Platform Initialization
  * ========================================================================= */
 
-extern "C" void cortos_port_init(cortos_port_reschedule_t reschedule_hook)
+extern "C" void cortos_port_init(cortos_port_reschedule_t pend_reschedule_handler)
 {
-   global.reschedule_hook = reschedule_hook;
+   global.pend_reschedule_handler = pend_reschedule_handler;
 }
 
 /* ============================================================================
@@ -176,7 +237,7 @@ extern "C" void cortos_port_context_init(cortos_port_context_t* context,
                                          cortos_port_entry_t entry,
                                          void* arg)
 {
-   global.registered_threads.fetch_add(1, std::memory_order_seq_cst);
+   global.active_contexts.fetch_add(1, std::memory_order_seq_cst);
 
    // Construct cortos_port_context_t in place
    ::new (context) cortos_port_context{
@@ -226,12 +287,8 @@ extern "C" void cortos_port_context_init(cortos_port_context_t* context,
 extern "C" void cortos_port_context_destroy(cortos_port_context_t* context)
 {
    // Verify fiber has completed
-   if (context->thread) {
-      // Bug: destroying a live thread
-      std::abort();
-   }
+   CORTOS_ASSERT(!context->thread); // Bug: destroying a live thread
 
-   //context->sched = boost::context::fiber{};
    context->~cortos_port_context();
 }
 
@@ -252,17 +309,18 @@ extern "C" void cortos_port_start_first(cortos_port_context_t* first)
 
 extern "C" void cortos_port_pend_reschedule(void)
 {
-   // Only meaningful if we're currently inside a task fiber on this OS thread.
+   // Only meaningful if we're currently inside a task fiber on this OS-thread.
    if (!current_core.current_context) return;
 
+   // The outer fiber 'task_caller' is the scheduler fiber.
    CORTOS_ASSERT(current_core.task_caller);
    current_core.task_caller = std::move(current_core.task_caller).resume();
 }
 
 extern "C" void cortos_port_thread_exit(void)
 {
-   CORTOS_ASSERT(global.registered_threads.load(std::memory_order_relaxed) != 0);
-   global.registered_threads.fetch_sub(1, std::memory_order_seq_cst);
+   CORTOS_ASSERT(global.active_contexts.load(std::memory_order_relaxed) != 0);
+   global.active_contexts.fetch_sub(1, std::memory_order_seq_cst);
 }
 
 /* ============================================================================
@@ -272,57 +330,36 @@ extern "C" void cortos_port_thread_exit(void)
  * thread, additional cores spawn as pthreads.
  * ========================================================================= */
 
-static boost::context::fiber build_scheduler_fiber(BackendCore& core)
+
+void CpuCore::start_scheduler()
 {
-   // Build a fiber bound to the core-provided stack
-   boost::context::stack_context boost_stack_context{
-      .size = core.sched_stack.size(),
-      .sp   = core.sched_stack.data() + core.sched_stack.size(),
-   };
-
-   boost::context::preallocated boost_prealloc(
-      boost_stack_context.sp,
-      boost_stack_context.size,
-      boost_stack_context
-   );
-
-   preallocated_stack_noop stack_allocator;
-
-   return {
-      std::allocator_arg,
-      boost_prealloc,
-      stack_allocator,
-      [&core](boost::context::fiber&& caller) mutable -> boost::context::fiber
+   scheduler_fiber = boost::context::fiber(
+      [this](boost::context::fiber&& caller) mutable -> boost::context::fiber
       {
          current_core.os_caller = std::move(caller);
 
-         core.entry();
+         // Run kernel entry for this simulated core (will start first task etc.)
+         entry();
 
-         // Returning from core.entry() means the first user-thread executed on this core
-         // paused, and then resumed this cores scheduler context... which is this.
-         // Since we are under a cooperative system, we must keep rescheduling so
-         // long as there are active threads about.
-         // Note: Each active core registers the idle thread, therefore there are no user-threads
-         // left when registered_threads <= NUM_CORES
-         while (global.registered_threads.load(std::memory_order_acquire) > global.core_view.size()) {
-            global.reschedule_hook();
+         // Cooperative pump until only idle threads remain (one idle thread per core).
+         while (global.active_contexts.load(std::memory_order_acquire) > global.cores.size()) {
+            global.pend_reschedule_handler();
          }
 
-         // No threads are active anymore, this means all other cores MUST be in idle_task
-         // Lets wake everyone up to signal the shutdown
-         // Note: first core to observe quiescence initiates shutdown
+         // First core to observe quiescence initiates shutdown.
          bool expected = false;
          if (global.shutdown_requested.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
-            // wake everyone out of idle so they can pend_reschedule back to their scheduler fibers
-            for (auto& core : global.core_view) {
-               cortos_port_send_reschedule_ipi(core.core_id);
+            for (auto& c : global.cores) {
+               cortos_port_send_reschedule_ipi(c.core_id);
             }
          }
 
-         // Now this returns us back to the pthread creator we terminate and join with any other cores
          return std::move(current_core.os_caller);
       }
-   };
+   );
+
+   // Enter the scheduler fiber. When it returns, this OS-thread is done.
+   scheduler_fiber = std::move(scheduler_fiber).resume();
 }
 
 void cortos_port_start_cores(size_t cores_to_use, cortos_port_core_entry_t entry)
@@ -330,26 +367,24 @@ void cortos_port_start_cores(size_t cores_to_use, cortos_port_core_entry_t entry
    CORTOS_ASSERT(cores_to_use > 0); // Invoking with 0 cores_to_use is invalid
    CORTOS_ASSERT(cores_to_use <= CORTOS_PORT_CORE_COUNT);
 
-   auto cores = std::make_unique<BackendCore[]>(cores_to_use);
-   global.core_view = {cores.get(), cores_to_use};
-    // No need to spawn the first core/thread as that is assigned to this current calling core/thread
-   auto cores_to_spawn = global.core_view.subspan(1);
+   global.cores = CpuCoreArray(cores_to_use, entry);
 
-   for (uint32_t core_id = 1; auto& core : cores_to_spawn) {
-      core.core_id = core_id++;
-      core.entry   = entry;
+   for (auto& core : global.cores) {
+      // No need to spawn the first core/thread as that is assigned to this current calling core/thread
+      if (core.core_id == 0) continue;
+
       pthread_create(
          &core.pthread,
          nullptr,
          +[](void* arg)-> void*
          {
-            auto* init = static_cast<BackendCore*>(arg);
-            current_core.core_id = init->core_id;
+            auto* init = static_cast<CpuCore*>(arg);
+            current_core.core = init;
 
             // Enter the scheduler-fiber
-            current_core.scheduler_fiber = build_scheduler_fiber(*init).resume();
-            // On exit, we finish this os-thread instance and Core0's os-thread can join with us
+            init->start_scheduler();
 
+            // On exit, we finish this OS-thread instance and Core0's OS-thread can join with us
             return nullptr;
          },
          &core
@@ -357,14 +392,15 @@ void cortos_port_start_cores(size_t cores_to_use, cortos_port_core_entry_t entry
    }
 
    // Core0 runs on calling thread
-   auto& core0 = global.core_view[0];
-   core0.core_id = current_core.core_id = 0;
-   core0.entry = entry;
-   // Enter the scheduler-fiber for Core0
-   current_core.scheduler_fiber = std::move(build_scheduler_fiber(core0)).resume();
+   auto& core0 = global.cores[0];
+   current_core.core = &core0;
 
-   // When Core0's scheduler-fiber returns, join to any other active Core os-thread
-   for (auto& core : cores_to_spawn) {
+   // Enter the scheduler-fiber for Core0
+   core0.start_scheduler();
+
+   // When Core0's scheduler-fiber returns, join to any other active Core OS-thread
+   for (auto& core : global.cores) {
+      if (core.core_id == 0) continue;
       pthread_join(core.pthread, nullptr);
    }
    global.reset();
@@ -372,24 +408,28 @@ void cortos_port_start_cores(size_t cores_to_use, cortos_port_core_entry_t entry
 
 extern "C" uint32_t cortos_port_get_core_id(void)
 {
-   return current_core.core_id;
+   // If no cores have been explicitly launched yet, then we must be on Core0
+   if (!global.cores_launched()) return 0;
+
+   CORTOS_ASSERT(current_core.core != nullptr);
+   return current_core.core->core_id;
 }
 
 extern "C" void cortos_port_send_reschedule_ipi(uint32_t core_id)
 {
-   CORTOS_ASSERT_OP(core_id, <, global.core_view.size());
+   CORTOS_ASSERT_OP(core_id, <, global.cores.size());
 
-   auto& core_poker = global.core_view[core_id].core_poke;
+   auto& core_poke = global.cores[core_id].core_poke;
 
    // Set the pending bit first (release) so the woken core sees it.
-   core_poker.pending.store(true, std::memory_order_release);
+   core_poke.pending.store(true, std::memory_order_release);
 
    // Wake the core if it is blocked in idle().
-   pthread_mutex_lock(&core_poker.mutex);
-   pthread_cond_signal(&core_poker.cond_var);
-   pthread_mutex_unlock(&core_poker.mutex);
+   pthread_mutex_lock(&core_poke.mutex);
+   pthread_cond_signal(&core_poke.cond_var);
+   pthread_mutex_unlock(&core_poke.mutex);
 
-   if (core_id == current_core.core_id && current_core.current_context) {
+   if (core_id == current_core.core->core_id && current_core.current_context) {
       cortos_port_pend_reschedule();
    }
 }
@@ -503,22 +543,22 @@ extern "C" void cortos_port_cpu_relax(void)
 
 extern "C" void cortos_port_idle(void)
 {
-   std::printf("(CORE %d) cortos_port_idle()\n", current_core.core_id);
-   auto& core_poker = global.core_view[current_core.core_id].core_poke;
+   std::printf("(CORE %d) cortos_port_idle()\n", current_core.core->core_id);
+   auto& core_poke = global.cores[current_core.core->core_id].core_poke;
 
    // Fast path: don’t sleep if already pending.
-   if (core_poker.pending.exchange(false, std::memory_order_acq_rel)) {
+   if (core_poke.pending.exchange(false, std::memory_order_acq_rel)) {
       return;
    }
 
-   pthread_mutex_lock(&core_poker.mutex);
+   pthread_mutex_lock(&core_poke.mutex);
 
    // Re-check under lock (avoids missed wake if signal happens between fast-path and lock)
-   while (!core_poker.pending.exchange(false, std::memory_order_acq_rel)) {
-      pthread_cond_wait(&core_poker.cond_var, &core_poker.mutex);
+   while (!core_poke.pending.exchange(false, std::memory_order_acq_rel)) {
+      pthread_cond_wait(&core_poke.cond_var, &core_poke.mutex);
    }
 
-   pthread_mutex_unlock(&core_poker.mutex);
+   pthread_mutex_unlock(&core_poke.mutex);
 }
 
 /* ============================================================================
