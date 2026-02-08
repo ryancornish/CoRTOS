@@ -1,29 +1,34 @@
-# Kernel unit tests
+set(DEFAULT_CONFIG_DIR ${CMAKE_SOURCE_DIR}/config/include)
+set(SINGLECORE_CONFIG_DIR ${CMAKE_CURRENT_SOURCE_DIR}/singlecore_config/include)
+set(MULTICORE_CONFIG_DIR  ${CMAKE_CURRENT_SOURCE_DIR}/multicore_config/include)
 
-# 1. Function tests (type-erased callable)
-# Uses default config automatically via the helper function
-add_cortos_gtest(test_function test_function.cpp)
-
-# 2. Single-core Single-threading (Specialised Config)
-add_cortos_gtest_no_main(test_singlecore_singlethreading test_singlecore_singlethreading.cpp)
-target_include_directories(test_singlecore_singlethreading BEFORE PRIVATE
-   ${CMAKE_CURRENT_SOURCE_DIR}/singlecore_config/include
+# 1. Function tests (default config)
+add_cortos_gtest_with_config(
+   test_function
+   ${CMAKE_CURRENT_SOURCE_DIR}/test_function.cpp
+   ${DEFAULT_CONFIG_DIR}
 )
 
-# 3. Single-core Multi-threading (Specialised Config)
-add_cortos_gtest_no_main(test_singlecore_multithreading test_singlecore_multithreading.cpp)
-target_include_directories(test_singlecore_multithreading BEFORE PRIVATE
-   ${CMAKE_CURRENT_SOURCE_DIR}/singlecore_config/include
+# 2. Single-core Single-threading (override config)
+add_cortos_gtest_with_config(
+   test_singlecore_singlethreading
+   ${CMAKE_CURRENT_SOURCE_DIR}/test_singlecore_singlethreading.cpp
+   ${SINGLECORE_CONFIG_DIR}
+   NO_MAIN
 )
 
-# 4. Multi-core Multi-threading (Uses Default Config)
-add_cortos_gtest_no_main(test_multicore_multithreading test_multicore_multithreading.cpp)
-target_include_directories(test_multicore_multithreading BEFORE PRIVATE
-   ${CMAKE_CURRENT_SOURCE_DIR}/multicore_config/include
+# 3. Single-core Multi-threading (override config)
+add_cortos_gtest_with_config(
+   test_singlecore_multithreading
+   ${CMAKE_CURRENT_SOURCE_DIR}/test_singlecore_multithreading.cpp
+   ${SINGLECORE_CONFIG_DIR}
+   NO_MAIN
 )
 
-# Spinlock tests
-# add_cortos_gtest(test_spinlock test_spinlock.cpp)
-# target_link_libraries(test_spinlock PRIVATE
-#    Threads::Threads  # Still needed for host-side threading tests
-# )
+# 4. Multi-core Multi-threading (override config)
+add_cortos_gtest_with_config(
+   test_multicore_multithreading
+   ${CMAKE_CURRENT_SOURCE_DIR}/test_multicore_multithreading.cpp
+   ${MULTICORE_CONFIG_DIR}
+   NO_MAIN
+)

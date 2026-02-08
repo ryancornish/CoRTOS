@@ -9,34 +9,25 @@ project(CoRTOS
 # Export compile commands for clangd/IDE support
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-# C++23 required
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-# Compiler warnings
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra -Wpedantic -Werror -Wno-unused-parameter")
-
-# Build options
 option(CORTOS_BUILD_TESTS "Build tests" ON)
 option(CORTOS_BUILD_EXAMPLES "Build examples" ON)
 option(CORTOS_ENABLE_ASSERTIONS "Enable runtime assertions" ON)
 
-# CMake modules
 include(cmake/CodeCoverage.cmake)
 
-# Port selection
 set(CORTOS_PORT "linux_boost" CACHE STRING "Port to build (linux_boost, cortex-m, riscv)")
 set_property(CACHE CORTOS_PORT PROPERTY STRINGS linux_boost cortex-m riscv)
 
-# Public include directories (visible to all targets)
-include_directories(
-   ${CMAKE_SOURCE_DIR}/kernel/include
-   ${CMAKE_SOURCE_DIR}/time/include
-   ${CMAKE_SOURCE_DIR}/port/include
-   ${CMAKE_SOURCE_DIR}/libcortos/include
+add_library(cortos_warnings INTERFACE)
+target_compile_options(cortos_warnings INTERFACE
+  $<$<COMPILE_LANGUAGE:CXX>:-Wall;-Wextra;-Wpedantic;-Werror;-Wno-unused-parameter>
 )
 
+# ---- config (default) is header-only, provided by target
 add_subdirectory(config)
 
 # Build port layer (must provide cortos::port target)
@@ -45,23 +36,20 @@ add_subdirectory(port/${CORTOS_PORT})
 # Build time driver
 add_subdirectory(time)
 
-# Build kernel
+# Build kernel (object lib template + default compiled lib)
 add_subdirectory(kernel)
 
-# Build libcortos (standard library)
+# Build libcortos
 add_subdirectory(libcortos)
 
-# Tests (with Google Test)
 if(CORTOS_BUILD_TESTS)
-   add_subdirectory(external/googletest)
-   enable_testing()
-   add_subdirectory(tests)
+  add_subdirectory(external/googletest)
+  enable_testing()
+  add_subdirectory(tests)
 endif()
 
-# Examples
 if(CORTOS_BUILD_EXAMPLES)
-   add_subdirectory(examples)
+  add_subdirectory(examples)
 endif()
 
-# Coverage make
 setup_coverage()
