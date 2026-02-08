@@ -240,6 +240,15 @@ struct TaskControlBlock
    [[nodiscard]] constexpr auto*       context()       noexcept { return reinterpret_cast<cortos_port_context_t*      >(context_storage.data()); }
    [[nodiscard]] constexpr auto const* context() const noexcept { return reinterpret_cast<cortos_port_context_t const*>(context_storage.data()); }
 
+   [[nodiscard]] constexpr bool is_higher_priority_than(TaskControlBlock& rhs)  const noexcept
+   {
+      return effective_priority < rhs.effective_priority;
+   }
+   [[nodiscard]] constexpr bool is_higher_priority_than(uint8_t priority_level) const noexcept
+   {
+      return effective_priority < priority_level;
+   }
+
    TaskControlBlock(uint32_t id, Thread::Priority priority, CoreAffinity affinity, std::span<std::byte> stack, Thread::EntryFn&& entry) :
       id(id), base_priority(priority), effective_priority(priority), affinity(affinity), stack(stack), entry(std::move(entry))
    {
@@ -354,8 +363,8 @@ struct StackLayout
 
 
 // Waitable stuff
-void Waitable::on_thread_blocked(Thread*) {}
-void Waitable::on_thread_removed(Thread*) {}
+void Waitable::on_thread_blocked(Waiter) {}
+void Waitable::on_thread_removed(Waiter) {}
 
 [[nodiscard]] bool Waitable::empty() const noexcept
 {
@@ -829,8 +838,8 @@ public:
       auto this_core = cortos_port_get_core_id();
       if (this_core == chosen_core) {
          scheduler.set_task_ready(tcb);
-         // We may need to preempt the current task with the newly added task
-         if (tcb.effective_priority < scheduler.current_task_priority()) {
+         // We may need to pre-empt the current task with the newly added task
+         if (tcb.is_higher_priority_than(scheduler.current_task_priority())) {
            cortos_port_pend_reschedule();
          }
          return;
@@ -978,7 +987,7 @@ namespace kernel
       CORTOS_ASSERT(waitables.size() > 0);
       CORTOS_ASSERT_OP(waitables.size(), <=, config::MAX_WAIT_NODES);
 
-      // auto* tcb = scheduler_current_tcb();
+      //auto* tcb = KERNEL.scheduler_for_this_core();
       // return tcb->block_on(waitables);
 
       return {}; // TODO

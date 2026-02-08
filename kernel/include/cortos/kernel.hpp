@@ -268,6 +268,133 @@ Function<Ret(Args...), InlineSize, Policy>::VTableImpl<F, Heap>::table{
    .destroy = &VTableImpl::destroy
 };
 
+
+/**
+ * @brief Core affinity mask
+ *
+ * Bit flags indicating which cores a thread can run on.
+ * Use bitwise OR to combine cores: Core0 | Core1
+ */
+struct CoreAffinity
+{
+   std::uint32_t mask;
+   constexpr explicit CoreAffinity(std::uint32_t m) : mask(m) {}
+   constexpr explicit operator std::uint32_t() const { return mask; }
+   constexpr CoreAffinity operator|(CoreAffinity rhs) const { return CoreAffinity{mask | rhs.mask}; }
+   constexpr CoreAffinity operator&(CoreAffinity rhs) const { return CoreAffinity{mask & rhs.mask}; }
+   [[nodiscard]] constexpr bool allows(uint32_t core_id) const noexcept { return (mask & (1u << core_id)) != 0; }
+   [[nodiscard]] constexpr static CoreAffinity from_id(std::uint32_t core_id) { return CoreAffinity{1u << core_id}; }
+};
+// Predefined core masks
+static constexpr CoreAffinity Core0 = CoreAffinity{0x01};
+static constexpr CoreAffinity Core1 = CoreAffinity{0x02};
+static constexpr CoreAffinity Core2 = CoreAffinity{0x04};
+static constexpr CoreAffinity Core3 = CoreAffinity{0x08};
+static constexpr CoreAffinity AnyCore = CoreAffinity{0xFFFFFFFF};
+
+
+/**
+ * @brief Joinable CoRTOS thread handle.
+ *
+ * Owns a running kernel task. The task's TCB is constructed inside the user-provided
+ * stack buffer, so both the @c Thread object and the stack buffer must outlive the task.
+ *
+ * The destructor asserts the thread is terminated (i.e. no implicit detach).
+ */
+class Thread
+{
+public:
+   using Id = std::uint32_t;
+   using EntryFn = Function<void(), 32, HeapPolicy::NoHeap>;
+
+   struct Priority
+   {
+      std::uint8_t val;
+      constexpr Priority(std::uint8_t v) : val(v) {}     // Intentionally implicit
+      constexpr operator uint8_t() const { return val; } // Intentionally implicit
+   };
+
+
+   /**
+    * @brief Create empty thread handle.
+    * A registered Thread can be moved into this.
+    */
+   constexpr Thread() = default;
+   /**
+    * @brief Create and register a new thread.
+    * @param entry Thread entry function.
+    * @param stack User-owned stack buffer (must remain valid until termination).
+    * @param priority Initial priority.
+    * @param affinity Core affinity (defaults to AnyCore).
+    */
+   Thread(EntryFn&& entry, std::span<std::byte> stack, Priority priority, CoreAffinity affinity = AnyCore);
+   ~Thread();
+   Thread(Thread&&) noexcept;
+   Thread& operator=(Thread&&) noexcept;
+   Thread(Thread const&)            = delete;
+   Thread& operator=(Thread const&) = delete;
+
+   /**
+    * @brief Get thread ID
+    * @return Unique thread identifier
+    */
+   [[nodiscard]] Id get_id() const noexcept;
+
+   /**
+    * @brief Get thread priority
+    * @return Current effective priority (base + inherited)
+    */
+   [[nodiscard]] Priority priority() const noexcept;
+
+   /**
+    * @brief Wait for thread to exit
+    *
+    * Blocks until this thread terminates.
+    * Can only be called once per thread.
+    */
+   void join();
+
+
+   static std::size_t reserved_stack_size();
+
+private:
+   struct TaskControlBlock* tcb{nullptr};
+};
+
+/**
+ * @brief Snapshot of a thread that is waiting on a @c Waitable
+ *
+ * Waiter is a lightweight, read-only snapshot describing a thread at the moment
+ * it blocks on (or is removed from) a @c Waitable. It is passed by value to @c Waitable
+ * hooks such as @c on_thread_blocked() and @c on_thread_removed().
+ *
+ * This type is intentionally inert:
+ * - It does not own the thread
+ * - It cannot be used to control or manipulate scheduling
+ * - It contains no kernel-calling methods
+ *
+ * A Waiter is only guaranteed to reflect the thread state at the time the hook
+ * was invoked. It may safely be copied or stored for diagnostic or bookkeeping
+ * purposes, but must not be treated as a live handle.
+ */
+struct Waiter
+{
+   Thread::Id       id;                  ///< Unique thread identifier
+   Thread::Priority base_priority;       ///< Thread's base (static) priority
+   Thread::Priority effective_priority;  ///< Thread's effective priority at snapshot time
+   std::uint32_t    pinned_core;         ///< Core the thread is pinned to
+   CoreAffinity     affinity;            ///< Core affinity mask
+
+   /**
+    * @brief Compare priority against another waiter
+    * @return true if this waiter has higher scheduling priority than rhs
+    */
+   [[nodiscard]] constexpr bool higher_priority_than(Waiter const& rhs) const noexcept
+   {
+      return effective_priority.val < rhs.effective_priority.val;
+   }
+};
+
 /**
  * @brief Base class for objects that can block threads
  *
@@ -298,7 +425,7 @@ public:
     */
    struct Result
    {
-      int  index{-1};     ///< Index of waitable that triggered (-1 if none)
+      int  index{-1};       ///< Index of waitable that triggered (-1 if none)
       bool acquired{false}; ///< True if resource was acquired (e.g., mutex locked)
    };
 
@@ -349,7 +476,7 @@ protected:
     * Override to implement custom behavior (e.g., priority inheritance).
     * Called before thread is added to wait queue.
     */
-   virtual void on_thread_blocked(class Thread* thread);
+   virtual void on_thread_blocked(Waiter waiter);
 
    /**
     * @brief Called when a thread is removed from wait queue
@@ -358,7 +485,7 @@ protected:
     * Override to implement cleanup (e.g., clear inherited priority).
     * Called after thread is removed from wait queue.
     */
-   virtual void on_thread_removed(class Thread* thread);
+   virtual void on_thread_removed(Waiter waiter);
 
    /**
     * @brief Iterate over all waiting threads
@@ -466,98 +593,6 @@ namespace kernel
 
 }  // namespace kernel
 
-
-/**
- * @brief Core affinity mask
- *
- * Bit flags indicating which cores a thread can run on.
- * Use bitwise OR to combine cores: Core0 | Core1
- */
-struct CoreAffinity
-{
-   std::uint32_t mask;
-   constexpr explicit CoreAffinity(std::uint32_t m) : mask(m) {}
-   constexpr explicit operator std::uint32_t() const { return mask; }
-   constexpr CoreAffinity operator|(CoreAffinity rhs) const { return CoreAffinity{mask | rhs.mask}; }
-   constexpr CoreAffinity operator&(CoreAffinity rhs) const { return CoreAffinity{mask & rhs.mask}; }
-   [[nodiscard]] constexpr bool allows(uint32_t core_id) const noexcept { return (mask & (1u << core_id)) != 0; }
-   [[nodiscard]] constexpr static CoreAffinity from_id(std::uint32_t core_id) { return CoreAffinity{1u << core_id}; }
-};
-// Predefined core masks
-static constexpr CoreAffinity Core0 = CoreAffinity{0x01};
-static constexpr CoreAffinity Core1 = CoreAffinity{0x02};
-static constexpr CoreAffinity Core2 = CoreAffinity{0x04};
-static constexpr CoreAffinity Core3 = CoreAffinity{0x08};
-static constexpr CoreAffinity AnyCore = CoreAffinity{0xFFFFFFFF};
-
-
-/**
- * @brief Joinable CoRTOS thread handle.
- *
- * Owns a running kernel task. The task's TCB is constructed inside the user-provided
- * stack buffer, so both the @c Thread object and the stack buffer must outlive the task.
- *
- * The destructor asserts the thread is terminated (i.e. no implicit detach).
- */
-class Thread
-{
-public:
-   using Id = std::uint32_t;
-   using EntryFn = Function<void(), 32, HeapPolicy::NoHeap>;
-
-   struct Priority
-   {
-      std::uint8_t val;
-      constexpr Priority(std::uint8_t v) : val(v) {}     // Intentionally implicit
-      constexpr operator uint8_t() const { return val; } // Intentionally implicit
-   };
-
-
-   /**
-    * @brief Create empty thread handle.
-    * A registered Thread can be moved into this.
-    */
-   constexpr Thread() = default;
-   /**
-    * @brief Create and register a new thread.
-    * @param entry Thread entry function.
-    * @param stack User-owned stack buffer (must remain valid until termination).
-    * @param priority Initial priority.
-    * @param affinity Core affinity (defaults to AnyCore).
-    */
-   Thread(EntryFn&& entry, std::span<std::byte> stack, Priority priority, CoreAffinity affinity = AnyCore);
-   ~Thread();
-   Thread(Thread&&) noexcept;
-   Thread& operator=(Thread&&) noexcept;
-   Thread(Thread const&)            = delete;
-   Thread& operator=(Thread const&) = delete;
-
-   /**
-    * @brief Get thread ID
-    * @return Unique thread identifier
-    */
-   [[nodiscard]] Id get_id() const noexcept;
-
-   /**
-    * @brief Get thread priority
-    * @return Current effective priority (base + inherited)
-    */
-   [[nodiscard]] Priority priority() const noexcept;
-
-   /**
-    * @brief Wait for thread to exit
-    *
-    * Blocks until this thread terminates.
-    * Can only be called once per thread.
-    */
-   void join();
-
-
-   static std::size_t reserved_stack_size();
-
-private:
-   struct TaskControlBlock* tcb{nullptr};
-};
 
 namespace this_thread
 {
