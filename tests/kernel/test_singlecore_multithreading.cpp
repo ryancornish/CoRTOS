@@ -38,7 +38,7 @@ struct ThreadSafeLog
 
 
 TEST(SingleCoreMultiThread_Test,
-     GivenSingleCoreAndTwoEqualPriorityThreads_WhenSystemStarts_ThenThreadsExecuteInRegistrationOrder)
+     GivenTwoEqualPriorityThreads_WhenSystemStarts_ThenThreadsExecuteInRegistrationOrder)
 {
    alignas(CORTOS_PORT_STACK_ALIGN) static std::array<std::byte, 16 * 1024> stack1{};
    alignas(CORTOS_PORT_STACK_ALIGN) static std::array<std::byte, 16 * 1024> stack2{};
@@ -63,7 +63,7 @@ TEST(SingleCoreMultiThread_Test,
 }
 
 TEST(SingleCoreMultiThread_Test,
-     GivenSingleCoreAndTwoEqualPriorityThreads_WhenEachYields_ThenTheyCooperativelyProgressAlternating)
+     GivenTwoEqualPriorityThreads_WhenEachYields_ThenTheyCooperativelyProgressAlternating)
 {
    alignas(CORTOS_PORT_STACK_ALIGN) static std::array<std::byte, 16 * 1024> stack1{};
    alignas(CORTOS_PORT_STACK_ALIGN) static std::array<std::byte, 16 * 1024> stack2{};
@@ -102,7 +102,7 @@ TEST(SingleCoreMultiThread_Test,
 
 
 TEST(SingleCoreMultiThread_Test,
-     GivenSingleCoreAndTwoDifferentPriorities_WhenSystemStarts_ThenHigherPriorityRunsFirstEvenIfRegisteredSecond)
+     GivenTwoDifferentPriorities_WhenSystemStarts_ThenHigherPriorityRunsFirstEvenIfRegisteredSecond)
 {
    alignas(CORTOS_PORT_STACK_ALIGN) static std::array<std::byte, 16 * 1024> stack_lo{};
    alignas(CORTOS_PORT_STACK_ALIGN) static std::array<std::byte, 16 * 1024> stack_hi{};
@@ -127,7 +127,7 @@ TEST(SingleCoreMultiThread_Test,
 }
 
 TEST(SingleCoreMultiThread_Test,
-     GivenSingleCoreAndThreeEqualPriorityThreads_WhenTheyYield_ThenTheyRoundRobinInRegistrationOrder)
+     GivenThreeEqualPriorityThreads_WhenTheyYield_ThenTheyRoundRobinInRegistrationOrder)
 {
    alignas(CORTOS_PORT_STACK_ALIGN) static std::array<std::byte, 16 * 1024> s1{};
    alignas(CORTOS_PORT_STACK_ALIGN) static std::array<std::byte, 16 * 1024> s2{};
@@ -169,7 +169,7 @@ TEST(SingleCoreMultiThread_Test,
 }
 
 TEST(SingleCoreMultiThread_Test,
-     GivenSingleCoreAndTwoThreads_WhenOneNeverYields_ThenOtherDoesNotRunUntilFirstReturns)
+     GivenTwoThreads_WhenOneNeverYields_ThenOtherDoesNotRunUntilFirstReturns)
 {
    alignas(CORTOS_PORT_STACK_ALIGN) static std::array<std::byte, 16 * 1024> s1{};
    alignas(CORTOS_PORT_STACK_ALIGN) static std::array<std::byte, 16 * 1024> s2{};
@@ -207,3 +207,243 @@ TEST(SingleCoreMultiThread_Test,
 
    kernel::finalise();
 }
+
+TEST(SingleCoreMultiThread_Test,
+     GivenThirtyEqualPriorityThreads_WhenSystemStarts_ThenThreadsObeyRoundRobinRules)
+{
+   alignas(CORTOS_PORT_STACK_ALIGN) static std::array<std::array<std::byte, 16 * 1024>, 30> stacks{};
+
+
+   std::vector<Thread> threads;
+   threads.reserve(stacks.size());
+   std::vector<uint32_t> markers;
+
+   kernel::initialise();
+
+   for (auto& stack : stacks) {
+      threads.emplace_back(
+      [&]{
+         markers.push_back(this_thread::id());
+         this_thread::yield();
+         markers.push_back(this_thread::id());
+      },
+      stack, Thread::Priority(0), Core0);
+   }
+
+   kernel::start();
+
+   ASSERT_EQ(markers.size(), 30u * 2);
+
+   auto expected_order = std::to_array<uint32_t>({
+      1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30,
+      1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30,
+   });
+
+   for (unsigned i = 0; i < markers.size(); ++i) {
+      EXPECT_EQ(markers[i], expected_order[i]);
+   }
+
+   kernel::finalise();
+}
+
+
+TEST(SingleCoreMultiThread_Test,
+     GivenThirtyDifferentPriorityThreads_WhenSystemStarts_ThenThreadsExecuteInPriorityOrder)
+{
+   alignas(CORTOS_PORT_STACK_ALIGN) static std::array<std::array<std::byte, 16 * 1024>, 30> stacks{};
+
+
+   std::vector<Thread> threads;
+   threads.reserve(stacks.size());
+   std::vector<uint32_t> markers;
+
+   kernel::initialise();
+
+   for (unsigned prio = 29; auto& stack : stacks) {
+      threads.emplace_back(
+      [&]{
+         markers.push_back(this_thread::id());
+         this_thread::yield(); // Should reenqueue same task leading to double number pushback
+         markers.push_back(this_thread::id());
+      },
+      stack, Thread::Priority(prio--), Core0);
+   }
+
+   kernel::start();
+
+   ASSERT_EQ(markers.size(), 30u * 2);
+
+   auto expected_order = std::to_array<uint32_t>({
+      30, 30, 29, 29, 28, 28, 27, 27, 26, 26, 25, 25, 24, 24, 23, 23, 22, 22, 21, 21, 20, 20, 19, 19, 18, 18, 17, 17, 16, 16,
+      15, 15, 14, 14, 13, 13, 12, 12, 11, 11, 10, 10, 9, 9, 8, 8, 7, 7, 6, 6, 5, 5, 4, 4, 3, 3, 2, 2, 1, 1,
+   });
+
+   for (unsigned i = 0; i < markers.size(); ++i) {
+      EXPECT_EQ(markers[i], expected_order[i]);
+   }
+
+   kernel::finalise();
+}
+
+
+TEST(SingleCoreMultiThread_Test,
+    GivenSingleThread_WhenThreadCreatesAnotherThreadOfHigherPriority_ThenThreadIsImmediatelyPreempted)
+{
+   alignas(CORTOS_PORT_STACK_ALIGN) static std::array<std::byte, 16 * 1024> s_creator{};
+   alignas(CORTOS_PORT_STACK_ALIGN) static std::array<std::byte, 16 * 1024> s_child{};
+
+   Thread child_thread;
+
+   std::vector<int> marker;
+
+   // GIVEN:
+
+   kernel::initialise();
+
+   Thread creator(
+      [&]{
+         marker.push_back(10); // 10 is the priority of the creator thread and marks when it ran
+
+         child_thread = Thread(
+            [&]{
+               marker.push_back(9);
+            },
+            s_child,
+            Thread::Priority(9),
+            Core0
+         );
+
+         marker.push_back(10);
+      },
+      s_creator,
+      Thread::Priority(10),
+      Core0
+   );
+
+   // Only one thread should be registered (creator) as child_thread handle is empty
+   EXPECT_EQ(kernel::active_threads(), 1u);
+
+   // WHEN:
+
+   kernel::start();
+
+   // THEN:
+
+   ASSERT_EQ(marker.size(), 3u);
+   EXPECT_EQ(marker[0], 10u);
+   EXPECT_EQ(marker[1], 9u)
+      << "creator_thread was not preempted by just-created child_thread";
+   EXPECT_EQ(marker[2], 10u);
+
+   kernel::finalise();
+}
+
+TEST(SingleCoreMultiThread_Test,
+    GivenSingleThread_WhenThreadCreatesAnotherThreadOfLowerPriority_ThenCreatedThreadDoesNotRunUntilFirstThreadFinishes)
+{
+   alignas(CORTOS_PORT_STACK_ALIGN) static std::array<std::byte, 16 * 1024> s_creator{};
+   alignas(CORTOS_PORT_STACK_ALIGN) static std::array<std::byte, 16 * 1024> s_child{};
+
+   Thread child_thread;
+
+   std::vector<int> marker;
+
+   // GIVEN:
+
+   kernel::initialise();
+
+   Thread creator(
+      [&]{
+         marker.push_back(10); // 10 is the priority of the creator thread and marks when it ran
+
+         child_thread = Thread(
+            [&]{
+               marker.push_back(11);
+            },
+            s_child,
+            Thread::Priority(11),
+            Core0
+         );
+
+         marker.push_back(10);
+      },
+      s_creator,
+      Thread::Priority(10),
+      Core0
+   );
+
+   // Only one thread should be registered (creator) as child_thread handle is empty
+   EXPECT_EQ(kernel::active_threads(), 1u);
+
+   // WHEN:
+
+   kernel::start();
+
+   // THEN:
+
+   ASSERT_EQ(marker.size(), 3u);
+   EXPECT_EQ(marker[0], 10u);
+   EXPECT_EQ(marker[1], 10u)
+      << "creator_thread was wrongfully preempted by just-created child_thread";
+   EXPECT_EQ(marker[2], 11u);
+
+   kernel::finalise();
+}
+
+TEST(SingleCoreMultiThread_Test,
+    GivenSingleThread_WhenThreadCreatesAnotherThreadOfEqualPriority_ThenCreatedThreadDoesNotRunUntilFirstThreadYields)
+{
+   alignas(CORTOS_PORT_STACK_ALIGN) static std::array<std::byte, 16 * 1024> s_creator{};
+   alignas(CORTOS_PORT_STACK_ALIGN) static std::array<std::byte, 16 * 1024> s_child{};
+
+   Thread child_thread;
+
+   std::vector<uint32_t> marker;
+
+   // GIVEN:
+
+   kernel::initialise();
+
+   Thread creator(
+      [&]{
+         marker.push_back(this_thread::id());
+
+         child_thread = Thread(
+            [&]{
+               marker.push_back(this_thread::id());
+               this_thread::yield();
+               marker.push_back(this_thread::id());
+            },
+            s_child,
+            Thread::Priority(10),
+            Core0
+         );
+
+         marker.push_back(this_thread::id());
+         this_thread::yield();
+         marker.push_back(this_thread::id());
+      },
+      s_creator,
+      Thread::Priority(10),
+      Core0
+   );
+
+   // Only one thread should be registered (creator) as child_thread handle is empty
+   EXPECT_EQ(kernel::active_threads(), 1u);
+
+   // WHEN:
+
+   kernel::start();
+
+   // THEN:
+
+   ASSERT_EQ(marker.size(), 5u);
+   EXPECT_EQ(marker[0], 1u);
+   EXPECT_EQ(marker[1], 1u);
+   EXPECT_EQ(marker[2], 2u);
+   EXPECT_EQ(marker[3], 1u);
+   EXPECT_EQ(marker[4], 2u);
+
+   kernel::finalise();
+}
+

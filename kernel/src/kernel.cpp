@@ -829,6 +829,10 @@ public:
       auto this_core = cortos_port_get_core_id();
       if (this_core == chosen_core) {
          scheduler.set_task_ready(tcb);
+         // We may need to preempt the current task with the newly added task
+         if (tcb.effective_priority < scheduler.current_task_priority()) {
+           cortos_port_pend_reschedule();
+         }
          return;
       }
 
