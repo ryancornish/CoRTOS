@@ -32,3 +32,11 @@ add_cortos_gtest_with_config(
    ${MULTICORE_CONFIG_DIR}
    NO_MAIN
 )
+
+# 5. Single-core Waitables (override config)
+add_cortos_gtest_with_config(
+   test_singlecore_waitables
+   ${CMAKE_CURRENT_SOURCE_DIR}/test_singlecore_waitables.cpp
+   ${SINGLECORE_CONFIG_DIR}
+   NO_MAIN
+)

@@ -426,8 +426,7 @@ public:
    };
    static_assert(std::is_trivially_copyable_v<Waitable::Waiter>, "Waitable::Waiter must be trivially copyable");
 
-   Waitable();
-   virtual ~Waitable();
+   virtual ~Waitable() = default;
 
    Waitable(Waitable const&)            = delete;
    Waitable& operator=(Waitable const&) = delete;
@@ -466,6 +465,9 @@ public:
    void signal_all(bool acquired = true) noexcept;
 
 protected:
+   // Abstract Base Class
+   Waitable() = default;
+
    /**
     * @brief Called when a thread blocks on this waitable
     * @param waiter Details of the blocking thread
@@ -507,8 +509,8 @@ protected:
 private:
    friend struct TaskControlBlock;
 
-   struct WaitNode* head;
-   struct WaitNode* tail;
+   struct WaitNode* head{nullptr};
+   struct WaitNode* tail{nullptr};
 
    void add(WaitNode& wait_node) noexcept;
    void remove(WaitNode& wait_node) noexcept;
