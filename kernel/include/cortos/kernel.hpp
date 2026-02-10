@@ -361,39 +361,6 @@ private:
    struct TaskControlBlock* tcb{nullptr};
 };
 
-/**
- * @brief Snapshot of a thread that is waiting on a @c Waitable
- *
- * Waiter is a lightweight, read-only snapshot describing a thread at the moment
- * it blocks on (or is removed from) a @c Waitable. It is passed by value to @c Waitable
- * hooks such as @c on_thread_blocked() and @c on_thread_removed().
- *
- * This type is intentionally inert:
- * - It does not own the thread
- * - It cannot be used to control or manipulate scheduling
- * - It contains no kernel-calling methods
- *
- * A Waiter is only guaranteed to reflect the thread state at the time the hook
- * was invoked. It may safely be copied or stored for diagnostic or bookkeeping
- * purposes, but must not be treated as a live handle.
- */
-struct Waiter
-{
-   Thread::Id       id;                  ///< Unique thread identifier
-   Thread::Priority base_priority;       ///< Thread's base (static) priority
-   Thread::Priority effective_priority;  ///< Thread's effective priority at snapshot time
-   std::uint32_t    pinned_core;         ///< Core the thread is pinned to
-   CoreAffinity     affinity;            ///< Core affinity mask
-
-   /**
-    * @brief Compare priority against another waiter
-    * @return true if this waiter has higher scheduling priority than rhs
-    */
-   [[nodiscard]] constexpr bool higher_priority_than(Waiter const& rhs) const noexcept
-   {
-      return effective_priority.val < rhs.effective_priority.val;
-   }
-};
 
 /**
  * @brief Base class for objects that can block threads
@@ -421,13 +388,43 @@ class Waitable
 {
 public:
    /**
-    * @brief Result of a wait operation
-    */
+   * @brief Result of a wait operation
+   *
+   * Returned from `wait_for()` and `wait_for_any()` to indicate which `Waitable`
+   * triggered the wake-up and whether the thread acquired a resource.
+   */
    struct Result
    {
       int  index{-1};       ///< Index of waitable that triggered (-1 if none)
       bool acquired{false}; ///< True if resource was acquired (e.g., mutex locked)
    };
+   static_assert(std::is_trivially_copyable_v<Waitable::Result>, "Waitable::Result must be trivially copyable");
+
+   /**
+   * @brief Snapshot of a thread waiting on a Waitable
+   *
+   * Waiter is a lightweight, read-only snapshot of a thread at the moment it
+   * blocks on or is removed from a Waitable. It contains no ownership or control
+   * semantics and is safe to copy and store.
+   */
+   struct Waiter
+   {
+      Thread::Id       id;                  ///< Unique thread identifier
+      Thread::Priority base_priority;       ///< Thread's base (static) priority
+      Thread::Priority effective_priority;  ///< Thread's effective priority at snapshot time
+      std::uint32_t    pinned_core;         ///< Core the thread is pinned to
+      CoreAffinity     affinity;            ///< Core affinity mask
+
+      /**
+      * @brief Compare priority against another waiter
+      * @return true if this waiter has higher scheduling priority than rhs
+      */
+      [[nodiscard]] constexpr bool higher_priority_than(Waiter const& rhs) const noexcept
+      {
+         return effective_priority.val < rhs.effective_priority.val;
+      }
+   };
+   static_assert(std::is_trivially_copyable_v<Waitable::Waiter>, "Waitable::Waiter must be trivially copyable");
 
    Waitable();
    virtual ~Waitable();
@@ -471,38 +468,41 @@ public:
 protected:
    /**
     * @brief Called when a thread blocks on this waitable
-    * @param thread Thread that is blocking
+    * @param waiter Details of the blocking thread
     *
     * Override to implement custom behavior (e.g., priority inheritance).
     * Called before thread is added to wait queue.
+    * @note no-op when not overridden
     */
-   virtual void on_thread_blocked(Waiter waiter);
+   virtual void on_thread_blocked(Waiter waiter) {}
 
    /**
     * @brief Called when a thread is removed from wait queue
-    * @param thread Thread being removed (woken or cancelled)
+    * @param waiter Details of the thread being removed (woken or cancelled)
     *
     * Override to implement cleanup (e.g., clear inherited priority).
     * Called after thread is removed from wait queue.
+    * @note no-op when not overridden
     */
-   virtual void on_thread_removed(Waiter waiter);
+   virtual void on_thread_removed(Waiter waiter) {}
 
+   using WaiterVisitor = Function<void(Waiter const&), 64, HeapPolicy::NoHeap>;
    /**
-    * @brief Iterate over all waiting threads
-    * @tparam Fn Callable: void(Thread*)
+    * @brief Visit each thread currently waiting on this Waitable
     *
-    * Useful for priority inheritance - find max priority of all waiters.
+    * Calls @p visitor once per waiter with a snapshot taken during traversal.
+    * @warning The visitor must not block.
     *
     * Example:
-    *   Priority max_priority = Priority{0};
-    *   for_each_waiter([&](Thread* t) {
-    *      if (t->priority() > max_priority) {
-    *         max_priority = t->priority();
-    *      }
-    *   });
+    * @code
+    * Priority max_priority = Priority{0};
+    * for_each_waiter([&](Waiter w) {
+    *    if (w.effective_priority > max_priority) {
+    *       max_priority = w.effective_priority;
+    *    }
+    * });
     */
-   template<typename Fn>
-   void for_each_waiter(Fn&& fn);
+   void for_each_waiter(WaiterVisitor visitor) const;
 
 private:
    friend struct TaskControlBlock;

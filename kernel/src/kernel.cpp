@@ -39,6 +39,17 @@ static constexpr std::uintptr_t   align_up(std::uintptr_t v, std::size_t a) { re
 struct TaskControlBlock;
 struct WaitGroup;
 
+
+/**
+ * @brief Intrusive wait-queue node for a thread waiting on a Waitable
+ *
+ * A WaitNode represents a single thread's participation in a wait operation
+ * on a specific Waitable. Nodes are allocated from a per-thread pool and are
+ * linked into a Waitable's wait queue for the duration of the wait.
+ *
+ * Each wait_for_any() call creates one WaitNode per Waitable involved.
+ * Nodes are removed and returned to the pool when the wait completes.
+ */
 struct WaitNode
 {
    static constexpr uint8_t INVALID_INDEX = std::numeric_limits<uint8_t>::max();
@@ -69,6 +80,16 @@ struct WaitNode
    }
 };
 
+/**
+ * @brief Per-thread pool of WaitNode objects
+ *
+ * Each thread owns a fixed-capacity pool of WaitNodes used to represent
+ * active wait operations. This avoids dynamic allocation in the kernel
+ * and guarantees bounded resource usage.
+ *
+ * A single wait_for_any() operation may allocate multiple nodes from the
+ * pool (one per Waitable). All nodes are reclaimed when the wait completes.
+ */
 class WaitNodePool
 {
    static constexpr std::size_t N = config::MAX_WAIT_NODES;
@@ -177,6 +198,16 @@ public:
    }
 };
 
+/**
+ * @brief Coordination state for a multi-wait (wait_for_any) operation
+ *
+ * A WaitGroup tracks the outcome of a wait_for_any() call across multiple
+ * Waitables. It records which waitable won the race and whether the waking
+ * thread acquired a resource.
+ *
+ * Exactly one signal may win the group. All other signals are ignored once
+ * the group is marked complete.
+ */
 struct WaitGroup
 {
    std::atomic<bool> done{false};
@@ -257,12 +288,15 @@ struct TaskControlBlock
 
    Waitable::Result block_on(std::span<Waitable* const> waitables)
    {
-      // Preconditions
-      // assert(state == Running);
-      // assert(ws.size() > 0);
-      // assert(ws.size() <= config::MAX_WAIT_NODES);
+      CORTOS_ASSERT(state == State::Running);
+      CORTOS_ASSERT(waitables.size() > 0);
+      CORTOS_ASSERT(waitables.size() <= config::MAX_WAIT_NODES);
 
-      wait_group.begin(static_cast<uint8_t>(waitables.size()));
+      // Snapshot once: all blocks are given the same snapshot. This disregards
+      // all side-effects on_thread_blocked invocations have on the effective priority.
+      auto const waiter = create_waiter();
+
+      wait_group.begin(waitables.size());
 
       // Allocate and enqueue nodes
       for (std::size_t i = 0; auto* waitable : waitables) {
@@ -271,13 +305,12 @@ struct TaskControlBlock
          WaitNode* wait_node = wait_nodes.alloc(wait_group, *waitable, i);
          CORTOS_ASSERT(wait_node != nullptr);
 
+         waitable->on_thread_blocked(waiter);
          waitable->add(*wait_node);
-         // w->on_thread_blocked(this_thread??)
       }
 
-      // Transition to Blocked, then schedule
-      // state = Blocked;
-      // scheduler_block_current_and_switch();
+      state = State::Blocked;
+      cortos_port_pend_reschedule();
 
       // When we resume, winner info is in wait_group
       return Waitable::Result{
@@ -288,12 +321,29 @@ struct TaskControlBlock
 
    void teardown_wait_group(WaitGroup& group) noexcept
    {
+      // Snapshot once: all removals in this teardown relate to the same waiter (this thread).
+      auto const waiter = create_waiter();
+
       wait_nodes.for_each_active([&](WaitNode& node) {
          if (node.group != &group) return;
 
-         if (node.waitable) node.waitable->remove(node);
+         if (node.waitable) {
+            node.waitable->remove(node);
+            node.waitable->on_thread_removed(waiter);
+         }
          wait_nodes.free(node);
       }, &group);
+   }
+
+   [[nodiscard]] Waitable::Waiter create_waiter() const
+   {
+      return {
+         .id                 = id,
+         .base_priority      = base_priority,
+         .effective_priority = effective_priority,
+         .pinned_core        = pinned_core,
+         .affinity           = affinity,
+      };
    }
 };
 
@@ -362,9 +412,6 @@ struct StackLayout
 };
 
 
-// Waitable stuff
-void Waitable::on_thread_blocked(Waiter) {}
-void Waitable::on_thread_removed(Waiter) {}
 
 [[nodiscard]] bool Waitable::empty() const noexcept
 {
@@ -444,11 +491,16 @@ void Waitable::signal_all(bool acquired) noexcept
    }
 }
 
-
-template<typename Fn>
-void Waitable::for_each_waiter(Fn&& fn)
+void Waitable::for_each_waiter(WaiterVisitor visitor) const
 {
-   (void)fn;
+   // TODO: Might need a spinlock for cross-core waiting?
+   for (auto* iter = head; iter; iter = iter->next) {
+      if (!iter->active) continue;
+      if (iter->group && iter->group->done.load(std::memory_order_acquire)) continue;
+      if (!iter->tcb) continue;
+
+      visitor(iter->tcb->create_waiter());
+   }
 }
 
 class TaskReadyQueue
@@ -704,7 +756,10 @@ public:
       cortos_port_switch(previous_task->context(), next_task->context());
    }
 
-   void block_current_task();
+   Waitable::Result block_current_task(std::span<Waitable* const> waitables)
+   {
+      return current_task->block_on(waitables);
+   }
 
    void disable_preemption()
    {
@@ -987,10 +1042,9 @@ namespace kernel
       CORTOS_ASSERT(waitables.size() > 0);
       CORTOS_ASSERT_OP(waitables.size(), <=, config::MAX_WAIT_NODES);
 
-      //auto* tcb = KERNEL.scheduler_for_this_core();
-      // return tcb->block_on(waitables);
+      auto& scheduler = KERNEL.scheduler_for_this_core();
 
-      return {}; // TODO
+      return scheduler.block_current_task(waitables);
    }
 
 } // namespace kernel
