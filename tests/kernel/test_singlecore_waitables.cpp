@@ -98,20 +98,17 @@ TEST_F(SingleCoreWaitables_Test,
          waiter_completed = true;
       },
       waiter_stack,
-      Thread::Priority(1),
+      Thread::Priority(0),
       Core0
    );
 
    Thread signaler(
       [&]{
-         // Let the waiter run and block.
-         this_thread::yield();
-         this_thread::yield();
-
+         // At this point, waiter will have already run and blocked.
          w.fire_one(true);
       },
       signaler_stack,
-      Thread::Priority(0), // higher priority so it runs promptly
+      Thread::Priority(1),
       Core0
    );
 

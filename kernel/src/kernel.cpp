@@ -72,7 +72,6 @@ struct WaitNode
    {
       active   = false;
       next = prev = nullptr;
-      tcb      = nullptr;
       waitable = nullptr;
       group    = nullptr;
       index    = INVALID_INDEX;
@@ -327,9 +326,10 @@ struct TaskControlBlock
       wait_nodes.for_each_active([&](WaitNode& node) {
          if (node.group != &group) return;
 
-         if (node.waitable) {
-            node.waitable->remove(node);
-            node.waitable->on_thread_removed(waiter);
+         // node.waitable is reset on remove, so capture it first to call the hook afterwards
+         if (auto* waitable = node.waitable) {
+            waitable->remove(node);
+            waitable->on_thread_removed(waiter);
          }
          wait_nodes.free(node);
       }, &group);
@@ -362,6 +362,7 @@ static void wake_node(WaitNode const& wait_node, bool acquired) noexcept
    wait_node.tcb->teardown_wait_group(*wait_node.group);
 
    // Mark tcb runnable, pend reschedule, etc.
+   // TODO what scheduler to wake this on?
    // tcb->state = TaskControlBlock::State::Ready;
    // scheduler_make_ready(tcb);
    cortos_port_pend_reschedule();
@@ -460,16 +461,17 @@ WaitNode* Waitable::pick_best() noexcept
    uint8_t best_priority = std::numeric_limits<uint8_t>::max();
 
    for (auto* iter = head; iter; iter = iter->next) {
-      if (!iter->active) continue;
+      CORTOS_ASSERT(iter->active);
+      CORTOS_ASSERT(iter->tcb != nullptr);
+      CORTOS_ASSERT(iter->waitable == this);
+
+      // Skip nodes from already-satisfied wait_for_any groups (race window during teardown / multi-signal).
       if (iter->group && iter->group->done.load(std::memory_order_acquire)) continue;
 
       auto* tcb = iter->tcb;
-      if (!tcb) continue;
-
-      auto priority = tcb->effective_priority;
-      if (!best || priority < best_priority) {
+      if (tcb->is_higher_priority_than(best_priority)) {
          best = iter;
-         best_priority = priority;
+         best_priority = tcb->effective_priority;
       }
    }
    return best;
