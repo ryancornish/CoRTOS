@@ -146,18 +146,16 @@ TEST_F(SingleCoreWaitables_Test,
          waiter_completed = true;
       },
       waiter_stack,
-      Thread::Priority(1),
+      Thread::Priority(0),
       Core0
    );
 
    Thread signaler(
       [&]{
-         this_thread::yield();
-         this_thread::yield();
          w.fire_one(false);
       },
       signaler_stack,
-      Thread::Priority(0),
+      Thread::Priority(1),
       Core0
    );
 
@@ -192,20 +190,16 @@ TEST_F(SingleCoreWaitables_Test,
          waiter_completed = true;
       },
       waiter_stack,
-      Thread::Priority(1),
+      Thread::Priority(0),
       Core0
    );
 
    Thread signaler(
       [&]{
-         // Ensure waiter has time to enqueue on both waitables.
-         this_thread::yield();
-         this_thread::yield();
-
          w1.fire_one(true);
       },
       signaler_stack,
-      Thread::Priority(0),
+      Thread::Priority(1),
       Core0
    );
 
@@ -279,23 +273,14 @@ TEST_F(SingleCoreWaitables_Test,
 
    Thread signaler(
       [&]{
-         // Let both threads block.
-         this_thread::yield();
-         this_thread::yield();
-         this_thread::yield();
-
          // Wake one: should pick best priority (hi).
          w.fire_one(true);
-
-         // Let the woken thread run.
-         this_thread::yield();
-         this_thread::yield();
 
          // Wake second.
          w.fire_one(true);
       },
       signaler_stack,
-      Thread::Priority(1),
+      Thread::Priority(10),
       Core0
    );
 
@@ -340,13 +325,10 @@ TEST_F(SingleCoreWaitables_Test,
 
    Thread signaler(
       [&]{
-         this_thread::yield();
-         this_thread::yield();
-         this_thread::yield();
          w.fire_all(true);
       },
       signaler_stack,
-      Thread::Priority(0),
+      Thread::Priority(7),
       Core0
    );
 
@@ -390,10 +372,6 @@ TEST_F(SingleCoreWaitables_Test,
 
    Thread signaler(
       [&]{
-         // Allow waiter to run and block, so hooks are invoked.
-         this_thread::yield();
-         this_thread::yield();
-
          // Validate snapshot produced in on_thread_blocked()
          ASSERT_EQ(w.last_id.load(), waiter_id);
          ASSERT_EQ(w.last_base_prio.load(), 4U);
@@ -403,7 +381,7 @@ TEST_F(SingleCoreWaitables_Test,
          w.fire_one(true);
       },
       signaler_stack,
-      Thread::Priority(0),
+      Thread::Priority(5),
       Core0
    );
 

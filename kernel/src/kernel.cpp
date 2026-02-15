@@ -77,6 +77,26 @@ struct WaitNode
       index    = INVALID_INDEX;
       // tcb and slot are explicitly not reset
    }
+
+   [[nodiscard]] constexpr bool is_enqueued() const noexcept
+   {
+      return next != nullptr || prev != nullptr;
+   }
+
+   /**
+    * @brief Attempt to wake the owning thread for this wait node
+    *
+    * Resolves a wait_for_any() race by attempting to "win" the associated WaitGroup.
+    * If this node wins, all wait nodes participating in the same WaitGroup are
+    * torn down (unlinked from their Waitables and returned to the per-thread pool),
+    * and the owning thread is made runnable on its pinned core.
+    *
+    * If the WaitGroup has already been won by another node, this call is a no-op.
+    *
+    * @param acquired True if the woken thread acquired a resource as part of the wake
+    *                 (e.g., mutex handoff). This is recorded in the WaitGroup result.
+    */
+   void wake_thread(bool acquired) const noexcept;
 };
 
 /**
@@ -270,6 +290,11 @@ struct TaskControlBlock
    [[nodiscard]] constexpr auto*       context()       noexcept { return reinterpret_cast<cortos_port_context_t*      >(context_storage.data()); }
    [[nodiscard]] constexpr auto const* context() const noexcept { return reinterpret_cast<cortos_port_context_t const*>(context_storage.data()); }
 
+   [[nodiscard]] constexpr bool is_enqueued() const noexcept
+   {
+      return next != nullptr || prev != nullptr;
+   }
+
    [[nodiscard]] constexpr bool is_higher_priority_than(TaskControlBlock& rhs)  const noexcept
    {
       return effective_priority < rhs.effective_priority;
@@ -301,7 +326,7 @@ struct TaskControlBlock
       for (std::size_t i = 0; auto* waitable : waitables) {
          CORTOS_ASSERT(waitable != nullptr);
 
-         WaitNode* wait_node = wait_nodes.alloc(wait_group, *waitable, i);
+         WaitNode* wait_node = wait_nodes.alloc(wait_group, *waitable, i++);
          CORTOS_ASSERT(wait_node != nullptr);
 
          waitable->on_thread_blocked(waiter);
@@ -347,26 +372,6 @@ struct TaskControlBlock
    }
 };
 
-// TODO: Scheduler method? For now free standing is fine
-static void wake_node(WaitNode const& wait_node, bool acquired) noexcept
-{
-   CORTOS_ASSERT(wait_node.tcb != nullptr);
-   CORTOS_ASSERT(wait_node.group != nullptr);
-   CORTOS_ASSERT_OP(wait_node.tcb->state, ==, TaskControlBlock::State::Blocked);
-
-   if (!wait_node.group->try_win(static_cast<int>(wait_node.index), acquired)) {
-      return; // lost
-   }
-
-   // Winner: remove all nodes in this group (including this one)
-   wait_node.tcb->teardown_wait_group(*wait_node.group);
-
-   // Mark tcb runnable, pend reschedule, etc.
-   // TODO what scheduler to wake this on?
-   // tcb->state = TaskControlBlock::State::Ready;
-   // scheduler_make_ready(tcb);
-   cortos_port_pend_reschedule();
-}
 
 /**
  * Carves a user-provided buffer region into:
@@ -412,99 +417,6 @@ struct StackLayout
    }
 };
 
-
-
-[[nodiscard]] bool Waitable::empty() const noexcept
-{
-   return head == nullptr && tail == nullptr;
-}
-
-void Waitable::add(WaitNode& wait_node) noexcept
-{
-   CORTOS_ASSERT1(wait_node.waitable == this || wait_node.waitable == nullptr, wait_node.waitable);
-   CORTOS_ASSERT_NULL(wait_node.next);
-   CORTOS_ASSERT_NULL(wait_node.prev);
-
-   wait_node.waitable = this;
-
-   wait_node.prev = tail;
-   wait_node.next = nullptr;
-   if (tail) {
-      tail->next = &wait_node;
-   } else {
-      head = &wait_node;
-   }
-   tail = &wait_node;
-}
-
-void Waitable::remove(WaitNode& wait_node) noexcept
-{
-   if (wait_node.waitable != this) return;
-
-   if (wait_node.prev) {
-      wait_node.prev->next = wait_node.next;
-   } else {
-      head = wait_node.next;
-   }
-   if (wait_node.next) {
-      wait_node.next->prev = wait_node.prev;
-   } else {
-      tail = wait_node.prev;
-   }
-   wait_node.prev = wait_node.next = nullptr;
-   wait_node.waitable = nullptr;
-}
-
-WaitNode* Waitable::pick_best() noexcept
-{
-   WaitNode* best = nullptr;
-   uint8_t best_priority = std::numeric_limits<uint8_t>::max();
-
-   for (auto* iter = head; iter; iter = iter->next) {
-      CORTOS_ASSERT(iter->active);
-      CORTOS_ASSERT(iter->tcb != nullptr);
-      CORTOS_ASSERT(iter->waitable == this);
-
-      // Skip nodes from already-satisfied wait_for_any groups (race window during teardown / multi-signal).
-      if (iter->group && iter->group->done.load(std::memory_order_acquire)) continue;
-
-      auto* tcb = iter->tcb;
-      if (tcb->is_higher_priority_than(best_priority)) {
-         best = iter;
-         best_priority = tcb->effective_priority;
-      }
-   }
-   return best;
-}
-
-void Waitable::signal_one(bool acquired) noexcept
-{
-   if (auto* wait_node = pick_best()) {
-      wake_node(*wait_node, acquired);
-   }
-}
-
-void Waitable::signal_all(bool acquired) noexcept
-{
-   while (true) {
-      auto* wait_node = pick_best();
-      if (!wait_node) break;
-      wake_node(*wait_node, acquired);
-   }
-}
-
-void Waitable::for_each_waiter(WaiterVisitor visitor) const
-{
-   // TODO: Might need a spinlock for cross-core waiting?
-   for (auto* iter = head; iter; iter = iter->next) {
-      if (!iter->active) continue;
-      if (iter->group && iter->group->done.load(std::memory_order_acquire)) continue;
-      if (!iter->tcb) continue;
-
-      visitor(iter->tcb->create_waiter());
-   }
-}
-
 class TaskReadyQueue
 {
    TaskControlBlock* head{nullptr};
@@ -524,8 +436,7 @@ public:
 
    void push_back(TaskControlBlock& tcb) noexcept
    {
-      CORTOS_ASSERT_NULL(tcb.next); // TCB already linked
-      CORTOS_ASSERT_NULL(tcb.prev); // TCB already linked
+      CORTOS_ASSERT(!tcb.is_enqueued());
       CORTOS_ASSERT_OP(tcb.state, ==, TaskControlBlock::State::Ready); // Task must be ready to be enqueued
       tcb.next = nullptr;
       tcb.prev = tail;
@@ -731,6 +642,7 @@ public:
    void reschedule() noexcept
    {
       CORTOS_ASSERT(current_task);
+      CORTOS_ASSERT(!current_task->is_enqueued());
       CORTOS_ASSERT(current_task->state != TaskControlBlock::State::Ready);
 
       drain_inbox();
@@ -851,7 +763,7 @@ public:
    }
 
    // Load-balancing pinner
-   std::uint32_t pin_thread_to_core(TaskControlBlock& tcb) noexcept
+   void pin_thread_to_core(TaskControlBlock& tcb) noexcept
    {
       uint32_t best_core = std::numeric_limits<uint32_t>::max();
       uint32_t best_load = std::numeric_limits<uint32_t>::max();
@@ -870,49 +782,58 @@ public:
       CORTOS_ASSERT(found); // Thread affinity mask allows no cores
 
       schedulers.at(best_core).pin_task(tcb);
-      return best_core;
    }
 
    void register_thread(TaskControlBlock& tcb) noexcept
    {
       active_threads.fetch_add(1, std::memory_order_seq_cst);
 
-      uint32_t chosen_core = 0;
       {
          SpinlockGuard guard(lock);
-         chosen_core = pin_thread_to_core(tcb);
+         pin_thread_to_core(tcb);
       }
 
-      auto& scheduler = scheduler_for_core(chosen_core);
-
-      // If cores are not running yet, enqueue directly (even for remote cores)
-      if (!running.load(std::memory_order_acquire)) {
-         scheduler.set_task_ready(tcb);   // direct, no inbox
-         return;
-      }
-
-      // Post-start: must respect per-core ownership
-      auto this_core = cortos_port_get_core_id();
-      if (this_core == chosen_core) {
-         scheduler.set_task_ready(tcb);
-         // We may need to pre-empt the current task with the newly added task
-         if (tcb.is_higher_priority_than(scheduler.current_task_priority())) {
-           cortos_port_pend_reschedule();
-         }
-         return;
-      }
-
-      bool posted = scheduler.post_to_inbox({
-         .type = CrossCoreRequest::SetTaskReady,
-         .tcb  = &tcb,
-      });
-      CORTOS_ASSERT(posted);
+      set_thread_ready(tcb);
    }
 
    void unregister_thread() noexcept
    {
       CORTOS_ASSERT(active_threads.load(std::memory_order_relaxed) != 0);
       active_threads.fetch_sub(1, std::memory_order_seq_cst);
+   }
+
+   /**
+   * @brief Make a thread runnable on its pinned core (SMP-safe)
+   *
+   * Transitions @p tcb to the Ready state and enqueues it onto the ready queue of
+   * its pinned core, respecting per-core scheduler ownership.
+   */
+   void set_thread_ready(TaskControlBlock& tcb) noexcept
+   {
+      CORTOS_ASSERT_OP(tcb.state, !=, TaskControlBlock::State::Terminated);
+
+      auto& scheduler = scheduler_for_core(tcb.pinned_core);
+
+      // If cores are not running yet, enqueue directly (even for remote cores)
+      if (!running.load(std::memory_order_acquire)) {
+         scheduler.set_task_ready(tcb);
+         return;
+      }
+
+      auto this_core = cortos_port_get_core_id();
+      if (this_core == tcb.pinned_core) {
+         scheduler.set_task_ready(tcb);
+
+         if (tcb.is_higher_priority_than(scheduler.current_task_priority())) {
+            cortos_port_pend_reschedule();
+         }
+      } else {
+         bool posted = scheduler.post_to_inbox({
+            .type = CrossCoreRequest::SetTaskReady,
+            .tcb = &tcb
+         });
+         CORTOS_ASSERT(posted);
+      }
    }
 
 private:
@@ -922,6 +843,8 @@ private:
 static constinit Kernel<config::CORES> KERNEL;
 
 [[maybe_unused]] constexpr auto STATIC_SIZEOF_KERNEL = sizeof(KERNEL);
+
+/**** KERNEL-global dependants ****/
 
 // Registered as ISR handler for preemptive scheduling
 static void reschedule_this_core()
@@ -963,6 +886,25 @@ static void idle_thread()
    }
 }
 
+void WaitNode::wake_thread(bool acquired) const noexcept
+{
+   CORTOS_ASSERT(tcb != nullptr);
+   CORTOS_ASSERT(group != nullptr);
+   CORTOS_ASSERT(waitable != nullptr);
+   CORTOS_ASSERT(index != INVALID_INDEX);
+   CORTOS_ASSERT_OP(tcb->state, ==, TaskControlBlock::State::Blocked);
+
+   if (!group->try_win(static_cast<int>(index), acquired)) {
+      return; // lost
+   }
+
+   // Winner: remove all nodes in this group (including this one)
+   tcb->teardown_wait_group(*group);
+
+   // Thread is ready to be enqueued on its pinned core
+   KERNEL.set_thread_ready(*tcb);
+}
+
 /**** PUBLIC ****/
 
 Thread::Thread(EntryFn&& entry, std::span<std::byte> stack, Priority priority, CoreAffinity affinity)
@@ -995,6 +937,96 @@ Thread& Thread::operator=(Thread&& other) noexcept
    tcb = other.tcb;
    other.tcb = nullptr;
    return *this;
+}
+
+[[nodiscard]] bool Waitable::empty() const noexcept
+{
+   return head == nullptr && tail == nullptr;
+}
+
+void Waitable::add(WaitNode& wait_node) noexcept
+{
+   CORTOS_ASSERT1(wait_node.waitable == this || wait_node.waitable == nullptr, wait_node.waitable);
+   CORTOS_ASSERT(!wait_node.is_enqueued());
+
+   wait_node.waitable = this;
+
+   wait_node.prev = tail;
+   wait_node.next = nullptr;
+   if (tail) {
+      tail->next = &wait_node;
+   } else {
+      head = &wait_node;
+   }
+   tail = &wait_node;
+}
+
+void Waitable::remove(WaitNode& wait_node) noexcept
+{
+   if (wait_node.waitable != this) return;
+
+   if (wait_node.prev) {
+      wait_node.prev->next = wait_node.next;
+   } else {
+      head = wait_node.next;
+   }
+   if (wait_node.next) {
+      wait_node.next->prev = wait_node.prev;
+   } else {
+      tail = wait_node.prev;
+   }
+   wait_node.prev = wait_node.next = nullptr;
+   wait_node.waitable = nullptr;
+}
+
+WaitNode* Waitable::pick_best() noexcept
+{
+   WaitNode* best = nullptr;
+   uint8_t best_priority = std::numeric_limits<uint8_t>::max();
+
+   for (auto* iter = head; iter; iter = iter->next) {
+      CORTOS_ASSERT(iter->active);
+      CORTOS_ASSERT(iter->tcb != nullptr);
+      CORTOS_ASSERT(iter->waitable == this);
+
+      // Skip nodes from already-satisfied wait_for_any groups (race window during teardown / multi-signal).
+      if (iter->group && iter->group->done.load(std::memory_order_acquire)) continue;
+
+      auto* tcb = iter->tcb;
+      if (tcb->is_higher_priority_than(best_priority)) {
+         best = iter;
+         best_priority = tcb->effective_priority;
+      }
+   }
+   return best;
+}
+
+void Waitable::signal_one(bool acquired) noexcept
+{
+   if (auto* wait_node = pick_best()) {
+      wait_node->wake_thread(acquired);
+   }
+}
+
+void Waitable::signal_all(bool acquired) noexcept
+{
+   while (true) {
+      auto* wait_node = pick_best();
+      if (!wait_node) break;
+      wait_node->wake_thread(acquired);
+   }
+}
+
+void Waitable::for_each_waiter(WaiterVisitor visitor) const
+{
+   // TODO: Might need a spinlock for cross-core waiting?
+   for (auto* iter = head; iter; iter = iter->next) {
+      if (!iter->active) continue;
+      if (iter->group && iter->group->done.load(std::memory_order_acquire)) continue;
+      if (!iter->tcb) continue;
+
+      visitor(iter->tcb->create_waiter());
+   }
 }
 
 void Spinlock::lock()
