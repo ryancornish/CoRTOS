@@ -287,7 +287,7 @@ TEST(SingleCoreMultiThread_Test,
 
 
 TEST(SingleCoreMultiThread_Test,
-    GivenSingleThread_WhenThreadCreatesAnotherThreadOfHigherPriority_ThenThreadIsImmediatelyPreempted)
+     GivenSingleThread_WhenThreadCreatesAnotherThreadOfHigherPriority_ThenThreadIsImmediatelyPreempted)
 {
    alignas(CORTOS_PORT_STACK_ALIGN) static std::array<std::byte, 16 * 1024> s_creator{};
    alignas(CORTOS_PORT_STACK_ALIGN) static std::array<std::byte, 16 * 1024> s_child{};
@@ -339,7 +339,7 @@ TEST(SingleCoreMultiThread_Test,
 }
 
 TEST(SingleCoreMultiThread_Test,
-    GivenSingleThread_WhenThreadCreatesAnotherThreadOfLowerPriority_ThenCreatedThreadDoesNotRunUntilFirstThreadFinishes)
+     GivenSingleThread_WhenThreadCreatesAnotherThreadOfLowerPriority_ThenCreatedThreadDoesNotRunUntilFirstThreadFinishes)
 {
    alignas(CORTOS_PORT_STACK_ALIGN) static std::array<std::byte, 16 * 1024> s_creator{};
    alignas(CORTOS_PORT_STACK_ALIGN) static std::array<std::byte, 16 * 1024> s_child{};
@@ -391,7 +391,7 @@ TEST(SingleCoreMultiThread_Test,
 }
 
 TEST(SingleCoreMultiThread_Test,
-    GivenSingleThread_WhenThreadCreatesAnotherThreadOfEqualPriority_ThenCreatedThreadDoesNotRunUntilFirstThreadYields)
+     GivenSingleThread_WhenThreadCreatesAnotherThreadOfEqualPriority_ThenCreatedThreadDoesNotRunUntilFirstThreadYields)
 {
    alignas(CORTOS_PORT_STACK_ALIGN) static std::array<std::byte, 16 * 1024> s_creator{};
    alignas(CORTOS_PORT_STACK_ALIGN) static std::array<std::byte, 16 * 1024> s_child{};
@@ -447,3 +447,259 @@ TEST(SingleCoreMultiThread_Test,
    kernel::finalise();
 }
 
+
+
+/*** Thread joining ***/
+
+TEST(SingleCoreMultiThread_Test,
+     GivenJoinerHigherPriority_WhenItJoinsTarget_ThenJoinerBlocksUntilTargetTerminates)
+{
+   kernel::initialise();
+
+   alignas(CORTOS_PORT_STACK_ALIGN) static std::array<std::byte, 16 * 1024> target_stack{};
+   alignas(CORTOS_PORT_STACK_ALIGN) static std::array<std::byte, 16 * 1024> joiner_stack{};
+
+   std::atomic<bool> target_started{false};
+   std::atomic<bool> target_finished{false};
+   std::atomic<bool> joiner_returned{false};
+
+   // GIVEN:
+
+   Thread target(
+      [&]{
+         target_started.store(true, std::memory_order_release);
+         this_thread::yield(); // SHould immediately resume after reschedule
+         target_finished.store(true, std::memory_order_release);
+      },
+      target_stack,
+      Thread::Priority(3),
+      Core0
+   );
+
+   Thread joiner(
+      [&]{
+         // Join should block until target exits.
+         target.join();
+         joiner_returned.store(true, std::memory_order_release);
+
+         // After join returns, target must be finished.
+         ASSERT_TRUE(target_finished.load(std::memory_order_acquire));
+      },
+      joiner_stack,
+      Thread::Priority(0), // higher priority
+      Core0
+   );
+
+   // WHEN:
+
+   kernel::start();
+
+   // THEN:
+
+   ASSERT_TRUE(target_started.load(std::memory_order_acquire));
+   ASSERT_TRUE(target_finished.load(std::memory_order_acquire));
+   ASSERT_TRUE(joiner_returned.load(std::memory_order_acquire));
+   ASSERT_EQ(kernel::active_threads(), 0U);
+
+   kernel::finalise();
+}
+
+TEST(SingleCoreMultiThread_Test,
+     GivenTwoJoinersDifferentPriorities_WhenBothJoinSameTarget_ThenBothBlockAndReturnAfterTargetTerminates)
+{
+   kernel::initialise();
+
+   alignas(CORTOS_PORT_STACK_ALIGN) static std::array<std::byte, 16 * 1024> target_stack{};
+   alignas(CORTOS_PORT_STACK_ALIGN) static std::array<std::byte, 16 * 1024> joiner_hi_stack{};
+   alignas(CORTOS_PORT_STACK_ALIGN) static std::array<std::byte, 16 * 1024> joiner_lo_stack{};
+
+   std::atomic<int> phase{0}; // monotonic progress marker
+   std::atomic<bool> target_finished{false};
+   std::atomic<bool> joiner_hi_returned{false};
+   std::atomic<bool> joiner_lo_returned{false};
+
+   // GIVEN:
+
+   Thread target(
+      [&]{
+         phase.store(1, std::memory_order_release);
+         this_thread::yield();
+         target_finished.store(true, std::memory_order_release);
+         phase.store(2, std::memory_order_release);
+      },
+      target_stack,
+      Thread::Priority(4),
+      Core0
+   );
+
+   Thread joiner_hi(
+      [&]{
+         // This should block immediately, allowing target and other joiner to run.
+         phase.store(10, std::memory_order_release);
+         target.join();
+         joiner_hi_returned.store(true, std::memory_order_release);
+         ASSERT_TRUE(target_finished.load(std::memory_order_acquire));
+         phase.store(11, std::memory_order_release);
+      },
+      joiner_hi_stack,
+      Thread::Priority(0),
+      Core0
+   );
+
+   Thread joiner_lo(
+      [&]{
+         phase.store(20, std::memory_order_release);
+         target.join();
+         joiner_lo_returned.store(true, std::memory_order_release);
+         ASSERT_TRUE(target_finished.load(std::memory_order_acquire));
+         phase.store(21, std::memory_order_release);
+      },
+      joiner_lo_stack,
+      Thread::Priority(2),
+      Core0
+   );
+
+   // WHEN:
+
+   kernel::start();
+
+   // THEN:
+
+   ASSERT_TRUE(target_finished.load(std::memory_order_acquire));
+   ASSERT_TRUE(joiner_hi_returned.load(std::memory_order_acquire));
+   ASSERT_TRUE(joiner_lo_returned.load(std::memory_order_acquire));
+   ASSERT_EQ(kernel::active_threads(), 0U);
+
+   kernel::finalise();
+}
+
+TEST(SingleCoreMultiThread_Test,
+     GivenJoinerLowerPriority_WhenTargetTerminatesBeforeJoinCall_ThenJoinReturnsImmediately)
+{
+   kernel::initialise();
+
+   alignas(CORTOS_PORT_STACK_ALIGN) static std::array<std::byte, 16 * 1024> target_stack{};
+   alignas(CORTOS_PORT_STACK_ALIGN) static std::array<std::byte, 16 * 1024> joiner_stack{};
+   alignas(CORTOS_PORT_STACK_ALIGN) static std::array<std::byte, 16 * 1024> helper_stack{};
+
+   std::atomic<bool> target_finished{false};
+   std::atomic<bool> joiner_called_join{false};
+   std::atomic<bool> joiner_returned{false};
+
+   // GIVEN:
+
+   Thread target(
+      [&]{
+         // Finish immediately
+         target_finished.store(true, std::memory_order_release);
+      },
+      target_stack,
+      Thread::Priority(0), // higher priority so it runs and finishes first
+      Core0
+   );
+
+   // Helper to yield enough times so target definitely runs before joiner.
+   Thread helper(
+      [&]{
+         // With target prio 0, it will run before us anyway, this just adds reschedule points.
+         this_thread::yield();
+         this_thread::yield();
+      },
+      helper_stack,
+      Thread::Priority(1),
+      Core0
+   );
+
+   Thread joiner(
+      [&]{
+         joiner_called_join.store(true, std::memory_order_release);
+         target.join(); // should return immediately because target already terminated
+         joiner_returned.store(true, std::memory_order_release);
+         ASSERT_TRUE(target_finished.load(std::memory_order_acquire));
+      },
+      joiner_stack,
+      Thread::Priority(3), // lower priority than target/helper
+      Core0
+   );
+
+   // WHEN:
+
+   kernel::start();
+
+   // THEN:
+
+   ASSERT_TRUE(target_finished.load(std::memory_order_acquire));
+   ASSERT_TRUE(joiner_called_join.load(std::memory_order_acquire));
+   ASSERT_TRUE(joiner_returned.load(std::memory_order_acquire));
+   ASSERT_EQ(kernel::active_threads(), 0U);
+
+   kernel::finalise();
+}
+
+TEST(SingleCoreMultiThread_Test,
+     GivenChainJoinAWaitsBWaitsC_WhenSystemStarts_ThenChainUnblocksInOrderAndAllTerminate)
+{
+   kernel::initialise();
+
+   alignas(CORTOS_PORT_STACK_ALIGN) static std::array<std::byte, 16 * 1024> stack_a{};
+   alignas(CORTOS_PORT_STACK_ALIGN) static std::array<std::byte, 16 * 1024> stack_b{};
+   alignas(CORTOS_PORT_STACK_ALIGN) static std::array<std::byte, 16 * 1024> stack_c{};
+
+   std::atomic<int> order{0}; // record completion order
+   std::atomic<bool> a_done{false};
+   std::atomic<bool> b_done{false};
+   std::atomic<bool> c_done{false};
+
+   // GIVEN:
+
+   // Construct in C, B, A order so lambdas can reference already-created objects.
+   Thread c(
+      [&]{
+         // finish last dependency first
+         c_done.store(true, std::memory_order_release);
+         order.fetch_add(1, std::memory_order_acq_rel);
+      },
+      stack_c,
+      Thread::Priority(2),
+      Core0
+   );
+
+   Thread b(
+      [&]{
+         c.join();
+         b_done.store(true, std::memory_order_release);
+         order.fetch_add(1, std::memory_order_acq_rel);
+         ASSERT_TRUE(c_done.load(std::memory_order_acquire));
+      },
+      stack_b,
+      Thread::Priority(1),
+      Core0
+   );
+
+   Thread a(
+      [&]{
+         b.join();
+         a_done.store(true, std::memory_order_release);
+         order.fetch_add(1, std::memory_order_acq_rel);
+         ASSERT_TRUE(b_done.load(std::memory_order_acquire));
+         ASSERT_TRUE(c_done.load(std::memory_order_acquire));
+      },
+      stack_a,
+      Thread::Priority(0), // highest priority: will block immediately on join, allowing others to run
+      Core0
+   );
+
+   // WHEN:
+
+   kernel::start();
+
+   // THEN:
+
+   ASSERT_TRUE(a_done.load(std::memory_order_acquire));
+   ASSERT_TRUE(b_done.load(std::memory_order_acquire));
+   ASSERT_TRUE(c_done.load(std::memory_order_acquire));
+   ASSERT_EQ(order.load(std::memory_order_acquire), 3);
+   ASSERT_EQ(kernel::active_threads(), 0U);
+
+   kernel::finalise();
+}

@@ -40,6 +40,51 @@ struct TaskControlBlock;
 struct WaitGroup;
 
 
+struct WaitableGroupLock
+{
+private:
+   std::array<Waitable*, config::MAX_WAIT_NODES> locked_waitables_storage{};
+   std::span<Waitable*> locked_waitables;
+
+public:
+
+   explicit WaitableGroupLock(std::span<Waitable* const> waitables)
+      : locked_waitables({locked_waitables_storage.data(), waitables.size()})
+   {
+      // Copy
+      for (std::size_t i = 0; i < waitables.size(); ++i) locked_waitables[i] = waitables[i];
+
+      // Sort by address (simple insertion sort: N small)
+      for (std::size_t i = 1; i < waitables.size(); ++i) {
+         auto* key = locked_waitables[i];
+         std::size_t j = i;
+         while (j > 0 && locked_waitables[j - 1] > key) {
+            locked_waitables[j] = locked_waitables[j - 1];
+            --j;
+         }
+         locked_waitables[j] = key;
+      }
+
+      // Enforce uniqueness
+      for (std::size_t i = 1; i < locked_waitables.size(); ++i) {
+         CORTOS_ASSERT(locked_waitables[i] != locked_waitables[i - 1]);
+      }
+
+      // Lock in order
+      for (auto& waitable : locked_waitables) {
+         waitable->wait_lock.lock();
+      }
+   }
+
+   ~WaitableGroupLock()
+   {
+      auto n = locked_waitables.size();
+      while (n--) {
+         locked_waitables[n]->wait_lock.unlock();
+      }
+   }
+};
+
 /**
  * @brief Intrusive wait-queue node for a thread waiting on a Waitable
  *
@@ -80,7 +125,7 @@ struct WaitNode
 
    [[nodiscard]] constexpr bool is_enqueued() const noexcept
    {
-      return next != nullptr || prev != nullptr;
+      return waitable != nullptr;
    }
 
    /**
@@ -255,6 +300,24 @@ struct WaitGroup
    }
 };
 
+class ThreadTermination : public Waitable
+{
+   std::atomic<bool> terminated{false};
+
+public:
+   [[nodiscard]] bool has_terminated()
+   {
+      return terminated.load(std::memory_order_acquire);
+   }
+
+   void terminate()
+   {
+      bool expected = false;
+      CORTOS_ASSERT(terminated.compare_exchange_strong(expected, true, std::memory_order_release));
+
+      signal_all(false);
+   }
+};
 
 static void thread_launcher(void* tcb_ptr);
 
@@ -282,8 +345,8 @@ struct TaskControlBlock
    WaitGroup wait_group{};
    WaitNodePool wait_nodes{this};
 
-   // Linked-list of threads wanting to join with me
-   TaskControlBlock* join_waiters_head{nullptr};
+   // Thread-joining waitable
+   ThreadTermination termination;
 
    // Opaque, in-place port context storage
    alignas(CORTOS_PORT_CONTEXT_ALIGN) std::array<std::byte, CORTOS_PORT_CONTEXT_SIZE> context_storage{};
@@ -310,15 +373,11 @@ struct TaskControlBlock
       cortos_port_context_init(context(), stack.data(), stack.size(), thread_launcher, this);
    }
 
-   Waitable::Result block_on(std::span<Waitable* const> waitables)
+   void prepare_block(std::span<Waitable* const> waitables)
    {
       CORTOS_ASSERT(state == State::Running);
       CORTOS_ASSERT(waitables.size() > 0);
       CORTOS_ASSERT(waitables.size() <= config::MAX_WAIT_NODES);
-
-      // Snapshot once: all blocks are given the same snapshot. This disregards
-      // all side-effects on_thread_blocked invocations have on the effective priority.
-      auto const waiter = create_waiter();
 
       wait_group.begin(waitables.size());
 
@@ -329,11 +388,25 @@ struct TaskControlBlock
          WaitNode* wait_node = wait_nodes.alloc(wait_group, *waitable, i++);
          CORTOS_ASSERT(wait_node != nullptr);
 
-         waitable->on_thread_blocked(waiter);
          waitable->add(*wait_node);
       }
 
       state = State::Blocked;
+   }
+
+   void notify_block(std::span<Waitable* const> waitables) const
+   {
+      // Snapshot once: all blocks are given the same snapshot. This disregards
+      // all side-effects on_thread_blocked invocations have on the effective priority.
+      auto const waiter = create_waiter();
+
+      for (auto* waitable : waitables) {
+         waitable->on_thread_blocked(waiter);
+      }
+   }
+
+   Waitable::Result commence_block()
+   {
       cortos_port_pend_reschedule();
 
       // When we resume, winner info is in wait_group
@@ -348,16 +421,38 @@ struct TaskControlBlock
       // Snapshot once: all removals in this teardown relate to the same waiter (this thread).
       auto const waiter = create_waiter();
 
+      // TODO: should common this pattern up and make some kind of WaitableVector
+      std::array<Waitable*, config::MAX_WAIT_NODES> waitables_storage{};
+      std::size_t waitable_count = 0;
+
+      // First pass: collect involved waitables
       wait_nodes.for_each_active([&](WaitNode& node) {
          if (node.group != &group) return;
-
-         // node.waitable is reset on remove, so capture it first to call the hook afterwards
-         if (auto* waitable = node.waitable) {
-            waitable->remove(node);
-            waitable->on_thread_removed(waiter);
+         if (node.waitable) {
+            waitables_storage[waitable_count++] = node.waitable;
          }
-         wait_nodes.free(node);
       }, &group);
+
+      std::span<Waitable* const> waitables(waitables_storage.data(), waitable_count);
+
+      {
+         WaitableGroupLock lock_group(waitables);
+
+         // Second pass: unlink and free under lock
+         wait_nodes.for_each_active([&](WaitNode& node) {
+            if (node.group != &group) return;
+
+            if (node.waitable) {
+               node.waitable->remove(node);
+            }
+            wait_nodes.free(node);
+         }, &group);
+      }
+
+      // Third pass: hooks after unlock
+      for (auto* waitable : waitables) {
+         waitable->on_thread_removed(waiter);
+      }
    }
 
    [[nodiscard]] Waitable::Waiter create_waiter() const
@@ -670,9 +765,19 @@ public:
       cortos_port_switch(previous_task->context(), next_task->context());
    }
 
-   Waitable::Result block_current_task(std::span<Waitable* const> waitables)
+   void prepare_block_current_task(std::span<Waitable* const> waitables)
    {
-      return current_task->block_on(waitables);
+      current_task->prepare_block(waitables);
+   }
+
+   Waitable::Result commence_block_current_task()
+   {
+      return current_task->commence_block();
+   }
+
+   void notify_block_current_task(std::span<Waitable* const> waitables) const
+   {
+      current_task->notify_block(waitables);
    }
 
    void disable_preemption()
@@ -870,7 +975,9 @@ static void thread_launcher(void* tcb_ptr)
    tcb->entry();
 
    tcb->state = TaskControlBlock::State::Terminated;
+
    // Signal joiners
+   tcb->termination.terminate();
 
    if (tcb->id == Scheduler::IDLE_TASK_ID) return; // Idle tasks are not apart of the same bookkeeping
 
@@ -939,6 +1046,15 @@ Thread& Thread::operator=(Thread&& other) noexcept
    return *this;
 }
 
+void Thread::join() noexcept
+{
+   CORTOS_ASSERT(tcb != nullptr);
+
+   kernel::wait_until([&]{
+      return tcb->termination.has_terminated();
+   }, tcb->termination);
+}
+
 [[nodiscard]] bool Waitable::empty() const noexcept
 {
    return head == nullptr && tail == nullptr;
@@ -993,7 +1109,7 @@ WaitNode* Waitable::pick_best() noexcept
       if (iter->group && iter->group->done.load(std::memory_order_acquire)) continue;
 
       auto* tcb = iter->tcb;
-      if (tcb->is_higher_priority_than(best_priority)) {
+      if (!best || tcb->is_higher_priority_than(best_priority)) {
          best = iter;
          best_priority = tcb->effective_priority;
       }
@@ -1010,6 +1126,7 @@ void Waitable::signal_one(bool acquired) noexcept
 
 void Waitable::signal_all(bool acquired) noexcept
 {
+   // TODO: This should be a batch wakeup THEN reschedule, not interleaved
    while (true) {
       auto* wait_node = pick_best();
       if (!wait_node) break;
@@ -1077,8 +1194,45 @@ namespace kernel
       CORTOS_ASSERT_OP(waitables.size(), <=, config::MAX_WAIT_NODES);
 
       auto& scheduler = KERNEL.scheduler_for_this_core();
+      {
+         WaitableGroupLock lock_group(waitables);
 
-      return scheduler.block_current_task(waitables);
+         scheduler.prepare_block_current_task(waitables);
+      }
+      scheduler.notify_block_current_task(waitables);
+
+      auto result = scheduler.commence_block_current_task();
+
+      return result;
+   }
+
+   Waitable::Result wait_until(Waitable::Predicate predicate, std::span<Waitable* const> waitables)
+   {
+      CORTOS_ASSERT(waitables.size() > 0);
+      CORTOS_ASSERT_OP(waitables.size(), <=, config::MAX_WAIT_NODES);
+      for (auto* w : waitables) CORTOS_ASSERT(w != nullptr);
+
+      Waitable::Result result{.index = -1, .acquired = false};
+
+      // Fast-path: avoid locks
+      if (predicate()) {
+         return result;
+      }
+
+      auto& scheduler = KERNEL.scheduler_for_this_core();
+
+      while (true) {
+         {
+            WaitableGroupLock lock_group(waitables);
+
+            if (predicate()) return result;
+
+            scheduler.prepare_block_current_task(waitables);
+         }
+         scheduler.notify_block_current_task(waitables);
+
+         result = scheduler.commence_block_current_task();
+      }
    }
 
 } // namespace kernel
