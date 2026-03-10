@@ -6,6 +6,7 @@
 #include "cortos/port_traits.h"
 #include "mpsc_ring_buffer.hpp"
 
+#include <algorithm>
 #include <bit>
 #include <bitset>
 #include <cassert>
@@ -39,48 +40,95 @@ static constexpr std::uintptr_t   align_up(std::uintptr_t v, std::size_t a) { re
 struct TaskControlBlock;
 struct WaitGroup;
 
+enum class ReadyAction : uint8_t
+{
+   None,
+   Reschedule
+};
+
+class WaitableRefVector
+{
+private:
+   std::array<Waitable*, config::MAX_WAIT_NODES> store{};
+   std::size_t count = 0;
+
+public:
+   constexpr WaitableRefVector() = default;
+   using iterator = Waitable**;
+   using const_iterator = Waitable* const*;
+   iterator begin() { return store.data(); }
+   iterator end()   { return store.data() + count; }
+   [[nodiscard]] bool             empty()    const noexcept { return count == 0; }
+   [[nodiscard]] size_t           size()     const noexcept { return count; }
+   [[nodiscard]] const_iterator   begin()    const noexcept { return store.data(); }
+   [[nodiscard]] const_iterator   end()      const noexcept { return store.data() + count; }
+   [[nodiscard]] constexpr size_t capacity() const noexcept { return store.size(); }
+
+   Waitable* const& operator[](std::size_t index) const noexcept
+   {
+      CORTOS_ASSERT(index < count);
+      return store[index];
+   }
+
+   void push(Waitable* waitable)
+   {
+      CORTOS_ASSERT(count < store.size());
+      store[count++] = waitable;
+   }
+
+   void push_range(std::span<Waitable* const> waitables)
+   {
+      CORTOS_ASSERT(count + waitables.size() <= store.size());
+      std::ranges::copy(waitables, store.data() + count);
+      count += waitables.size();
+   }
+
+   void pop()
+   {
+      CORTOS_ASSERT(!empty());
+      --count;
+   }
+
+   void sort_by_address()
+   {
+      if (count < 2) return;
+      std::ranges::sort(begin(), end());
+   }
+
+   void clear() noexcept { count = 0; }
+};
 
 struct WaitableGroupLock
 {
 private:
-   std::array<Waitable*, config::MAX_WAIT_NODES> locked_waitables_storage{};
-   std::span<Waitable*> locked_waitables;
+   WaitableRefVector group;
 
 public:
+   WaitableGroupLock(WaitableGroupLock const&) = delete;
+   WaitableGroupLock(WaitableGroupLock&&) = delete;
+   WaitableGroupLock& operator=(WaitableGroupLock const&) = delete;
+   WaitableGroupLock& operator=(WaitableGroupLock&&) = delete;
 
    explicit WaitableGroupLock(std::span<Waitable* const> waitables)
-      : locked_waitables({locked_waitables_storage.data(), waitables.size()})
    {
-      // Copy
-      for (std::size_t i = 0; i < waitables.size(); ++i) locked_waitables[i] = waitables[i];
-
-      // Sort by address (simple insertion sort: N small)
-      for (std::size_t i = 1; i < waitables.size(); ++i) {
-         auto* key = locked_waitables[i];
-         std::size_t j = i;
-         while (j > 0 && locked_waitables[j - 1] > key) {
-            locked_waitables[j] = locked_waitables[j - 1];
-            --j;
-         }
-         locked_waitables[j] = key;
-      }
-
+      group.push_range(waitables);
+      group.sort_by_address();
       // Enforce uniqueness
-      for (std::size_t i = 1; i < locked_waitables.size(); ++i) {
-         CORTOS_ASSERT(locked_waitables[i] != locked_waitables[i - 1]);
+      for (std::size_t i = 1; i < group.size(); ++i) {
+         CORTOS_ASSERT(group[i] != group[i - 1]);
       }
 
       // Lock in order
-      for (auto& waitable : locked_waitables) {
+      for (auto& waitable : group) {
          waitable->wait_lock.lock();
       }
    }
 
    ~WaitableGroupLock()
    {
-      auto n = locked_waitables.size();
+      auto n = group.size();
       while (n--) {
-         locked_waitables[n]->wait_lock.unlock();
+         group[n]->wait_lock.unlock();
       }
    }
 };
@@ -141,7 +189,7 @@ struct WaitNode
     * @param acquired True if the woken thread acquired a resource as part of the wake
     *                 (e.g., mutex handoff). This is recorded in the WaitGroup result.
     */
-   void wake_thread(bool acquired) const noexcept;
+   ReadyAction wake_thread(bool acquired) const noexcept;
 };
 
 /**
@@ -329,7 +377,6 @@ struct TaskControlBlock
    // Intrusive 'linked-list' links for a TaskReadyQueue
    TaskControlBlock* next{nullptr};
    TaskControlBlock* prev{nullptr};
-   // Intrusive link for the SleepMinHeap
 
    uint32_t id;
    uint8_t base_priority;
@@ -420,20 +467,15 @@ struct TaskControlBlock
    {
       // Snapshot once: all removals in this teardown relate to the same waiter (this thread).
       auto const waiter = create_waiter();
-
-      // TODO: should common this pattern up and make some kind of WaitableVector
-      std::array<Waitable*, config::MAX_WAIT_NODES> waitables_storage{};
-      std::size_t waitable_count = 0;
+      WaitableRefVector waitables;
 
       // First pass: collect involved waitables
       wait_nodes.for_each_active([&](WaitNode& node) {
          if (node.group != &group) return;
          if (node.waitable) {
-            waitables_storage[waitable_count++] = node.waitable;
+            waitables.push(node.waitable);
          }
       }, &group);
-
-      std::span<Waitable* const> waitables(waitables_storage.data(), waitable_count);
 
       {
          WaitableGroupLock lock_group(waitables);
@@ -898,7 +940,9 @@ public:
          pin_thread_to_core(tcb);
       }
 
-      set_thread_ready(tcb);
+      if (set_thread_ready(tcb) == ReadyAction::Reschedule) {
+         cortos_port_pend_reschedule();
+      }
    }
 
    void unregister_thread() noexcept
@@ -908,12 +952,18 @@ public:
    }
 
    /**
-   * @brief Make a thread runnable on its pinned core (SMP-safe)
+   * @brief Make a thread runnable on its pinned core (SMP-safe).
    *
-   * Transitions @p tcb to the Ready state and enqueues it onto the ready queue of
-   * its pinned core, respecting per-core scheduler ownership.
+   * Transitions @p tcb to the Ready state and enqueues it on the ready queue
+   * of its pinned core. If the thread belongs to another core, a cross-core
+   * request is posted so that the owning scheduler performs the enqueue.
+   *
+   * @param tcb Task control block of the thread to make runnable.
+   * @return ReadyAction::Reschedule if the thread was queued on the current
+   *         core and has higher priority than the running task, indicating
+   *         the caller should request a local reschedule.
    */
-   void set_thread_ready(TaskControlBlock& tcb) noexcept
+   ReadyAction set_thread_ready(TaskControlBlock& tcb) noexcept
    {
       CORTOS_ASSERT_OP(tcb.state, !=, TaskControlBlock::State::Terminated);
 
@@ -922,7 +972,7 @@ public:
       // If cores are not running yet, enqueue directly (even for remote cores)
       if (!running.load(std::memory_order_acquire)) {
          scheduler.set_task_ready(tcb);
-         return;
+         return ReadyAction::None;
       }
 
       auto this_core = cortos_port_get_core_id();
@@ -930,7 +980,7 @@ public:
          scheduler.set_task_ready(tcb);
 
          if (tcb.is_higher_priority_than(scheduler.current_task_priority())) {
-            cortos_port_pend_reschedule();
+            return ReadyAction::Reschedule;
          }
       } else {
          bool posted = scheduler.post_to_inbox({
@@ -939,6 +989,7 @@ public:
          });
          CORTOS_ASSERT(posted);
       }
+      return ReadyAction::None;
    }
 
 private:
@@ -993,7 +1044,7 @@ static void idle_thread()
    }
 }
 
-void WaitNode::wake_thread(bool acquired) const noexcept
+ReadyAction WaitNode::wake_thread(bool acquired) const noexcept
 {
    CORTOS_ASSERT(tcb != nullptr);
    CORTOS_ASSERT(group != nullptr);
@@ -1002,14 +1053,14 @@ void WaitNode::wake_thread(bool acquired) const noexcept
    CORTOS_ASSERT_OP(tcb->state, ==, TaskControlBlock::State::Blocked);
 
    if (!group->try_win(static_cast<int>(index), acquired)) {
-      return; // lost
+      return ReadyAction::None; // lost
    }
 
    // Winner: remove all nodes in this group (including this one)
    tcb->teardown_wait_group(*group);
 
    // Thread is ready to be enqueued on its pinned core
-   KERNEL.set_thread_ready(*tcb);
+   return KERNEL.set_thread_ready(*tcb);
 }
 
 /**** PUBLIC ****/
@@ -1120,17 +1171,25 @@ WaitNode* Waitable::pick_best() noexcept
 void Waitable::signal_one(bool acquired) noexcept
 {
    if (auto* wait_node = pick_best()) {
-      wait_node->wake_thread(acquired);
+      if (wait_node->wake_thread(acquired) == ReadyAction::Reschedule) {
+         cortos_port_pend_reschedule();
+      }
    }
 }
 
 void Waitable::signal_all(bool acquired) noexcept
 {
-   // TODO: This should be a batch wakeup THEN reschedule, not interleaved
+   bool reschedule = false;
+
    while (true) {
       auto* wait_node = pick_best();
       if (!wait_node) break;
-      wait_node->wake_thread(acquired);
+      if (wait_node->wake_thread(acquired) == ReadyAction::Reschedule) {
+         reschedule = true;
+      }
+   }
+   if (reschedule) {
+      cortos_port_pend_reschedule();
    }
 }
 
