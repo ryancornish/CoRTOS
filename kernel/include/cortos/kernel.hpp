@@ -615,6 +615,7 @@ private:
    void remove(WaitNode& wait_node) noexcept;
 
    // Select best waiter but do NOT unlink it.
+   // Caller must hold wait_lock.
    // FIFO among equals: scan from head, pick first with highest priority.
    WaitNode* pick_best() noexcept;
 };

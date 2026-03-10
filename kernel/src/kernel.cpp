@@ -1170,10 +1170,15 @@ WaitNode* Waitable::pick_best() noexcept
 
 void Waitable::signal_one(bool acquired) noexcept
 {
-   if (auto* wait_node = pick_best()) {
-      if (wait_node->wake_thread(acquired) == ReadyAction::Reschedule) {
-         cortos_port_pend_reschedule();
-      }
+   WaitNode* wait_node = nullptr;
+   {
+      SpinlockGuard guard(wait_lock);
+      wait_node = pick_best();
+   }
+   if (!wait_node) return; // No current waiters
+
+   if (wait_node->wake_thread(acquired) == ReadyAction::Reschedule) {
+      cortos_port_pend_reschedule();
    }
 }
 
@@ -1182,8 +1187,13 @@ void Waitable::signal_all(bool acquired) noexcept
    bool reschedule = false;
 
    while (true) {
-      auto* wait_node = pick_best();
+      WaitNode* wait_node = nullptr;
+      {
+         SpinlockGuard guard(wait_lock);
+         wait_node = pick_best();
+      }
       if (!wait_node) break;
+
       if (wait_node->wake_thread(acquired) == ReadyAction::Reschedule) {
          reschedule = true;
       }
