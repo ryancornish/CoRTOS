@@ -1,0 +1,30 @@
+name = "gcc-base"
+
+c_compiler = "gcc"
+cxx_compiler = "g++"
+archiver = "ar"
+
+c_standard = "c17"
+cxx_standard = "c++23"
+
+use_modules = false
+
+common_cflags = [
+  "-Wall",
+  "-Wextra",
+  "-Wpedantic",
+]
+
+common_cxxflags = [
+  "-Wall",
+  "-Wextra",
+  "-Wpedantic",
+  "-fno-exceptions",
+  "-fno-rtti",
+]
+
+common_defines = []
+
+common_include_dirs = []
+common_lib_dirs = []
+common_libs = []

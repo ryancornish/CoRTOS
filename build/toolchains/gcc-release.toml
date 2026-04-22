@@ -1,0 +1,10 @@
+name = "gcc-release"
+inherits = "gcc-base"
+
+common_cflags = [
+  "-O2",
+]
+
+common_cxxflags = [
+  "-O2",
+]

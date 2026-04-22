@@ -1,0 +1,9 @@
+name = "linux_boost"
+
+sources = [
+  "port_linux_boost.cpp",
+]
+
+public_headers = [
+  "public_headers/port_traits.h -> cortos/port/port_traits.h",
+]

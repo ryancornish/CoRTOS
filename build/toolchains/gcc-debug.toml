@@ -1,0 +1,12 @@
+name = "gcc-debug"
+inherits = "gcc-base"
+
+common_cflags = [
+  "-O0",
+  "-g3",
+]
+
+common_cxxflags = [
+  "-O0",
+  "-g3",
+]

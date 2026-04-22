@@ -1,0 +1,9 @@
+name = "simulation"
+
+sources = [
+  "time_driver_simulation.cpp",
+]
+
+public_headers = [
+  "public_headers/simulation.hpp -> cortos/time/simulation.hpp",
+]

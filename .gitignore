@@ -41,7 +41,6 @@
 *.dwo
 
 .cache/
-build/
 compile_commands.json
 
 # Coverage artifacts

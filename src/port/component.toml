@@ -1,0 +1,10 @@
+name = "port"
+kind = "port"
+
+public_headers = [
+  "public_headers/port.h -> cortos/port.h",
+]
+
+variants = [
+  "linux_boost",
+]

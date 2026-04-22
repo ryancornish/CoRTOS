@@ -1,0 +1,15 @@
+name = "clangd"
+inherits = "gcc-base"
+
+c_compiler = "clang"
+cxx_compiler = "clang++"
+
+common_cflags = [
+  "-O0",
+  "-g",
+]
+
+common_cxxflags = [
+  "-O0",
+  "-g",
+]

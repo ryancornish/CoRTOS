@@ -1,0 +1,12 @@
+name = "time"
+kind = "time"
+
+public_headers = [
+  "public_headers/time.hpp -> cortos/time.hpp",
+]
+
+variants = [
+  "simulation",
+  "periodic",
+  "tickless",
+]

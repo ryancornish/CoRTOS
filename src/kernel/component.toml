@@ -1,0 +1,10 @@
+name = "kernel"
+kind = "core"
+
+sources = [
+  "kernel.cpp",
+]
+
+public_headers = [
+  "public_headers/kernel.hpp -> cortos/kernel.hpp",
+]

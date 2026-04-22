@@ -1,0 +1,8 @@
+name = "libcortos"
+kind = "library"
+
+sources = [
+  "mutex.cpp",
+]
+
+public_headers = []

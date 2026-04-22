@@ -1,0 +1,10 @@
+name = "linux_boost_periodic"
+
+port = "linux_boost"
+time_driver = "periodic"
+
+config_header = "config/config.hpp"
+
+enabled_features = []
+
+output_archive = "cortos.a"
