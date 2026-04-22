@@ -1,10 +1,14 @@
 name = "linux_boost_sim"
+default_toolchain = "gcc-debug"
 
+[build]
 port = "linux_boost"
 time_driver = "simulation"
+config = "configs/sim.hpp"
 
-config_header = "config/config.hpp"
+[libcortos]
+enable = []
 
-enabled_features = []
-
-output_archive = "cortos.a"
+[output]
+root = "../bld"
+archive = "cortos.a"
