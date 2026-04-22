@@ -1,19 +1,6 @@
-/**
-* @file time_driver.hpp
-* @brief CoRTOS TimeDriver Interface
-*
-* The TimeDriver sits on top of the hardware timers. It provides:
-* - Current time queries
-* - Tick vs tickless abstraction
-*
-* The kernel has NO concept of ticks or timers
-* Clients can it just ask the TimeDriver
-* to signal Waitables, and the TimeDriver figures out how to
-* make that happen (periodic tick, one-shot timer, etc.).
-*/
 
-#ifndef CORTOS_TIME_DRIVER_HPP
-#define CORTOS_TIME_DRIVER_HPP
+#ifndef CORTOS_TIME_HPP
+#define CORTOS_TIME_HPP
 
 #include <cstdint>
 #include <limits>
@@ -96,49 +83,30 @@ constexpr Duration duration_between(TimePoint a, TimePoint b)
 * TimeDriver Interface
 * ========================================================================= */
 
-/**
-* @brief Abstract interface for time management
-*
-* Callbacks must be ISR-safe!
-*
-* Implementations provide different timing strategies:
-* - Periodic tick (classic RTOS tick interrupt)
-* - Tickless (one-shot timer, power-efficient)
-* - Simulation (virtual time for testing)
-*/
-class ITimeDriver
+namespace time
 {
-public:
    using Callback = void(*)(void*);
    struct Handle { uint32_t id{0}; }; // 0 = invalid
-
-   virtual ~ITimeDriver() = default;
-
-   ITimeDriver(ITimeDriver const&)            = delete;
-   ITimeDriver& operator=(ITimeDriver const&) = delete;
-   ITimeDriver(ITimeDriver&&)            = delete;
-   ITimeDriver& operator=(ITimeDriver&&) = delete;
-
 
    /**
    * @brief Get the current time
    * @return Current monotonic time point
    */
-   [[nodiscard]] virtual TimePoint now() const noexcept = 0;
+   [[nodiscard]] TimePoint now() noexcept;
 
    /**
     * @brief Schedule a callback to run at/after 'tp'.
     * Callback may run in ISR context (real ports) or in the caller context (simulation).
     * @returns a Handle that can be cancelled.
     */
-   [[nodiscard]] virtual Handle schedule_at(TimePoint tp, Callback cb, void* arg) noexcept = 0;
+   [[nodiscard]] Handle schedule_at(TimePoint tp, Callback cb, void* arg) noexcept;
 
    /**
     * @brief Cancel a scheduled callback
     * Must be safe if callback already fired or never existed.
     * @returns true if it was cancelled before firing, false otherwise.
     */
-   virtual bool cancel(Handle h) noexcept = 0;
+   bool cancel(Handle h) noexcept;
 
    /**
    * @brief Convert duration to native units (for user convenience)
@@ -146,8 +114,8 @@ public:
    * Example: If the TimeDriver runs at 1kHz, from_milliseconds(10) returns
    * Duration{10} (10 ticks).
    */
-   [[nodiscard]] virtual Duration from_milliseconds(uint32_t ms) const noexcept = 0;
-   [[nodiscard]] virtual Duration from_microseconds(uint32_t us) const noexcept = 0;
+   [[nodiscard]] Duration from_milliseconds(uint32_t ms) noexcept;
+   [[nodiscard]] Duration from_microseconds(uint32_t us) noexcept;
 
    /**
    * @brief Start the time driver
@@ -155,25 +123,15 @@ public:
    * Enables timer interrupts and starts time flowing.
    * Should only be called once, after init().
    */
-   virtual void start() noexcept = 0;
-   virtual void stop() noexcept = 0;
+   void start() noexcept;
+   void stop() noexcept;
 
    /**
    * @brief Called in timer interrupt context on the core delivering the timer IRQ.
    */
-  virtual void on_timer_isr() noexcept = 0;
-
-   // Singleton access
-   static ITimeDriver& get_instance()            { return *instance;  }
-   static void set_instance(ITimeDriver* driver) { instance = driver; }
-
-protected:
-   ITimeDriver() = default;
-
-private:
-   static ITimeDriver* instance;
-};
+  void on_timer_isr() noexcept;
+}  // namespace time
 
 } // namespace cortos
 
-#endif // CORTOS_TIME_DRIVER_HPP
+#endif // CORTOS_TIME_HPP
