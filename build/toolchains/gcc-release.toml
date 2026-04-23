@@ -1,10 +1,9 @@
 name = "gcc-release"
-inherits = "gcc-base"
+extends = "gcc-base"
 
-common_cflags = [
-  "-O2",
-]
+[flags]
+common_add = ["-O2"]
 
-common_cxxflags = [
-  "-O2",
-]
+[settings]
+debug = false
+optimization = "2"

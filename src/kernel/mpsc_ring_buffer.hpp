@@ -69,7 +69,7 @@
  * by updating the cell sequence. Consumer reads tail exclusively.
  */
 
-#include "cortos/port.h"
+#include <cortos/port/port.h>
 
 #include <array>
 #include <atomic>

@@ -15,7 +15,7 @@
 #ifndef CORTOS_TIME_DRIVER_SIMULATION_HPP
 #define CORTOS_TIME_DRIVER_SIMULATION_HPP
 
-#include "cortos/time_driver.hpp"
+#include <cortos/time/time.hpp>
 
 #include <atomic>
 #include <chrono>

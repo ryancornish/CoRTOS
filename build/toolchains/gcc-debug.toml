@@ -1,12 +1,9 @@
 name = "gcc-debug"
-inherits = "gcc-base"
+extends = "gcc-base"
 
-common_cflags = [
-  "-O0",
-  "-g3",
-]
+[flags]
+common_add = ["-O0", "-g3"]
 
-common_cxxflags = [
-  "-O0",
-  "-g3",
-]
+[settings]
+debug = true
+optimization = "0"

@@ -1,15 +1,12 @@
 name = "clangd"
-inherits = "gcc-base"
+extends = "clang-base"
 
-c_compiler = "clang"
-cxx_compiler = "clang++"
+[flags]
+common_add = ["-O0", "-g"]
+cxx_add = ["-stdlib=libc++"]
+link_add = ["-stdlib=libc++"]
 
-common_cflags = [
-  "-O0",
-  "-g",
-]
-
-common_cxxflags = [
-  "-O0",
-  "-g",
-]
+[settings]
+debug = true
+optimization = "0"
+use_modules = false

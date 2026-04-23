@@ -1,9 +1,10 @@
-// Add doxygen comment here
+// TODO split up the implementation!
 
-#include "cortos/kernel.hpp"
-#include "cortos/config.hpp"
-#include "cortos/port.h"
-#include "cortos/port_traits.h"
+#include <cortos/kernel/kernel.hpp>
+#include <cortos/port/port.h>
+#include <cortos/port/port_traits.h>
+#include <cortos/config/config.hpp>
+
 #include "mpsc_ring_buffer.hpp"
 
 #include <algorithm>

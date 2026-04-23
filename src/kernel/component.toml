@@ -6,5 +6,5 @@ sources = [
 ]
 
 public_headers = [
-  "public_headers/kernel.hpp -> cortos/kernel.hpp",
+  "public_headers/kernel.hpp -> cortos/kernel/kernel.hpp",
 ]

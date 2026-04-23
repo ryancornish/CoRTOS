@@ -49,3 +49,6 @@ compile_commands.json
 coverage.xml
 coverage_html/
 build_coverage/
+
+# Build output
+out/

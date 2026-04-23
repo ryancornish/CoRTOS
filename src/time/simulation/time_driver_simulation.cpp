@@ -1,4 +1,4 @@
-#include "cortos/time_driver_simulation.hpp"
+#include <cortos/time/simulation.hpp>
 
 #include <algorithm>
 #include <chrono>

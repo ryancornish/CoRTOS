@@ -10,7 +10,7 @@
  * to determine which simulated core is running.
  */
 
-#include "cortos/port.h"
+#include <cortos/port/port.h>
 
 #include <boost/context/fiber.hpp>
 #include <boost/context/preallocated.hpp>
