@@ -1,14 +1,19 @@
 name = "linux_boost_periodic"
 default_toolchain = "gcc-debug"
 
+[layout]
+project_root = "../.."
+build_root = ".."
+source_root = "../../src"
+output_root = "../../out"
+
 [build]
 port = "linux_boost"
 time_driver = "periodic"
-config = "config/config.hpp"
+config_header = "sim.hpp"
 
-[libcortos]
+[features]
 enable = []
 
 [output]
-root = "../bld"
 archive = "cortos.a"

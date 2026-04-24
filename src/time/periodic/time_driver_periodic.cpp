@@ -1,45 +1,131 @@
-/**
- * @file time_driver_periodic.cpp
- * @brief Periodic tick TimeDriver implementation
- */
+#include <cortos/time/time.hpp>
+#include <cortos/config/config.hpp>
+#include <cortos/port/port.h>
 
-#include "cortos/time_driver_periodic.hpp"
-#include "cortos/port.h"
+#include <array>
+#include <cstdint>
 
-#include <cassert>
+namespace cortos::time::periodic
+{
+   /**
+    * @brief Maximum number of simultaneously scheduled callbacks
+    *
+    * This is a fixed-size embedded-safe limit to avoid heap allocation.
+    */
+   static constexpr uint32_t MAX_SCHEDULED_CALLBACKS = 16;
 
-namespace cortos
+   /**
+    * @brief Scheduled callback slot
+    */
+   struct Slot
+   {
+      uint32_t id{0};
+      uint64_t when{0};
+      Callback cb{nullptr};
+      void* arg{nullptr};
+   };
+
+   /**
+    * @brief RAII interrupt disable/restore guard
+    */
+   struct IrqGuard
+   {
+      uint32_t state;
+
+      IrqGuard() noexcept : state(cortos_port_irq_save()) {}
+      ~IrqGuard() { cortos_port_irq_restore(state); }
+
+      IrqGuard(IrqGuard const&) = delete;
+      IrqGuard& operator=(IrqGuard const&) = delete;
+   };
+
+   /**
+    * @brief Internal periodic driver state
+    */
+   struct DriverState
+   {
+      bool initialised{false};
+      uint32_t tick_frequency_hz{0};
+      uint32_t next_id{1};
+      bool started{false};
+      std::array<Slot, MAX_SCHEDULED_CALLBACKS> slots{};
+   };
+
+   static constinit DriverState ds{};
+
+   static void fire_due_isr(uint64_t now_ticks) noexcept
+   {
+      // No heap, ISR-safe.
+      // Free slot before invoking callback to avoid reentrancy hazards.
+      for (auto& slot : ds.slots) {
+         if (slot.id != 0 && slot.when <= now_ticks) {
+            auto cb = slot.cb;
+            auto arg = slot.arg;
+            slot = Slot{};
+            cb(arg);
+         }
+      }
+   }
+
+   static void isr_trampoline(void*) noexcept
+   {
+      cortos::time::on_timer_isr();
+   }
+
+   static inline uint64_t ceil_div_u64(uint64_t a, uint64_t b) noexcept
+   {
+      return (a + b - 1) / b;
+   }
+} // namespace cortos::time::periodic
+
+
+namespace cortos::time
 {
 
-[[nodiscard]] TimePoint PeriodicTickDriver::now() const noexcept
+void initialise(uint32_t frequency_hz)
+{
+   CORTOS_ASSERT(!periodic::ds.initialised);
+   periodic::ds.initialised = true;
+   periodic::ds.tick_frequency_hz = frequency_hz;
+}
+
+void finalise()
+{
+   CORTOS_ASSERT(periodic::ds.initialised);
+   periodic::ds = periodic::DriverState{};
+}
+
+[[nodiscard]] TimePoint now() noexcept
 {
    return TimePoint{cortos_port_time_now()};
 }
 
-ITimeDriver::Handle PeriodicTickDriver::schedule_at(TimePoint tp, Callback cb, void* arg) noexcept
+[[nodiscard]] Handle schedule_at(TimePoint tp, Callback cb, void* arg) noexcept
 {
-   if (!cb) return {};
+   if (!cb) {
+      return {};
+   }
 
-   // SMP Policy A note:
-   // For now we assume schedule_at is called on the time core (core 0).
-   // Later: non-time-core calls should enqueue a request and poke time core.
-   // if (cortos_port_get_core_id() != 0) { enqueue_request(...); cortos_port_send_time_ipi(0); return handle; }
+   // SMP note:
+   // For now this assumes schedule_at() is called on the time core.
+   // Future work can enqueue requests to the time core and poke it via IPI.
 
-   IrqGuard g;
+   periodic::IrqGuard guard;
 
-   for (auto& slot : slots) {
+   for (auto& slot : periodic::ds.slots) {
       if (slot.id == 0) {
-         uint32_t id = next_id++;
-         if (id == 0) id = next_id++; // avoid 0
+         uint32_t id = periodic::ds.next_id++;
+         if (id == 0) {
+            id = periodic::ds.next_id++; // avoid invalid handle id 0
+         }
 
          slot.id = id;
          slot.when = tp.value;
          slot.cb = cb;
          slot.arg = arg;
 
-         // In periodic mode, we don't arm hardware one-shots.
-         // The periodic ISR will pick this up when due.
-
+         // In periodic mode, no one-shot rearm is required.
+         // The periodic ISR will pick this callback up when due.
          return Handle{id};
       }
    }
@@ -47,81 +133,68 @@ ITimeDriver::Handle PeriodicTickDriver::schedule_at(TimePoint tp, Callback cb, v
    return {}; // out of slots
 }
 
-bool PeriodicTickDriver::cancel(Handle h) noexcept
+bool cancel(Handle h) noexcept
 {
-   if (h.id == 0) return false;
+   if (h.id == 0) {
+      return false;
+   }
 
-   // Same SMP note as schedule_at regarding time core.
-   IrqGuard g;
+   // Same SMP note as schedule_at().
+   periodic::IrqGuard guard;
 
-   for (auto& slot : slots) {
+   for (auto& slot : periodic::ds.slots) {
       if (slot.id == h.id) {
-         slot = Slot{};
+         slot = periodic::Slot{};
          return true;
       }
    }
+
    return false;
 }
 
-static inline uint64_t ceil_div_u64(uint64_t a, uint64_t b) noexcept { return (a + b - 1) / b; }
-
-[[nodiscard]] Duration PeriodicTickDriver::from_milliseconds(uint32_t ms) const noexcept
+[[nodiscard]] Duration from_milliseconds(uint32_t ms) noexcept
 {
    const uint64_t f = cortos_port_time_freq_hz();
-   const uint64_t ticks = ceil_div_u64(uint64_t(ms) * f, 1000ULL);
+   const uint64_t ticks = periodic::ceil_div_u64(static_cast<uint64_t>(ms) * f, 1000ULL);
    return Duration{ticks};
 }
 
-[[nodiscard]] Duration PeriodicTickDriver::from_microseconds(uint32_t us) const noexcept
+[[nodiscard]] Duration from_microseconds(uint32_t us) noexcept
 {
    const uint64_t f = cortos_port_time_freq_hz();
-   const uint64_t ticks = ceil_div_u64(uint64_t(us) * f, 1'000'000ULL);
+   const uint64_t ticks = periodic::ceil_div_u64(static_cast<uint64_t>(us) * f, 1'000'000ULL);
    return Duration{ticks};
 }
 
-void PeriodicTickDriver::start() noexcept
+void start() noexcept
 {
-   if (started) return;
+   if (periodic::ds.started) {
+      return;
+   }
 
-   cortos_port_time_register_isr_handler(&isr_trampoline, this);
+   CORTOS_ASSERT(periodic::ds.tick_frequency_hz > 0);
 
-   assert(tick_frequency_hz > 0 && "tick_freq of 0 indicates tickless mode, which this driver is NOT!");
-
-   cortos_port_time_setup(tick_frequency_hz);
-
+   cortos_port_time_register_isr_handler(&periodic::isr_trampoline, nullptr);
+   cortos_port_time_setup(periodic::ds.tick_frequency_hz);
    cortos_port_time_irq_enable();
 
-   started = true;
+   periodic::ds.started = true;
 }
 
-void PeriodicTickDriver::stop() noexcept {
-   if (!started) return;
+void stop() noexcept
+{
+   if (!periodic::ds.started) {
+      return;
+   }
 
    cortos_port_time_irq_disable();
-   started = false;
+   periodic::ds.started = false;
 }
 
-void PeriodicTickDriver::on_timer_isr() noexcept
+void on_timer_isr() noexcept
 {
    const uint64_t now_ticks = cortos_port_time_now();
-   fire_due_isr(now_ticks);
+   periodic::fire_due_isr(now_ticks);
 }
 
-void PeriodicTickDriver::fire_due_isr(uint64_t now_ticks) noexcept
-{
-   // No heap, ISR-safe.
-   // We free the slot before invoking callback to avoid reentrancy hazards.
-   for (auto& slot : slots) {
-      if (slot.id != 0 && slot.when <= now_ticks) {
-         auto cb = slot.cb;
-         auto arg = slot.arg;
-         slot = Slot{};
-         cb(arg);
-      }
-   }
-}
-
-PeriodicTickDriver::IrqGuard::IrqGuard() : slot(cortos_port_irq_save()) {}
-PeriodicTickDriver::IrqGuard::~IrqGuard() { cortos_port_irq_restore(slot); }
-
-} // namespace cortos
+} // namespace cortos::time

@@ -1,26 +1,26 @@
-
 #ifndef CORTOS_TIME_HPP
 #define CORTOS_TIME_HPP
 
 #include <cstdint>
 #include <limits>
 
-namespace cortos
+namespace cortos::time
 {
 
 /* ============================================================================
-* Time Types
-* ========================================================================= */
+ * Time Types
+ * ========================================================================= */
 
 /**
-* @brief Monotonic time point (in ticks)
-*
-* This is an opaque, monotonically increasing value. The actual unit
-* (microseconds, milliseconds, ticks) depends on the TimeDriver implementation.
-*
-* Time points can be compared (<, >, ==) but not subtracted directly.
-* Use duration_between() to get the difference.
-*/
+ * @brief Monotonic time point in driver ticks.
+ *
+ * A TimePoint is an absolute timestamp measured in the logical tick units of
+ * the active time driver. The underlying unit is defined by the driver
+ * frequency passed to initialise().
+ *
+ * Time points may be compared directly. Use duration_between() to form a
+ * non-negative Duration between two points.
+ */
 struct TimePoint
 {
    uint64_t value{0};
@@ -35,17 +35,18 @@ struct TimePoint
    constexpr bool operator> (TimePoint rhs) const { return value >  rhs.value; }
    constexpr bool operator>=(TimePoint rhs) const { return value >= rhs.value; }
 
-   static constexpr TimePoint max()
+   [[nodiscard]] static constexpr TimePoint max()
    {
       return TimePoint{std::numeric_limits<uint64_t>::max()};
    }
 };
 
 /**
-* @brief Duration (difference between two TimePoints)
-*
-* Represents a span of time in the same units as TimePoint.
-*/
+ * @brief Time duration in driver ticks.
+ *
+ * A Duration is a relative span of time measured in the same logical units as
+ * TimePoint.
+ */
 struct Duration
 {
    uint64_t value{0};
@@ -68,70 +69,128 @@ struct Duration
    constexpr bool operator> (Duration rhs) const { return value >  rhs.value; }
 };
 
+/**
+ * @brief Add a duration to a time point.
+ */
 constexpr TimePoint operator+(TimePoint tp, Duration d)
 {
    return TimePoint{tp.value + d.value};
 }
 
+/**
+ * @brief Return the non-negative duration between two time points.
+ *
+ * If @p a is earlier than @p b, the result is clamped to zero.
+ */
 constexpr Duration duration_between(TimePoint a, TimePoint b)
 {
-  return (a.value >= b.value) ? Duration{a.value - b.value} : Duration{0};
+   return (a.value >= b.value) ? Duration{a.value - b.value} : Duration{0};
 }
+
+/**
+ * @brief Scheduled callback function type.
+ */
+using Callback = void(*)(void*);
+
+/**
+ * @brief Opaque handle for a scheduled callback.
+ *
+ * A handle with id == 0 is invalid.
+ */
+struct Handle
+{
+   uint32_t id{0};
+};
 
 
 /* ============================================================================
-* TimeDriver Interface
-* ========================================================================= */
+ * Time Driver Interface - Must be implemented by a specific time driver
+ * ========================================================================= */
 
-namespace time
-{
-   using Callback = void(*)(void*);
-   struct Handle { uint32_t id{0}; }; // 0 = invalid
+/**
+ * @brief Initialise the active time driver.
+ *
+ * @param frequency_hz Logical driver frequency in Hz.
+ *
+ * This frequency defines the tick units used by TimePoint, Duration, and the
+ * conversion helpers such as from_milliseconds().
+ */
+void initialise(uint32_t frequency_hz);
 
-   /**
-   * @brief Get the current time
-   * @return Current monotonic time point
-   */
-   [[nodiscard]] TimePoint now() noexcept;
+/**
+ * @brief Finalise the active time driver.
+ *
+ * Releases any driver-owned state and returns the time subsystem to an
+ * uninitialised state.
+ */
+void finalise();
 
-   /**
-    * @brief Schedule a callback to run at/after 'tp'.
-    * Callback may run in ISR context (real ports) or in the caller context (simulation).
-    * @returns a Handle that can be cancelled.
-    */
-   [[nodiscard]] Handle schedule_at(TimePoint tp, Callback cb, void* arg) noexcept;
+/**
+ * @brief Get the current monotonic time.
+ *
+ * @return Current time in driver ticks.
+ */
+[[nodiscard]] TimePoint now() noexcept;
 
-   /**
-    * @brief Cancel a scheduled callback
-    * Must be safe if callback already fired or never existed.
-    * @returns true if it was cancelled before firing, false otherwise.
-    */
-   bool cancel(Handle h) noexcept;
+/**
+ * @brief Schedule a callback to run at or after a specific time point.
+ *
+ * @param tp Absolute deadline in driver ticks.
+ * @param cb Callback to invoke.
+ * @param arg User argument passed to the callback.
+ * @return Handle for later cancellation, or an invalid handle on failure.
+ *
+ * The callback may execute in interrupt context on embedded targets, or in the
+ * caller / simulation context depending on the active driver.
+ */
+[[nodiscard]] Handle schedule_at(TimePoint tp, Callback cb, void* arg) noexcept;
 
-   /**
-   * @brief Convert duration to native units (for user convenience)
-   *
-   * Example: If the TimeDriver runs at 1kHz, from_milliseconds(10) returns
-   * Duration{10} (10 ticks).
-   */
-   [[nodiscard]] Duration from_milliseconds(uint32_t ms) noexcept;
-   [[nodiscard]] Duration from_microseconds(uint32_t us) noexcept;
+/**
+ * @brief Cancel a scheduled callback.
+ *
+ * @param h Handle returned by schedule_at().
+ * @return True if the callback was cancelled before firing, false otherwise.
+ *
+ * It is safe to cancel an invalid, unknown, or already-fired handle.
+ */
+bool cancel(Handle h) noexcept;
 
-   /**
-   * @brief Start the time driver
-   *
-   * Enables timer interrupts and starts time flowing.
-   * Should only be called once, after init().
-   */
-   void start() noexcept;
-   void stop() noexcept;
+/**
+ * @brief Convert milliseconds to a driver Duration.
+ *
+ * Conversion is rounded up so that non-zero durations do not undersleep.
+ */
+[[nodiscard]] Duration from_milliseconds(uint32_t ms) noexcept;
 
-   /**
-   * @brief Called in timer interrupt context on the core delivering the timer IRQ.
-   */
-  void on_timer_isr() noexcept;
-}  // namespace time
+/**
+ * @brief Convert microseconds to a driver Duration.
+ *
+ * Conversion is rounded up so that non-zero durations do not undersleep.
+ */
+[[nodiscard]] Duration from_microseconds(uint32_t us) noexcept;
 
-} // namespace cortos
+/**
+ * @brief Start the time driver.
+ *
+ * Enables time progression and any required timer interrupt or background
+ * mechanism for the active driver.
+ */
+void start() noexcept;
+
+/**
+ * @brief Stop the time driver.
+ *
+ * Disables time progression mechanisms used by the active driver.
+ */
+void stop() noexcept;
+
+/**
+ * @brief Timer interrupt handler entry point for the active driver.
+ *
+ * Called by the port layer when a timer event occurs.
+ */
+void on_timer_isr() noexcept;
+
+} // namespace cortos::time
 
 #endif // CORTOS_TIME_HPP
