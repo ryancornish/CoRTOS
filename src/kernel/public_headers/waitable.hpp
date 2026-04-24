@@ -1,0 +1,179 @@
+#ifndef CORTOS_WAITABLE_HPP
+#define CORTOS_WAITABLE_HPP
+
+#include <cortos/kernel/function.hpp>
+#include <cortos/kernel/thread.hpp>
+#include <cortos/kernel/spin_lock.hpp>
+
+#include <type_traits>
+
+namespace cortos
+{
+
+/**
+ * @brief Base class for objects that can block threads
+ *
+ * Waitable is inherited by synchronization primitives (Mutex, Semaphore, etc.)
+ * and time-aware objects (Timer). It provides hooks for custom behavior when
+ * threads block/wake on the object.
+ *
+ * Threads do NOT call methods on Waitable directly. Instead, use the free
+ * functions kernel::wait_for() and kernel::wait_for_any().
+ *
+ * Example (Timer in libcortos):
+ *   class Timer : public Waitable
+ *   {
+ *      TimePoint wakeup_time;
+ *      // TimeDriver calls wake_one() when time expires
+ *   };
+ *
+ *   Timer timer;
+ *   Mutex mutex;
+ *   auto result = kernel::wait_for_any({&mutex, &timer});
+ *   // Woken by whichever fired first
+ */
+class Waitable
+{
+public:
+   using Predicate = Function<bool(), 64, HeapPolicy::NoHeap>;
+
+   /**
+   * @brief Result of a wait operation
+   *
+   * Returned from `wait_for()` and `wait_for_any()` to indicate which `Waitable`
+   * triggered the wake-up and whether the thread acquired a resource.
+   */
+   struct Result
+   {
+      int  index{-1};       ///< Index of waitable that triggered (-1 if none)
+      bool acquired{false}; ///< True if resource was acquired (e.g., mutex locked)
+   };
+   static_assert(std::is_trivially_copyable_v<Waitable::Result>, "Waitable::Result must be trivially copyable");
+
+   /**
+   * @brief Snapshot of a thread waiting on a Waitable
+   *
+   * Waiter is a lightweight, read-only snapshot of a thread at the moment it
+   * blocks on or is removed from a Waitable. It contains no ownership or control
+   * semantics and is safe to copy and store.
+   */
+   struct Waiter
+   {
+      Thread::Id       id;                  ///< Unique thread identifier
+      Thread::Priority base_priority;       ///< Thread's base (static) priority
+      Thread::Priority effective_priority;  ///< Thread's effective priority at snapshot time
+      std::uint32_t    pinned_core;         ///< Core the thread is pinned to
+      CoreAffinity     affinity;            ///< Core affinity mask
+
+      /**
+      * @brief Compare priority against another waiter
+      * @return true if this waiter has higher scheduling priority than rhs
+      */
+      [[nodiscard]] constexpr bool higher_priority_than(Waiter const& rhs) const noexcept
+      {
+         return effective_priority.val < rhs.effective_priority.val;
+      }
+   };
+   static_assert(std::is_trivially_copyable_v<Waitable::Waiter>, "Waitable::Waiter must be trivially copyable");
+
+   virtual ~Waitable() = default;
+
+   Waitable(Waitable const&)            = delete;
+   Waitable& operator=(Waitable const&) = delete;
+   Waitable(Waitable&&)            = delete;
+   Waitable& operator=(Waitable&&) = delete;
+
+   /**
+    * @brief Check if any threads are waiting
+    * @return true if wait queue is empty, false if threads are waiting
+    */
+   [[nodiscard]] bool empty() const noexcept;
+
+   /**
+    * @brief Signal one waiting thread (highest priority)
+    * @param acquired True if signalled thread acquired the resource (e.g., mutex lock)
+    *
+    * Moves the highest-priority waiting thread to the ready queue.
+    * If no threads are waiting, this is a no-op.
+    *
+    * The 'acquired' parameter is returned in Waitable::Result:
+    * - Mutex::unlock() -> wake_one(true)  // Woken thread now owns mutex
+    * - Semaphore::post() -> wake_one(false) // Woken thread is just notified
+    * - Timer::expire() -> wake_one(false)   // Woken thread didn't acquire anything
+    *
+    * Called by the owning primitive (e.g., Mutex::unlock(), Timer expiry).
+    */
+   void signal_one(bool acquired = true) noexcept;
+
+   /**
+    * @brief Signal all waiting threads
+    * @param acquired True if signalled threads acquired the resource
+    *
+    * Moves all waiting threads to the ready queue.
+    * If no threads are waiting, this is a no-op.
+    */
+   void signal_all(bool acquired = true) noexcept;
+
+protected:
+   // Abstract Base Class
+   Waitable() = default;
+
+   /**
+    * @brief Called when a thread blocks on this waitable
+    * @param waiter Details of the blocking thread
+    *
+    * Override to implement custom behavior (e.g., priority inheritance).
+    * Called before thread is added to wait queue.
+    * @note no-op when not overridden
+    */
+   virtual void on_thread_blocked(Waiter waiter) {}
+
+   /**
+    * @brief Called when a thread is removed from wait queue
+    * @param waiter Details of the thread being removed (woken or cancelled)
+    *
+    * Override to implement cleanup (e.g., clear inherited priority).
+    * Called after thread is removed from wait queue.
+    * @note no-op when not overridden
+    */
+   virtual void on_thread_removed(Waiter waiter) {}
+
+   using WaiterVisitor = Function<void(Waiter const&), 64, HeapPolicy::NoHeap>;
+   /**
+    * @brief Visit each thread currently waiting on this Waitable
+    *
+    * Calls @p visitor once per waiter with a snapshot taken during traversal.
+    * @warning The visitor must not block.
+    *
+    * Example:
+    * @code
+    * Priority max_priority = Priority{0};
+    * for_each_waiter([&](Waiter w) {
+    *    if (w.effective_priority > max_priority) {
+    *       max_priority = w.effective_priority;
+    *    }
+    * });
+    */
+   void for_each_waiter(WaiterVisitor visitor) const;
+
+private:
+   friend struct TaskControlBlock;
+   friend struct WaitableGroupLock;
+
+   struct WaitNode* head{nullptr};
+   struct WaitNode* tail{nullptr};
+
+   mutable Spinlock wait_lock;
+
+   void add(WaitNode& wait_node) noexcept;
+   void remove(WaitNode& wait_node) noexcept;
+
+   // Select best waiter but do NOT unlink it.
+   // Caller must hold wait_lock.
+   // FIFO among equals: scan from head, pick first with highest priority.
+   WaitNode* pick_best() noexcept;
+};
+
+} // namespace cortos
+
+#endif // CORTOS_WAITABLE_HPP
