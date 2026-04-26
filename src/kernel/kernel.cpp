@@ -5,7 +5,9 @@
 #include <cortos/port/port_traits.h>
 #include <cortos/config/config.hpp>
 
+#include "align.hpp"
 #include "mpsc_ring_buffer.hpp"
+#include "waitable_reference_vector.hpp"
 
 #include <algorithm>
 #include <bit>
@@ -25,19 +27,6 @@
 namespace cortos
 {
 
-/* ============================================================================
- * Configuration validation
- * ========================================================================= */
-static_assert(1 <= config::CORES && config::CORES <= CORTOS_PORT_CORE_COUNT,
-              "Port does not support configured amount of cores.");
-static_assert(config::TIME_CORE_ID < config::CORES,
-              "Time core set to non-existent core.");
-static_assert(config::MAX_PRIORITIES < std::numeric_limits<uint32_t>::digits,
-              "Priorities unsupported by kernel implementation.");
-
-static constexpr std::uintptr_t align_down(std::uintptr_t v, std::size_t a) { return v & ~(static_cast<std::uintptr_t>(a) - 1); }
-static constexpr std::uintptr_t   align_up(std::uintptr_t v, std::size_t a) { return (v + (a - 1)) & ~(static_cast<std::uintptr_t>(a) - 1); }
-
 struct TaskControlBlock;
 struct WaitGroup;
 
@@ -47,62 +36,10 @@ enum class ReadyAction : uint8_t
    Reschedule
 };
 
-class WaitableRefVector
-{
-private:
-   std::array<Waitable*, config::MAX_WAIT_NODES> store{};
-   std::size_t count = 0;
-
-public:
-   constexpr WaitableRefVector() = default;
-   using iterator = Waitable**;
-   using const_iterator = Waitable* const*;
-   iterator begin() { return store.data(); }
-   iterator end()   { return store.data() + count; }
-   [[nodiscard]] bool             empty()    const noexcept { return count == 0; }
-   [[nodiscard]] size_t           size()     const noexcept { return count; }
-   [[nodiscard]] const_iterator   begin()    const noexcept { return store.data(); }
-   [[nodiscard]] const_iterator   end()      const noexcept { return store.data() + count; }
-   [[nodiscard]] constexpr size_t capacity() const noexcept { return store.size(); }
-
-   Waitable* const& operator[](std::size_t index) const noexcept
-   {
-      CORTOS_ASSERT(index < count);
-      return store[index];
-   }
-
-   void push(Waitable* waitable)
-   {
-      CORTOS_ASSERT(count < store.size());
-      store[count++] = waitable;
-   }
-
-   void push_range(std::span<Waitable* const> waitables)
-   {
-      CORTOS_ASSERT(count + waitables.size() <= store.size());
-      std::ranges::copy(waitables, store.data() + count);
-      count += waitables.size();
-   }
-
-   void pop()
-   {
-      CORTOS_ASSERT(!empty());
-      --count;
-   }
-
-   void sort_by_address()
-   {
-      if (count < 2) return;
-      std::ranges::sort(begin(), end());
-   }
-
-   void clear() noexcept { count = 0; }
-};
-
 struct WaitableGroupLock
 {
 private:
-   WaitableRefVector group;
+   WaitableRefVector<config::MAX_WAIT_NODES> group;
 
 public:
    WaitableGroupLock(WaitableGroupLock const&) = delete;
@@ -468,7 +405,7 @@ struct TaskControlBlock
    {
       // Snapshot once: all removals in this teardown relate to the same waiter (this thread).
       auto const waiter = create_waiter();
-      WaitableRefVector waitables;
+      WaitableRefVector<config::MAX_WAIT_NODES> waitables;
 
       // First pass: collect involved waitables
       wait_nodes.for_each_active([&](WaitNode& node) {

@@ -5,6 +5,10 @@ sources = [
   "kernel.cpp",
 ]
 
+sources_excluded_from_archive = [
+  "validate_config.cpp"
+]
+
 public_headers = [
   "public_headers/kernel.hpp -> cortos/kernel/kernel.hpp",
   "public_headers/function.hpp -> cortos/kernel/function.hpp",
