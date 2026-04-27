@@ -1,7 +1,8 @@
-#ifndef CORTOS_WAITABLE_REFERENCE_VECTOR_HPP
-#define CORTOS_WAITABLE_REFERENCE_VECTOR_HPP
+#ifndef CORTOS_WAITABLE_UTILITIES_HPP
+#define CORTOS_WAITABLE_UTILITIES_HPP
 
 #include <cortos/kernel/waitable.hpp>
+#include <cortos/config/config.hpp>
 #include <cortos/port/port.h>
 
 #include <array>
@@ -94,6 +95,42 @@ public:
    }
 };
 
+
+class WaitableGroupLock
+{
+private:
+   WaitableRefVector<config::MAX_WAIT_NODES> group;
+
+public:
+   WaitableGroupLock(WaitableGroupLock const&) = delete;
+   WaitableGroupLock(WaitableGroupLock&&) = delete;
+   WaitableGroupLock& operator=(WaitableGroupLock const&) = delete;
+   WaitableGroupLock& operator=(WaitableGroupLock&&) = delete;
+
+   explicit WaitableGroupLock(std::span<Waitable* const> waitables)
+   {
+      group.push_range(waitables);
+      group.sort_by_address();
+      // Enforce uniqueness
+      for (std::size_t i = 1; i < group.size(); ++i) {
+         CORTOS_ASSERT(group[i] != group[i - 1]);
+      }
+
+      // Lock in order
+      for (auto& waitable : group) {
+         waitable->wait_lock.lock();
+      }
+   }
+
+   ~WaitableGroupLock()
+   {
+      auto n = group.size();
+      while (n--) {
+         group[n]->wait_lock.unlock();
+      }
+   }
+};
+
 } // namespace cortos
 
-#endif // CORTOS_WAITABLE_REFERENCE_VECTOR_HPP
+#endif // CORTOS_WAITABLE_UTILITIES_HPP

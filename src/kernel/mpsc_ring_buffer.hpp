@@ -68,6 +68,8 @@
  * Producers use CAS on head to claim slots, then write data and publish
  * by updating the cell sequence. Consumer reads tail exclusively.
  */
+#ifndef CORTOS_MPSC_RING_BUFFER_HPP
+#define CORTOS_MPSC_RING_BUFFER_HPP
 
 #include <cortos/port/port.h>
 
@@ -312,3 +314,5 @@ private:
 };
 
 }  // namespace cortos
+
+#endif // CORTOS_MPSC_RING_BUFFER_HPP
