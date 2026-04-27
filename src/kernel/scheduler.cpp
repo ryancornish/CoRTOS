@@ -3,7 +3,6 @@
 namespace cortos
 {
 
-
 void Scheduler::pin_task(TaskControlBlock& tcb)
 {
    tcb.pinned_core = core_id;

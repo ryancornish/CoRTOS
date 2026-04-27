@@ -3,7 +3,8 @@ kind = "core"
 
 sources = [
   "kernel.cpp",
-  "scheduler.cpp"
+  "scheduler.cpp",
+  "waitable.cpp"
 ]
 
 sources_excluded_from_archive = [
