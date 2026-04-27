@@ -213,7 +213,7 @@ void thread_launcher(void* tcb_ptr)
    cortos_port_thread_exit();
 }
 
-void idle_thread()
+void idle_task()
 {
    while (KERNEL.is_running()) {
       cortos_port_idle();

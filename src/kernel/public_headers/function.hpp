@@ -3,6 +3,7 @@
 
 #include <array>
 #include <cstddef>
+#include <new>
 
 namespace cortos
 {

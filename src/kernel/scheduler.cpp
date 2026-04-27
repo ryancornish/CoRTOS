@@ -148,7 +148,15 @@ void Scheduler::enable_preemption()
 {
    CORTOS_ASSERT(preempt_disable_depth > 0);
    if (--preempt_disable_depth == 0) {
-      cortos_port_pend_reschedule(); // TODO: Should this really be here?
+      // Commenting the following out due to the bug on thread termination:
+      // - The thread has exited the entry(), marked itself as terminated, and wants to
+      //   signal all termination waiters - this requires holding a spin lock.
+      //   on destruction of the spin-lock, we reenable preemption which forces a reschedule due to below.
+      //   But the thread has already been marked as terminated so it does not get rotated in the reschedule
+      //   algorithm...
+      //   anyways either this should not happen on enable, or we are marking the thread as terminated too early!
+      //   I'll decide later which decision is correct.
+      //cortos_port_pend_reschedule(); // TODO: Should this really be here?
    }
 }
 
