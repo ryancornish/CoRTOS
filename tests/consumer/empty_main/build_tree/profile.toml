@@ -1,0 +1,19 @@
+name = "empty_main"
+default_toolchain = "gcc-basic"
+
+[layout]
+project_root = "../../../.."
+build_root = "."
+source_root = "../../../../src"
+output_root = "../out"
+
+[build]
+port = "linux_boost"
+time_driver = "simulation"
+config_header = "empty_main.hpp"
+
+[features]
+enable = []
+
+[output]
+archive = "libcortos.a"
