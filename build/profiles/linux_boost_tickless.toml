@@ -16,4 +16,4 @@ config_header = "sim.hpp"
 enable = []
 
 [output]
-archive = "cortos.a"
+archive = "libcortos.a"
