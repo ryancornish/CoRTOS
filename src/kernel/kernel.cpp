@@ -16,7 +16,7 @@
 #include <limits>
 
 // Invariants list:
-// Only core X mutates Scheduler[X].ready_matrix, current_task, blocked lists, etc.
+// Only core X mutates Scheduler[X].ready_matrix, current_thread, blocked lists, etc.
 // Cross-core ops must go through Scheduler::post_to_inbox() + cortos_port_send_reschedule_ipi(core).
 // Spinlocks are only used with preemption disabled (and maybe IRQs) inside kernel land.
 
@@ -57,7 +57,7 @@ public:
       cortos_port_init(reschedule_this_core);
 
       for (auto& scheduler : schedulers) {
-         scheduler.init_idle_task();
+         scheduler.init_idle_thread();
       }
       initialised = true;
    }
@@ -87,7 +87,7 @@ public:
    }
 
    // Load-balancing pinner
-   void pin_thread_to_core(TaskControlBlock& tcb) noexcept
+   void pin_thread_to_core(ThreadControlBlock& tcb) noexcept
    {
       uint32_t best_core = std::numeric_limits<uint32_t>::max();
       uint32_t best_load = std::numeric_limits<uint32_t>::max();
@@ -96,7 +96,7 @@ public:
       for (uint32_t core = 0; core < schedulers.size(); ++core) {
          if (!tcb.affinity.allows(core)) continue;
 
-         uint32_t load = schedulers[core].pinned_task_count();
+         uint32_t load = schedulers[core].pinned_thread_count();
          if (load < best_load) {
             best_load = load;
             best_core = core;
@@ -105,10 +105,10 @@ public:
       }
       CORTOS_ASSERT(found); // Thread affinity mask allows no cores
 
-      schedulers.at(best_core).pin_task(tcb);
+      schedulers.at(best_core).pin_thread(tcb);
    }
 
-   void register_thread(TaskControlBlock& tcb) noexcept
+   void register_thread(ThreadControlBlock& tcb) noexcept
    {
       active_threads.fetch_add(1, std::memory_order_seq_cst);
 
@@ -135,33 +135,33 @@ public:
    * of its pinned core. If the thread belongs to another core, a cross-core
    * request is posted so that the owning scheduler performs the enqueue.
    *
-   * @param tcb Task control block of the thread to make runnable.
+   * @param tcb Thread control block of the thread to make runnable.
    * @return ReadyAction::Reschedule if the thread was queued on the current
-   *         core and has higher priority than the running task, indicating
+   *         core and has higher priority than the running thread, indicating
    *         the caller should request a local reschedule.
    */
-   ReadyAction set_thread_ready(TaskControlBlock& tcb) noexcept
+   ReadyAction set_thread_ready(ThreadControlBlock& tcb) noexcept
    {
-      CORTOS_ASSERT_OP(tcb.state, !=, TaskControlBlock::State::Terminated);
+      CORTOS_ASSERT_OP(tcb.state, !=, ThreadControlBlock::State::Terminated);
 
       auto& scheduler = scheduler_for_core(tcb.pinned_core);
 
       // If cores are not running yet, enqueue directly (even for remote cores)
       if (!running.load(std::memory_order_acquire)) {
-         scheduler.set_task_ready(tcb);
+         scheduler.set_thread_ready(tcb);
          return ReadyAction::None;
       }
 
       auto this_core = cortos_port_get_core_id();
       if (this_core == tcb.pinned_core) {
-         scheduler.set_task_ready(tcb);
+         scheduler.set_thread_ready(tcb);
 
-         if (tcb.is_higher_priority_than(scheduler.current_task_priority())) {
+         if (tcb.is_higher_priority_than(scheduler.current_thread_priority())) {
             return ReadyAction::Reschedule;
          }
       } else {
          bool posted = scheduler.post_to_inbox({
-            .type = CrossCoreRequest::SetTaskReady,
+            .type = CrossCoreRequest::SetThreadReady,
             .tcb = &tcb
          });
          CORTOS_ASSERT(posted);
@@ -196,18 +196,18 @@ static void core_entry()
 
 void thread_launcher(void* tcb_ptr)
 {
-   auto* tcb = static_cast<TaskControlBlock*>(tcb_ptr);
+   auto* tcb = static_cast<ThreadControlBlock*>(tcb_ptr);
 
    cortos_port_set_tls_pointer(tcb); // For now point TLS to the TCB, but in future, TLS sits just after TCB
 
    tcb->entry();
 
-   tcb->state = TaskControlBlock::State::Terminated;
+   tcb->state = ThreadControlBlock::State::Terminated;
 
    // Signal joiners
    tcb->termination.terminate();
 
-   if (tcb->id == Scheduler::IDLE_TASK_ID) return; // Idle tasks are not apart of the same bookkeeping
+   if (tcb->id == Scheduler::IDLE_THREAD_ID) return; // Idle threads are not apart of the same bookkeeping
 
    KERNEL.unregister_thread();
    cortos_port_thread_exit();
@@ -227,7 +227,7 @@ ReadyAction WaitNode::wake_thread(bool acquired) const noexcept
    CORTOS_ASSERT(group != nullptr);
    CORTOS_ASSERT(waitable != nullptr);
    CORTOS_ASSERT(index != INVALID_INDEX);
-   CORTOS_ASSERT_OP(tcb->state, ==, TaskControlBlock::State::Blocked);
+   CORTOS_ASSERT_OP(tcb->state, ==, ThreadControlBlock::State::Blocked);
 
    if (!group->try_win(static_cast<int>(index), acquired)) {
       return ReadyAction::None; // lost
@@ -245,7 +245,7 @@ ReadyAction WaitNode::wake_thread(bool acquired) const noexcept
 Thread::Thread(EntryFn&& entry, std::span<std::byte> stack, Priority priority, CoreAffinity affinity)
 {
    StackLayout slayout(stack, 0);
-   tcb = ::new (slayout.tcb) TaskControlBlock(
+   tcb = ::new (slayout.tcb) ThreadControlBlock(
       KERNEL.generate_thread_id(),
       priority,
       affinity,
@@ -259,7 +259,7 @@ Thread::Thread(EntryFn&& entry, std::span<std::byte> stack, Priority priority, C
 Thread::~Thread()
 {
    if (tcb == nullptr) return; // Thread handle has been moved from, or is otherwise empty
-   CORTOS_ASSERT(tcb->state == TaskControlBlock::State::Terminated);
+   CORTOS_ASSERT(tcb->state == ThreadControlBlock::State::Terminated);
 }
 
 Thread::Thread(Thread&& other) noexcept : tcb(other.tcb)
@@ -335,11 +335,11 @@ namespace kernel
       {
          WaitableGroupLock lock_group(waitables);
 
-         scheduler.prepare_block_current_task(waitables);
+         scheduler.prepare_block_current_thread(waitables);
       }
-      scheduler.notify_block_current_task(waitables);
+      scheduler.notify_block_current_thread(waitables);
 
-      auto result = scheduler.commence_block_current_task();
+      auto result = scheduler.commence_block_current_thread();
 
       return result;
    }
@@ -365,11 +365,11 @@ namespace kernel
 
             if (predicate()) return result;
 
-            scheduler.prepare_block_current_task(waitables);
+            scheduler.prepare_block_current_thread(waitables);
          }
-         scheduler.notify_block_current_task(waitables);
+         scheduler.notify_block_current_thread(waitables);
 
-         result = scheduler.commence_block_current_task();
+         result = scheduler.commence_block_current_thread();
       }
    }
 
@@ -379,12 +379,12 @@ namespace this_thread
 {
    [[nodiscard]] Thread::Id id()
    {
-      return KERNEL.scheduler_for_this_core().current_task_id();
+      return KERNEL.scheduler_for_this_core().current_thread_id();
    }
 
    [[nodiscard]] Thread::Priority priority()
    {
-      return KERNEL.scheduler_for_this_core().current_task_priority();
+      return KERNEL.scheduler_for_this_core().current_thread_priority();
    }
 
    [[nodiscard]] std::uint32_t core_id() noexcept

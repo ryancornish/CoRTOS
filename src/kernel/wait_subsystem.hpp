@@ -10,6 +10,7 @@
 namespace cortos
 {
 
+struct ThreadControlBlock;
 struct WaitGroup;
 
 enum class ReadyAction : uint8_t
@@ -39,7 +40,7 @@ struct WaitNode
    WaitNode* next{nullptr};
    WaitNode* prev{nullptr};
 
-   TaskControlBlock* tcb{nullptr};
+   ThreadControlBlock* tcb{nullptr};
    Waitable*    waitable{nullptr};
    WaitGroup*      group{nullptr};
 
@@ -98,7 +99,7 @@ public:
    static_assert(N > 0, "MAX_WAIT_NODES must be > 0");
    static_assert(N <= std::numeric_limits<uint32_t>::digits, "WaitNodePool currently supports up to 32 nodes via uint32_t mask");
 
-   constexpr explicit WaitNodePool(TaskControlBlock* tcb) noexcept
+   constexpr explicit WaitNodePool(ThreadControlBlock* tcb) noexcept
    {
       for (std::size_t i = 0; auto& node : nodes) {
          node.tcb  = tcb;

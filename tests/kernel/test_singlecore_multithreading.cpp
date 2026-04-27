@@ -263,7 +263,7 @@ TEST(SingleCoreMultiThread_Test,
       threads.emplace_back(
       [&]{
          markers.push_back(this_thread::id());
-         this_thread::yield(); // Should reenqueue same task leading to double number pushback
+         this_thread::yield(); // Should reenqueue same thread leading to double number pushback
          markers.push_back(this_thread::id());
       },
       stack, Thread::Priority(prio--), Core0);

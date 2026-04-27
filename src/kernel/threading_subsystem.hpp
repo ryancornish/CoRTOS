@@ -36,14 +36,14 @@ public:
    }
 };
 
-struct TaskControlBlock
+struct ThreadControlBlock
 {
    enum class State : uint8_t { Ready, Running, Blocked, Terminated };
    State state{State::Ready};
 
-   // Intrusive 'linked-list' links for a TaskReadyQueue
-   TaskControlBlock* next{nullptr};
-   TaskControlBlock* prev{nullptr};
+   // Intrusive 'linked-list' links for a ThreadReadyQueue
+   ThreadControlBlock* next{nullptr};
+   ThreadControlBlock* prev{nullptr};
 
    uint32_t id;
    uint8_t base_priority;
@@ -72,7 +72,7 @@ struct TaskControlBlock
       return next != nullptr || prev != nullptr;
    }
 
-   [[nodiscard]] constexpr bool is_higher_priority_than(TaskControlBlock& rhs)  const noexcept
+   [[nodiscard]] constexpr bool is_higher_priority_than(ThreadControlBlock& rhs)  const noexcept
    {
       return effective_priority < rhs.effective_priority;
    }
@@ -81,7 +81,7 @@ struct TaskControlBlock
       return effective_priority < priority_level;
    }
 
-   TaskControlBlock(uint32_t id, Thread::Priority priority, CoreAffinity affinity, std::span<std::byte> stack, Thread::EntryFn&& entry) :
+   ThreadControlBlock(uint32_t id, Thread::Priority priority, CoreAffinity affinity, std::span<std::byte> stack, Thread::EntryFn&& entry) :
       id(id), base_priority(priority), effective_priority(priority), affinity(affinity), stack(stack), entry(std::move(entry))
    {
       cortos_port_context_init(context(), stack.data(), stack.size(), thread_launcher, this);
@@ -180,7 +180,7 @@ struct TaskControlBlock
 /**
  * Carves a user-provided buffer region into:
  * +----------------------+ <-- buffer's end (high address)
- * +   TaskControlBlock   + (Fixed size)
+ * +   ThreadControlBlock   + (Fixed size)
  * +----------------------+
  * + Thread-local storage + (Variable size)
  * +----------------------+
@@ -189,7 +189,7 @@ struct TaskControlBlock
  */
 struct StackLayout
 {
-   TaskControlBlock* tcb;
+   ThreadControlBlock* tcb;
    std::span<std::byte> tls_region;
    std::span<std::byte> user_stack;
 
@@ -199,8 +199,8 @@ struct StackLayout
       auto const end  = base + buffer.size();
 
       // TCB at very top, aligned down
-      auto const tcb_start = align_down(end - sizeof(TaskControlBlock), alignof(TaskControlBlock));
-      tcb = reinterpret_cast<TaskControlBlock*>(tcb_start);
+      auto const tcb_start = align_down(end - sizeof(ThreadControlBlock), alignof(ThreadControlBlock));
+      tcb = reinterpret_cast<ThreadControlBlock*>(tcb_start);
 
       // TLS just below TCB
       auto const tls_size = align_up(tls_bytes, alignof(std::max_align_t));
@@ -221,11 +221,11 @@ struct StackLayout
    }
 };
 
-class TaskReadyQueue
+class ThreadReadyQueue
 {
 private:
-   TaskControlBlock* head{nullptr};
-   TaskControlBlock* tail{nullptr};
+   ThreadControlBlock* head{nullptr};
+   ThreadControlBlock* tail{nullptr};
 
 public:
    [[nodiscard]] constexpr bool empty() const noexcept
@@ -238,7 +238,7 @@ public:
       return head && head != tail;
    }
 
-   [[nodiscard]] constexpr TaskControlBlock* front() const noexcept
+   [[nodiscard]] constexpr ThreadControlBlock* front() const noexcept
    {
       return head;
    }
@@ -251,17 +251,17 @@ public:
       return n;
    }
 
-   void push_back(TaskControlBlock& tcb) noexcept
+   void push_back(ThreadControlBlock& tcb) noexcept
    {
       CORTOS_ASSERT(!tcb.is_enqueued());
-      CORTOS_ASSERT_OP(tcb.state, ==, TaskControlBlock::State::Ready); // Task must be ready to be enqueued
+      CORTOS_ASSERT_OP(tcb.state, ==, ThreadControlBlock::State::Ready); // Thread must be ready to be enqueued
       tcb.next = nullptr;
       tcb.prev = tail;
       if (tail) tail->next = &tcb; else head = &tcb;
       tail = &tcb;
    }
 
-   TaskControlBlock* pop_front() noexcept
+   ThreadControlBlock* pop_front() noexcept
    {
       if (empty()) return nullptr;
       auto* tcb = head;
@@ -271,7 +271,7 @@ public:
       return tcb;
    }
 
-   void remove(TaskControlBlock& tcb) noexcept
+   void remove(ThreadControlBlock& tcb) noexcept
    {
       CORTOS_ASSERT(&tcb == head || tcb.prev != nullptr);
       CORTOS_ASSERT(&tcb == tail || tcb.next != nullptr);
@@ -284,16 +284,16 @@ public:
    }
 };
 
-class TaskReadyMatrix
+class ThreadReadyMatrix
 {
 private:
    static constexpr std::size_t BITMAP_BITS = std::numeric_limits<uint32_t>::digits;
-   std::array<TaskReadyQueue, config::MAX_PRIORITIES> matrix{};
+   std::array<ThreadReadyQueue, config::MAX_PRIORITIES> matrix{};
    uint32_t bitmap{0};
    static_assert(config::MAX_PRIORITIES <= BITMAP_BITS, "bitmap cannot hold that many priorities!");
 
 public:
-   constexpr TaskReadyMatrix() = default;
+   constexpr ThreadReadyMatrix() = default;
 
    [[nodiscard]] constexpr int best_priority() const noexcept
    {
@@ -325,31 +325,31 @@ public:
       return {bitmap};
    }
 
-   [[nodiscard]] constexpr TaskControlBlock* peek_best_task() const noexcept
+   [[nodiscard]] constexpr ThreadControlBlock* peek_best_thread() const noexcept
    {
       if (bitmap == 0) return nullptr;
       auto const priority = std::countr_zero(bitmap);
       return matrix[priority].front();
    }
 
-   void enqueue_task(TaskControlBlock& tcb) noexcept
+   void enqueue_thread(ThreadControlBlock& tcb) noexcept
    {
       CORTOS_ASSERT_OP(tcb.effective_priority, <, config::MAX_PRIORITIES);
-      CORTOS_ASSERT_OP(tcb.state, ==, TaskControlBlock::State::Ready); // Can only enqueue Ready tasks!
+      CORTOS_ASSERT_OP(tcb.state, ==, ThreadControlBlock::State::Ready); // Can only enqueue Ready threads!
       matrix[tcb.effective_priority].push_back(tcb);
       bitmap |= (1u << tcb.effective_priority);
    }
 
-   TaskControlBlock* pop_best_task() noexcept
+   ThreadControlBlock* pop_best_thread() noexcept
    {
       if (bitmap == 0) return nullptr;
       auto const priority = std::countr_zero(bitmap);
-      TaskControlBlock* tcb = matrix[priority].pop_front();
+      ThreadControlBlock* tcb = matrix[priority].pop_front();
       if (matrix[priority].empty()) bitmap &= ~(1u << priority);
       return tcb;
    }
 
-   void remove_task(TaskControlBlock& tcb) noexcept
+   void remove_thread(ThreadControlBlock& tcb) noexcept
    {
       auto const priority = tcb.effective_priority;
       matrix[priority].remove(tcb);

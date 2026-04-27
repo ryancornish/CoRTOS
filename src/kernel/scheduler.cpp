@@ -3,54 +3,54 @@
 namespace cortos
 {
 
-void Scheduler::pin_task(TaskControlBlock& tcb)
+void Scheduler::pin_thread(ThreadControlBlock& tcb)
 {
    tcb.pinned_core = core_id;
-   pinned_task_counter.fetch_add(1, std::memory_order_relaxed);
+   pinned_thread_counter.fetch_add(1, std::memory_order_relaxed);
 }
 
-void Scheduler::init_idle_task()
+void Scheduler::init_idle_thread()
 {
    StackLayout slayout(idle_stack, 0);
-   idle_task = ::new (slayout.tcb) TaskControlBlock(
-      IDLE_TASK_ID,
+   idle_thread = ::new (slayout.tcb) ThreadControlBlock(
+      IDLE_THREAD_ID,
       config::MAX_PRIORITIES-1,
       CoreAffinity::from_id(core_id),
       slayout.user_stack,
-      idle_thread
+      idle_task
    );
-   idle_task->pinned_core = core_id;
+   idle_thread->pinned_core = core_id;
 }
 
 // Core-local operations (only called on owning core)
 void Scheduler::start() noexcept
 {
-   CORTOS_ASSERT(idle_task != nullptr); // init_idle_task() must run before start()
+   CORTOS_ASSERT(idle_thread != nullptr); // init_idle_thread() must run before start()
 
-   auto* first = ready_matrix.pop_best_task();
+   auto* first = ready_matrix.pop_best_thread();
    if (first == nullptr) {
-      first = idle_task;
+      first = idle_thread;
    }
    CORTOS_ASSERT(first != nullptr);
-   CORTOS_ASSERT_OP(first->state, ==, TaskControlBlock::State::Ready);
-   first->state = TaskControlBlock::State::Running;
-   current_task = first;
+   CORTOS_ASSERT_OP(first->state, ==, ThreadControlBlock::State::Ready);
+   first->state = ThreadControlBlock::State::Running;
+   current_thread = first;
 
-   //cortos_port_set_thread_pointer(current_task);
-   cortos_port_start_first(current_task->context());
+   //cortos_port_set_thread_pointer(current_thread);
+   cortos_port_start_first(current_thread->context());
 }
 
-void Scheduler::set_task_ready(TaskControlBlock& tcb) noexcept
+void Scheduler::set_thread_ready(ThreadControlBlock& tcb) noexcept
 {
    CORTOS_ASSERT_OP(tcb.pinned_core, ==, core_id);
 
-   tcb.state = TaskControlBlock::State::Ready;
+   tcb.state = ThreadControlBlock::State::Ready;
 
-   // Idle task does not belong in the ready_matrix,
+   // Idle thread does not belong in the ready_matrix,
    // but DOES follow state transition semantics
-   if (&tcb == idle_task) return;
+   if (&tcb == idle_thread) return;
 
-   ready_matrix.enqueue_task(tcb);
+   ready_matrix.enqueue_thread(tcb);
 }
 
 void Scheduler::drain_inbox() noexcept
@@ -60,8 +60,8 @@ void Scheduler::drain_inbox() noexcept
    CrossCoreRequest request;
    while (inbox.pop(request)) {
       switch (request.type) {
-         case CrossCoreRequest::SetTaskReady:
-            set_task_ready(*request.tcb);
+         case CrossCoreRequest::SetThreadReady:
+            set_thread_ready(*request.tcb);
             break;
       }
    }
@@ -81,62 +81,62 @@ bool Scheduler::post_to_inbox(CrossCoreRequest request) noexcept
 }
 
 /**
-* @brief Selects the next runnable task for this core and performs a context switch.
+* @brief Selects the next runnable thread for this core and performs a context switch.
 *
 * Invariants / contract:
 * - Called only by the owning core of this Scheduler (no cross-core mutation).
-* - @c current_task is non-null and is the task currently executing on this core.
-* - On entry, @c current_task->state is NEVER Ready:
+* - @c current_thread is non-null and is the thread currently executing on this core.
+* - On entry, @c current_thread->state is NEVER Ready:
 *     - Running    => treated as preempted/rotated and re-enqueued as Ready (except idle).
 *     - Blocked    => must already be removed from ready structures - not re-enqueued.
 *     - Terminated => must not be re-enqueued.
-* - The currently running task is not present in the ready matrix on entry.
+* - The currently running thread is not present in the ready matrix on entry.
 * - Any cross-core readying requests must be visible via @c drain_inbox() before selection.
 */
 void Scheduler::reschedule() noexcept
 {
-   CORTOS_ASSERT(current_task);
-   CORTOS_ASSERT(!current_task->is_enqueued());
-   CORTOS_ASSERT(current_task->state != TaskControlBlock::State::Ready);
+   CORTOS_ASSERT(current_thread);
+   CORTOS_ASSERT(!current_thread->is_enqueued());
+   CORTOS_ASSERT(current_thread->state != ThreadControlBlock::State::Ready);
 
    drain_inbox();
 
-   auto* previous_task = current_task;
+   auto* previous_thread = current_thread;
 
-   switch (previous_task->state) {
-      case TaskControlBlock::State::Running:
-         set_task_ready(*previous_task);
+   switch (previous_thread->state) {
+      case ThreadControlBlock::State::Running:
+         set_thread_ready(*previous_thread);
          break;
 
-      case TaskControlBlock::State::Blocked:
-      case TaskControlBlock::State::Terminated:
+      case ThreadControlBlock::State::Blocked:
+      case ThreadControlBlock::State::Terminated:
          break;
 
-      case TaskControlBlock::State::Ready:
+      case ThreadControlBlock::State::Ready:
          __builtin_unreachable();
    }
 
-   auto* next_task = ready_matrix.pop_best_task();
-   if (!next_task) next_task = idle_task;
+   auto* next_thread = ready_matrix.pop_best_thread();
+   if (!next_thread) next_thread = idle_thread;
 
-   current_task = next_task;
-   next_task->state = TaskControlBlock::State::Running;
-   cortos_port_switch(previous_task->context(), next_task->context());
+   current_thread = next_thread;
+   next_thread->state = ThreadControlBlock::State::Running;
+   cortos_port_switch(previous_thread->context(), next_thread->context());
 }
 
-void Scheduler::prepare_block_current_task(std::span<Waitable* const> waitables)
+void Scheduler::prepare_block_current_thread(std::span<Waitable* const> waitables)
 {
-   current_task->prepare_block(waitables);
+   current_thread->prepare_block(waitables);
 }
 
-Waitable::Result Scheduler::commence_block_current_task()
+Waitable::Result Scheduler::commence_block_current_thread()
 {
-   return current_task->commence_block();
+   return current_thread->commence_block();
 }
 
-void Scheduler::notify_block_current_task(std::span<Waitable* const> waitables) const
+void Scheduler::notify_block_current_thread(std::span<Waitable* const> waitables) const
 {
-   current_task->notify_block(waitables);
+   current_thread->notify_block(waitables);
 }
 
 void Scheduler::disable_preemption()
@@ -155,12 +155,12 @@ void Scheduler::enable_preemption()
 void Scheduler::reset()
 {
    CORTOS_ASSERT_OP(inbox.approx_size(), ==, 0); // Cannot reset whilst inbox is not empty
-   CORTOS_ASSERT(ready_matrix.empty()); // Cannot reset whilst tasks still in the queue
+   CORTOS_ASSERT(ready_matrix.empty()); // Cannot reset whilst threads still in the queue
 
-   pinned_task_counter.store(0, std::memory_order_relaxed);
+   pinned_thread_counter.store(0, std::memory_order_relaxed);
    inbox_poke_pending.store(false, std::memory_order_relaxed);
    preempt_disable_depth = 0;
-   current_task = nullptr;
+   current_thread = nullptr;
 }
 
 }  // namespace cortos

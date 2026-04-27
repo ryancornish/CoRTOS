@@ -159,11 +159,11 @@ struct CurrentCoreState
 {
    CpuCore* core{nullptr};
 
-   // Non-null when we are currently executing inside a task fiber.
+   // Non-null when we are currently executing inside a thread fiber.
    cortos_port_context* current_context{nullptr};
 
-   // The "caller" fiber for the currently running task on *this OS-thread*.
-   boost::context::fiber task_caller;
+   // The "caller" fiber for the currently running thread on *this OS-thread*.
+   boost::context::fiber thread_caller;
    // The outermost fiber that returns us back out of the scheduler fibers when they are finished.
    boost::context::fiber os_caller;
    // Simulates pointing to fibers dedicated TLS block.
@@ -268,7 +268,7 @@ extern "C" void cortos_port_context_init(cortos_port_context_t* context,
       stack_allocator,
       [context](boost::context::fiber&& caller) mutable -> boost::context::fiber
       {
-         current_core.task_caller     = std::move(caller);
+         current_core.thread_caller     = std::move(caller);
          current_core.current_context = context;
 
          try {
@@ -279,7 +279,7 @@ extern "C" void cortos_port_context_init(cortos_port_context_t* context,
          }
          current_core.current_context = nullptr;
 
-         return std::move(current_core.task_caller);
+         return std::move(current_core.thread_caller);
       }
    );
 }
@@ -309,12 +309,12 @@ extern "C" void cortos_port_start_first(cortos_port_context_t* first)
 
 extern "C" void cortos_port_pend_reschedule(void)
 {
-   // Only meaningful if we're currently inside a task fiber on this OS-thread.
+   // Only meaningful if we're currently inside a thread fiber on this OS-thread.
    if (!current_core.current_context) return;
 
-   // The outer fiber 'task_caller' is the scheduler fiber.
-   CORTOS_ASSERT(current_core.task_caller);
-   current_core.task_caller = std::move(current_core.task_caller).resume();
+   // The outer fiber 'thread_caller' is the scheduler fiber.
+   CORTOS_ASSERT(current_core.thread_caller);
+   current_core.thread_caller = std::move(current_core.thread_caller).resume();
 }
 
 extern "C" void cortos_port_thread_exit(void)
@@ -338,7 +338,7 @@ void CpuCore::start_scheduler()
       {
          current_core.os_caller = std::move(caller);
 
-         // Run kernel entry for this simulated core (will start first task etc.)
+         // Run kernel entry for this simulated core (will start first thread etc.)
          entry();
 
          // Cooperative pump until only idle threads remain (one idle thread per core).

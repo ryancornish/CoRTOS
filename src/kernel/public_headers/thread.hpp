@@ -36,8 +36,8 @@ inline constexpr CoreAffinity AnyCore = CoreAffinity{0xFFFFFFFF};
 /**
  * @brief Joinable CoRTOS thread handle.
  *
- * Owns a running kernel task. The task's TCB is constructed inside the user-provided
- * stack buffer, so both the @c Thread object and the stack buffer must outlive the task.
+ * Owns a running kernel thread. The thread's TCB is constructed inside the user-provided
+ * stack buffer, so both the @c Thread object and the stack buffer must outlive the thread.
  *
  * The destructor asserts the thread is terminated (i.e. no implicit detach).
  */
@@ -98,7 +98,7 @@ public:
    static std::size_t reserved_stack_size();
 
 private:
-   struct TaskControlBlock* tcb{nullptr};
+   struct ThreadControlBlock* tcb{nullptr};
 };
 
 namespace this_thread

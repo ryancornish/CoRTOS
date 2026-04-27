@@ -157,7 +157,7 @@ protected:
    void for_each_waiter(WaiterVisitor visitor) const;
 
 private:
-   friend struct TaskControlBlock;
+   friend struct ThreadControlBlock;
    friend struct WaitableGroupLock;
 
    struct WaitNode* head{nullptr};

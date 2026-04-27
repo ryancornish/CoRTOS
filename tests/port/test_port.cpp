@@ -74,13 +74,13 @@ struct PortHarness
       if (!next) return;
 
       // In these unit tests we always resume threads from the test's OS fiber.
-      // That means the "caller" captured by Boost for each task is the test thread,
+      // That means the "caller" captured by Boost for each thread is the test thread,
       // and cortos_port_pend_reschedule() returns control back here.
       if (!current) {
          current = next;
          cortos_port_start_first(next);
-         // When the task yields/exits, we return here.
-         // `current` is only "best effort" bookkeeping; the task may have exited.
+         // When the thread yields/exits, we return here.
+         // `current` is only "best effort" bookkeeping; the thread may have exited.
          current = nullptr;
          return;
       }
@@ -91,7 +91,7 @@ struct PortHarness
       current = nullptr;
    }
 
-   // Drive until no ready tasks remain (or step limit hit).
+   // Drive until no ready threads remain (or step limit hit).
    void run_until_quiescent(std::size_t step_limit = 10'000)
    {
       for (std::size_t i = 0; i < step_limit; ++i) {
@@ -109,21 +109,21 @@ struct PortHarness
    }
 };
 
-struct TaskArg
+struct ThreadArg
 {
    PortHarness* harness{};
    cortos_port_context_t* ctx{};
    std::atomic<int>* stage_counter{};
    int stages{};
-   int task_id{};
+   int thread_id{};
    std::array<int, 64>* trace{};
    std::atomic<int>* trace_len{};
 };
 
-// A task that records its "task_id" into trace, yields `stages` times, then returns.
-static void task_yield_n(void* varg)
+// A thread that records its "thread_id" into trace, yields `stages` times, then returns.
+static void thread_yield_n(void* varg)
 {
-   auto* a = static_cast<TaskArg*>(varg);
+   auto* a = static_cast<ThreadArg*>(varg);
    ASSERT_NE(a, nullptr);
    ASSERT_NE(a->harness, nullptr);
    ASSERT_NE(a->ctx, nullptr);
@@ -132,7 +132,7 @@ static void task_yield_n(void* varg)
       // Record progress
       int idx = a->trace_len->fetch_add(1, std::memory_order_acq_rel);
       ASSERT_LT(idx, static_cast<int>(a->trace->size()));
-      (*a->trace)[static_cast<std::size_t>(idx)] = a->task_id;
+      (*a->trace)[static_cast<std::size_t>(idx)] = a->thread_id;
 
       a->stage_counter->fetch_add(1, std::memory_order_acq_rel);
 
@@ -144,8 +144,8 @@ static void task_yield_n(void* varg)
    // Return = thread exits; port test harness regains control.
 }
 
-// A task that runs once and returns (no yield).
-static void task_run_once(void* varg)
+// A thread that runs once and returns (no yield).
+static void thread_run_once(void* varg)
 {
    auto* ran = static_cast<std::atomic<bool>*>(varg);
    ASSERT_NE(ran, nullptr);
@@ -228,7 +228,7 @@ TEST_F(PortTest, GivenGetCoreId_WhenNotStartedCores_ThenIsZero)
    EXPECT_EQ(cortos_port_get_core_id(), 0u);
 }
 
-TEST_F(PortTest, GivenSingleTask_WhenStartFirst_ThenTaskRunsAndReturnsToCaller)
+TEST_F(PortTest, GivenSingleThread_WhenStartFirst_ThenThreadRunsAndReturnsToCaller)
 {
    alignas(CORTOS_PORT_STACK_ALIGN) static std::array<std::byte, 16 * 1024> stack{};
    alignas(CORTOS_PORT_CONTEXT_ALIGN) static std::array<std::byte, CORTOS_PORT_CONTEXT_SIZE> ctx_storage{};
@@ -241,7 +241,7 @@ TEST_F(PortTest, GivenSingleTask_WhenStartFirst_ThenTaskRunsAndReturnsToCaller)
       ctx,
       stack.data(),
       stack.size(),
-      &task_run_once,
+      &thread_run_once,
       &ran
    );
 
@@ -251,12 +251,12 @@ TEST_F(PortTest, GivenSingleTask_WhenStartFirst_ThenTaskRunsAndReturnsToCaller)
 
    EXPECT_TRUE(ran.load(std::memory_order_acquire));
 
-   // Task should have completed and returned control to us.
+   // Thread should have completed and returned control to us.
    // (The port's context_destroy is owned by the kernel normally, but port-level test can still destroy.)
    cortos_port_context_destroy(ctx);
 }
 
-TEST_F(PortTest, GivenTwoTasks_WhenTheyYieldAndReenqueue_ThenTheyInterleaveInFIFOOrder)
+TEST_F(PortTest, GivenTwoThreads_WhenTheyYieldAndReenqueue_ThenTheyInterleaveInFIFOOrder)
 {
    alignas(CORTOS_PORT_STACK_ALIGN) static std::array<std::byte, 16 * 1024> s0{};
    alignas(CORTOS_PORT_STACK_ALIGN) static std::array<std::byte, 16 * 1024> s1{};
@@ -272,34 +272,34 @@ TEST_F(PortTest, GivenTwoTasks_WhenTheyYieldAndReenqueue_ThenTheyInterleaveInFIF
    std::array<int, 64> trace{};
    trace.fill(-1);
 
-   TaskArg a0{
+   ThreadArg a0{
       .harness = &port_harness,
       .ctx = c0,
       .stage_counter = &stages_done,
       .stages = 3,
-      .task_id = 0,
+      .thread_id = 0,
       .trace = &trace,
       .trace_len = &trace_len,
    };
 
-   TaskArg a1{
+   ThreadArg a1{
       .harness = &port_harness,
       .ctx = c1,
       .stage_counter = &stages_done,
       .stages = 3,
-      .task_id = 1,
+      .thread_id = 1,
       .trace = &trace,
       .trace_len = &trace_len,
    };
 
-   cortos_port_context_init(c0, s0.data(), s0.size(), &task_yield_n, &a0);
-   cortos_port_context_init(c1, s1.data(), s1.size(), &task_yield_n, &a1);
+   cortos_port_context_init(c0, s0.data(), s0.size(), &thread_yield_n, &a0);
+   cortos_port_context_init(c1, s1.data(), s1.size(), &thread_yield_n, &a1);
 
    // Enqueue in a known order
    port_harness.enqueue(c0);
    port_harness.enqueue(c1);
 
-   // Drive until both tasks finish all stages.
+   // Drive until both threads finish all stages.
    // Each stage yields and reenqueues itself, so the harness should alternate FIFO.
    port_harness.run_until_quiescent();
 

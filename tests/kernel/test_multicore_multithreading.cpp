@@ -202,7 +202,7 @@ TEST_F(MultiCoreMultiThread_Test,
 
    // GIVEN:
 
-   // Make Core1 have *no* initial tasks queued pre-start by creating the core1 work post-start.
+   // Make Core1 have *no* initial threads queued pre-start by creating the core1 work post-start.
    // Core1 will start in idle unless/until it receives inbox work + IPI.
    Thread core0(
       [&]{
@@ -220,7 +220,7 @@ TEST_F(MultiCoreMultiThread_Test,
             Core1
          );
 
-         // Yield to allow IPI -> idle wake -> inbox drain -> task run.
+         // Yield to allow IPI -> idle wake -> inbox drain -> thread run.
          for (int i = 0; i < 10; ++i) this_thread::yield();
       },
       s_core0,
