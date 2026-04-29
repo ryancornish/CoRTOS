@@ -3,7 +3,17 @@ extends = "gcc-base"
 
 [flags]
 common_add = ["-O2"]
+c_add = ["-ffunction-sections", "-fdata-sections", "-flto"]
+cxx_add = ["-ffunction-sections", "-fdata-sections", "-flto"]
 
 [settings]
 debug = false
 optimization = "2"
+use_modules = false
+
+[archive]
+strategy = "lto_pruned"
+exported_symbols_file = "exports/public_symbols.txt"
+gc_using_public_symbols = true
+filter_exported_symbols = true
+remove_lto_sections = false

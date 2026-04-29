@@ -1,0 +1,19 @@
+name = "linux_boost_sim"
+default_toolchain = "gcc-release"
+
+[layout]
+project_root = "../.."
+build_root = ".."
+source_root = "../../src"
+output_root = "../../out"
+
+[build]
+port = "linux_boost"
+time_driver = "simulation"
+config_header = "sim.hpp"
+
+[features]
+enable = []
+
+[output]
+archive = "libcortos.a"

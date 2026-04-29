@@ -7,3 +7,6 @@ common_add = ["-O0", "-g3"]
 [settings]
 debug = true
 optimization = "0"
+
+[archive]
+strategy = "simple"
