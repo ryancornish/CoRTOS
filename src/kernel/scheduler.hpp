@@ -25,6 +25,7 @@ struct CrossCoreRequest
 
 class Scheduler
 {
+private:
    std::uint32_t const core_id;
    std::atomic<uint32_t> pinned_thread_counter{0};
    ThreadControlBlock* current_thread{nullptr};
@@ -33,7 +34,7 @@ class Scheduler
 
    ThreadReadyMatrix ready_matrix;
 
-   uint32_t    preempt_disable_depth{0};
+   uint32_t preempt_disable_depth{0};
 
    std::atomic<bool> inbox_poke_pending{false};
    static constexpr uint32_t INBOX_CAP = 64; // tune later
@@ -42,7 +43,13 @@ class Scheduler
 public:
    static constexpr uint32_t IDLE_THREAD_ID = 0; // Reserved
 
-   constexpr explicit Scheduler(std::uint32_t core_id) : core_id(core_id) {};
+   constexpr explicit Scheduler(std::size_t core_id) : core_id(core_id) {};
+
+   ~Scheduler() = default;
+   Scheduler(Scheduler&&) = delete;
+   Scheduler(Scheduler const&) = delete;
+   Scheduler& operator=(Scheduler&&) = delete;
+   Scheduler& operator=(Scheduler const&) = delete;
 
    [[nodiscard]] constexpr uint32_t current_thread_id() const noexcept
    {

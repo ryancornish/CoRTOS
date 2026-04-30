@@ -14,6 +14,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <ranges>
 
 // Invariants list:
 // Only core X mutates Scheduler[X].ready_matrix, current_thread, blocked lists, etc.
@@ -31,6 +32,7 @@ static void core_entry();
 template<std::size_t CORES>
 class Kernel
 {
+private:
    Spinlock lock;
    std::array<Scheduler, CORES> schedulers;
    std::atomic<bool>    initialised{false};
@@ -39,16 +41,44 @@ class Kernel
    std::atomic<uint32_t> thread_id_generator{1};
 
 public:
+   // Compile-time construct the scheduler list with incrementing core id's.
    constexpr Kernel() noexcept : Kernel(std::make_index_sequence<CORES>{}) {}
 
-   [[nodiscard]] bool          is_running()         const noexcept { return running.load(std::memory_order_acquire); }
-   [[nodiscard]] std::uint32_t get_active_threads() const noexcept { return active_threads.load(std::memory_order_seq_cst); }
+   ~Kernel() = default;
+   Kernel(Kernel&&) = delete;
+   Kernel(Kernel const&) = delete;
+   Kernel& operator=(Kernel&&) = delete;
+   Kernel& operator=(Kernel const&) = delete;
 
-   [[nodiscard]] Scheduler& scheduler_for_core(std::uint32_t core_id) noexcept { return schedulers.at(core_id); }
-   [[nodiscard]] Scheduler& scheduler_for_this_core()                 noexcept { return scheduler_for_core(cortos_port_get_core_id()); }
-   [[nodiscard]] Scheduler& scheduler_for_time_core()                 noexcept { return scheduler_for_core(config::TIME_CORE_ID); }
+   [[nodiscard]] bool  is_running() const noexcept
+   {
+      return running.load(std::memory_order_acquire);
+   }
 
-   [[nodiscard]] std::uint32_t generate_thread_id() { return thread_id_generator.fetch_add(1, std::memory_order_relaxed); }
+   [[nodiscard]] std::uint32_t get_active_threads() const noexcept
+   {
+      return active_threads.load(std::memory_order_seq_cst);
+   }
+
+   [[nodiscard]] Scheduler& scheduler_for_core(std::uint32_t core_id) noexcept
+   {
+      return schedulers.at(core_id);
+   }
+
+   [[nodiscard]] Scheduler& scheduler_for_this_core() noexcept
+   {
+      return scheduler_for_core(cortos_port_get_core_id());
+   }
+
+   [[nodiscard]] Scheduler& scheduler_for_time_core() noexcept
+   {
+      return scheduler_for_core(config::TIME_CORE_ID);
+   }
+
+   [[nodiscard]] std::uint32_t generate_thread_id()
+   {
+      return thread_id_generator.fetch_add(1, std::memory_order_relaxed);
+   }
 
    void initialise() noexcept
    {
@@ -175,6 +205,7 @@ private:
 };
 static constinit Kernel<config::CORES> KERNEL;
 
+// Use this to examine how much memory the CoRTOS kernel uses.
 [[maybe_unused]] constexpr auto STATIC_SIZEOF_KERNEL = sizeof(KERNEL);
 
 /**** KERNEL-global dependants ****/
@@ -301,107 +332,110 @@ void Spinlock::unlock()
 
 namespace kernel
 {
-   void initialise()
+
+void initialise()
+{
+   KERNEL.initialise();
+}
+
+void start()
+{
+   KERNEL.start();
+}
+
+void finalise()
+{
+   KERNEL.finalise();
+}
+
+std::uint32_t core_count() noexcept
+{
+   return config::CORES;
+}
+
+std::uint32_t active_threads() noexcept
+{
+   return KERNEL.get_active_threads();
+}
+
+Waitable::Result wait_for_any(std::span<Waitable* const> waitables)
+{
+   CORTOS_ASSERT(waitables.size() > 0);
+   CORTOS_ASSERT_OP(waitables.size(), <=, config::MAX_WAIT_NODES);
+
+   auto& scheduler = KERNEL.scheduler_for_this_core();
    {
-      KERNEL.initialise();
+      WaitableGroupLock lock_group(waitables);
+
+      scheduler.prepare_block_current_thread(waitables);
+   }
+   scheduler.notify_block_current_thread(waitables);
+
+   auto result = scheduler.commence_block_current_thread();
+
+   return result;
+}
+
+Waitable::Result wait_until(Waitable::Predicate predicate, std::span<Waitable* const> waitables)
+{
+   CORTOS_ASSERT(waitables.size() > 0);
+   CORTOS_ASSERT_OP(waitables.size(), <=, config::MAX_WAIT_NODES);
+   for (auto* w : waitables) CORTOS_ASSERT(w != nullptr);
+
+   Waitable::Result result{.index = -1, .acquired = false};
+
+   // Fast-path: avoid locks
+   if (predicate()) {
+      return result;
    }
 
-   void start()
-   {
-      KERNEL.start();
-   }
+   auto& scheduler = KERNEL.scheduler_for_this_core();
 
-   void finalise()
-   {
-      KERNEL.finalise();
-   }
-
-   std::uint32_t core_count() noexcept
-   {
-      return config::CORES;
-   }
-
-   std::uint32_t active_threads() noexcept
-   {
-      return KERNEL.get_active_threads();
-   }
-
-   Waitable::Result wait_for_any(std::span<Waitable* const> waitables)
-   {
-      CORTOS_ASSERT(waitables.size() > 0);
-      CORTOS_ASSERT_OP(waitables.size(), <=, config::MAX_WAIT_NODES);
-
-      auto& scheduler = KERNEL.scheduler_for_this_core();
+   while (true) {
       {
          WaitableGroupLock lock_group(waitables);
+
+         if (predicate()) return result;
 
          scheduler.prepare_block_current_thread(waitables);
       }
       scheduler.notify_block_current_thread(waitables);
 
-      auto result = scheduler.commence_block_current_thread();
-
-      return result;
+      result = scheduler.commence_block_current_thread();
    }
-
-   Waitable::Result wait_until(Waitable::Predicate predicate, std::span<Waitable* const> waitables)
-   {
-      CORTOS_ASSERT(waitables.size() > 0);
-      CORTOS_ASSERT_OP(waitables.size(), <=, config::MAX_WAIT_NODES);
-      for (auto* w : waitables) CORTOS_ASSERT(w != nullptr);
-
-      Waitable::Result result{.index = -1, .acquired = false};
-
-      // Fast-path: avoid locks
-      if (predicate()) {
-         return result;
-      }
-
-      auto& scheduler = KERNEL.scheduler_for_this_core();
-
-      while (true) {
-         {
-            WaitableGroupLock lock_group(waitables);
-
-            if (predicate()) return result;
-
-            scheduler.prepare_block_current_thread(waitables);
-         }
-         scheduler.notify_block_current_thread(waitables);
-
-         result = scheduler.commence_block_current_thread();
-      }
-   }
+}
 
 } // namespace kernel
 
 namespace this_thread
 {
-   [[nodiscard]] Thread::Id id()
-   {
-      return KERNEL.scheduler_for_this_core().current_thread_id();
-   }
 
-   [[nodiscard]] Thread::Priority priority()
-   {
-      return KERNEL.scheduler_for_this_core().current_thread_priority();
-   }
+[[nodiscard]] Thread::Id id()
+{
+   return KERNEL.scheduler_for_this_core().current_thread_id();
+}
 
-   [[nodiscard]] std::uint32_t core_id() noexcept
-   {
-      return cortos_port_get_core_id();
-   }
+[[nodiscard]] Thread::Priority priority()
+{
+   return KERNEL.scheduler_for_this_core().current_thread_priority();
+}
 
-   [[noreturn]] void thread_exit()
-   {
-      // TODO
-      __builtin_unreachable();
-   }
+[[nodiscard]] std::uint32_t core_id() noexcept
+{
+   return cortos_port_get_core_id();
+}
 
-   void yield()
-   {
-      cortos_port_pend_reschedule();
-   }
+[[noreturn]] void thread_exit()
+{
+   // TODO
+   __builtin_unreachable();
+}
+
+void yield()
+{
+   cortos_port_pend_reschedule();
+}
+
 }  // namespace this_thread
 
 }  // namespace cortos
