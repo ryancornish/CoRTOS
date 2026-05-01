@@ -28,21 +28,22 @@ namespace cortos
 static void reschedule_this_core();
 static void core_entry();
 
-// Note: this is a template purely because it allows the compile-time index-sequence array initialiser for schedulers to work
-template<std::size_t CORES>
 class Kernel
 {
 private:
    Spinlock lock;
-   std::array<Scheduler, CORES> schedulers;
+   std::array<Scheduler, config::CORES> schedulers;
    std::atomic<bool>    initialised{false};
    std::atomic<bool>        running{false};
    std::atomic<uint32_t> active_threads{0};
    std::atomic<uint32_t> thread_id_generator{1};
 
+   template<std::size_t... Is>
+   constexpr explicit Kernel(std::index_sequence<Is...>) noexcept : schedulers{ Scheduler{Is}... } {}
+
 public:
    // Compile-time construct the scheduler list with incrementing core id's.
-   constexpr Kernel() noexcept : Kernel(std::make_index_sequence<CORES>{}) {}
+   constexpr Kernel() noexcept : Kernel(std::make_index_sequence<config::CORES>{}) {}
 
    ~Kernel() = default;
    Kernel(Kernel&&) = delete;
@@ -198,12 +199,8 @@ public:
       }
       return ReadyAction::None;
    }
-
-private:
-   template<std::size_t... Is>
-   constexpr explicit Kernel(std::index_sequence<Is...>) noexcept : schedulers{ Scheduler{Is}... } {}
 };
-static constinit Kernel<config::CORES> KERNEL;
+static constinit Kernel KERNEL;
 
 // Use this to examine how much memory the CoRTOS kernel uses.
 [[maybe_unused]] constexpr auto STATIC_SIZEOF_KERNEL = sizeof(KERNEL);

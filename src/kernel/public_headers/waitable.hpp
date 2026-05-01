@@ -158,7 +158,7 @@ protected:
 
 private:
    friend struct ThreadControlBlock;
-   friend struct WaitableGroupLock;
+   friend class  WaitableGroupLock;
 
    struct WaitNode* head{nullptr};
    struct WaitNode* tail{nullptr};
