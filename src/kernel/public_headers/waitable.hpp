@@ -126,7 +126,7 @@ protected:
     * Called before thread is added to wait queue.
     * @note no-op when not overridden
     */
-   virtual void on_thread_blocked(Waiter waiter) {}
+   virtual void on_thread_blocked(Waiter waiter) { (void)waiter; }
 
    /**
     * @brief Called when a thread is removed from wait queue
@@ -136,7 +136,7 @@ protected:
     * Called after thread is removed from wait queue.
     * @note no-op when not overridden
     */
-   virtual void on_thread_removed(Waiter waiter) {}
+   virtual void on_thread_removed(Waiter waiter) { (void)waiter; }
 
    using WaiterVisitor = Function<void(Waiter const&), 64, HeapPolicy::NoHeap>;
    /**

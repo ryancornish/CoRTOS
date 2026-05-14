@@ -213,6 +213,7 @@ extern "C" uint32_t cortos_port_irq_save(void)
 
 extern "C" void cortos_port_irq_restore(uint32_t state)
 {
+   (void)state;
    // Unwind one nesting level
    if (interrupt_disable_depth > 0) {
       interrupt_disable_depth--;
