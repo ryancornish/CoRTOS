@@ -1,5 +1,5 @@
 [profile]
-name = "linux_boost_sim"
+name = "linux_boost_sim_release"
 toolchain = "../toolchains/gcc-release.toml"
 config_header = "../configs/sim.hpp"
 

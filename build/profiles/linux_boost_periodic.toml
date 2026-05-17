@@ -1,16 +1,15 @@
+[profile]
 name = "linux_boost_periodic"
-default_toolchain = "gcc-debug"
+toolchain = "../toolchains/gcc-debug.toml"
+config_header = "../configs/sim.hpp"
 
 [layout]
-project_root = "../.."
-build_root = ".."
 source_root = "../../src"
 output_root = "../../out"
 
-[build]
+[components]
 port = "linux_boost"
 time_driver = "periodic"
-config_header = "sim.hpp"
 
 [features]
 enable = []
