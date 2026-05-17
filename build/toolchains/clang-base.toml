@@ -18,4 +18,3 @@ family = "clang"
 debug = false
 optimization = "0"
 warnings_as_errors = false
-use_modules = false

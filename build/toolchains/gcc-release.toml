@@ -1,18 +1,17 @@
 name = "gcc-release"
-extends = "gcc-base"
+extends = "gcc-base.toml"
 
 [flags]
 common_add = ["-O2"]
-c_add = ["-ffunction-sections", "-fdata-sections", "-flto"]
+c_add   = ["-ffunction-sections", "-fdata-sections", "-flto"]
 cxx_add = ["-ffunction-sections", "-fdata-sections", "-flto"]
 
 [settings]
 debug = false
 optimization = "2"
-use_modules = false
 
 [archive]
 strategy = "lto_merged"
-exported_symbols_file = "exports/public_symbols.txt"
+exported_symbols_file = "../exports/public_symbols.txt"
 filter_exported_symbols = true
 preserve_lto_sections = true

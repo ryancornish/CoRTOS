@@ -1,5 +1,5 @@
 name = "gcc-debug"
-extends = "gcc-base"
+extends = "gcc-base.toml"
 
 [flags]
 common_add = ["-O0", "-g3"]
