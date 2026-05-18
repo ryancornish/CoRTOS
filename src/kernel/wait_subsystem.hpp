@@ -59,7 +59,7 @@ struct WaitNode
 
    [[nodiscard]] constexpr bool is_enqueued() const noexcept
    {
-      return waitable != nullptr;
+      return next || prev;
    }
 
    /**
